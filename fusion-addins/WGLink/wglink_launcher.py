@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -18,9 +19,10 @@ else:
     import wglink_inbox
 
 
-# Two seconds for discovery, 69 for admission, three for graceful cancellation,
-# one for reaping after kill: at most 75 seconds of bounded waits.
+# Three seconds for discovery, 69 for admission, three for graceful cancellation,
+# one for reaping after kill: at most 76 seconds of bounded waits.
 ENSURE_TIMEOUT = 69.0
+DISCOVERY_TIMEOUT = 3.0
 
 
 class LauncherError(RuntimeError):
@@ -32,7 +34,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def launcher_argv(ipc: Path) -> list[str] | None:
+def launcher_argv(ipc: Path, *, strict: bool = False) -> list[str] | None:
     """Read only the additive, explicitly enabled installed-launcher field."""
 
     try:
@@ -45,11 +47,46 @@ def launcher_argv(ipc: Path) -> list[str] | None:
     if not isinstance(launcher, dict) or launcher.get("ensureBackend") is not True:
         return None
     argv = launcher.get("argv")
-    if (not isinstance(argv, list) or not argv
-            or not all(isinstance(item, str) and item and "\x00" not in item for item in argv)
-            or not Path(argv[0]).is_absolute()):
+    reason = _launcher_error(argv)
+    if reason is not None:
+        if strict:
+            raise LauncherError(f"Invalid WG installed launcher: {reason}. Start WG manually, then try again.")
         return None
     return list(argv)
+
+
+def _launcher_error(argv: object) -> str | None:
+    if not isinstance(argv, list) or len(argv) != 1:
+        return "argv must contain exactly one installed entry, without extra arguments"
+    if not isinstance(argv[0], str) or not argv[0] or "\x00" in argv[0]:
+        return "the installed entry must be a non-empty path"
+    entry = Path(argv[0])
+    if not entry.is_absolute():
+        return "the installed entry must be an absolute path"
+    if not entry.is_file():
+        return "the installed entry is missing or is not a regular file"
+    if sys.platform == "darwin":
+        contents = entry.parent.parent
+        if (entry.name != "Waveguide Generator" or entry.parent.name != "MacOS"
+                or contents.name != "Contents" or not contents.parent.name.endswith(".app")):
+            return "expected an .app/Contents/MacOS/Waveguide Generator entry"
+        app = contents / "Resources" / "app"
+    elif sys.platform == "win32":
+        if entry.name != "Waveguide Generator.exe":
+            return "expected the installed Waveguide Generator.exe entry"
+        app = entry.parent / "app"
+        try:
+            if (entry.parent / "Waveguide Generator.ensure-backend-v1").read_bytes() != b"WG_NATIVE_ENSURE_BACKEND_V1":
+                return "the native ensure-backend marker has invalid contents"
+        except OSError:
+            return "the native ensure-backend marker is missing or unreadable"
+    else:
+        if entry.name not in {"waveguide-generator", "launch-wg.sh"}:
+            return "expected the installed waveguide-generator or launch-wg.sh entry"
+        app = entry.parent / "app"
+    if not app.is_dir():
+        return "the installed entry's sibling app directory is missing"
+    return None
 
 
 def _same_folder(value: object, folder: Path) -> bool:
@@ -61,7 +98,41 @@ def _same_folder(value: object, folder: Path) -> bool:
         return False
 
 
-def collecting(ipc: Path, data_dir: Path) -> bool:
+def collecting(ipc: Path, data_dir: Path, cancelled: threading.Event | None = None,
+               *, timeout: float = DISCOVERY_TIMEOUT) -> bool:
+    """Bound all discovery, including a trickling response, by one deadline.
+
+    Network I/O runs on a daemon probe so cancellation can release admission
+    even while urllib is waiting for headers or a response body.
+    """
+
+    cancelled = cancelled if cancelled is not None else threading.Event()
+    if cancelled.is_set():
+        return False
+    deadline = time.monotonic() + min(timeout, DISCOVERY_TIMEOUT)
+    finished = threading.Event()
+    result = []
+
+    def probe() -> None:
+        try:
+            result.append(_collecting_probe(ipc, data_dir, cancelled, deadline))
+        except Exception:  # failed discovery cannot establish a current owner
+            result.append(False)
+        finally:
+            finished.set()
+
+    threading.Thread(target=probe, name="WGLinkOwnerProbe", daemon=True).start()
+    while not cancelled.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if finished.wait(min(0.05, remaining)):
+            return bool(result and result[0]) and not cancelled.is_set()
+    return False
+
+
+def _collecting_probe(ipc: Path, data_dir: Path, cancelled: threading.Event,
+                      deadline: float) -> bool:
     """Capabilities plus a current owner, never the age of a startup-only file.
 
     Mirrors WG's read-only owner discovery: locks/server.pid supplies pid/port;
@@ -82,7 +153,20 @@ def collecting(ipc: Path, data_dir: Path) -> bool:
         # Local admission must never pass through an inherited HTTP proxy.
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
         with opener.open(f"http://127.0.0.1:{port}/health", timeout=2.0) as response:
-            health = json.loads(response.read(65537).decode("utf-8"))
+            # read1 returns available bytes rather than waiting for the entire
+            # body, allowing a trickling peer to be stopped at the deadline.
+            read = getattr(response, "read1", response.read)
+            body = bytearray()
+            while not cancelled.is_set() and time.monotonic() < deadline:
+                chunk = read(65537 - len(body))
+                if not chunk:
+                    break
+                body.extend(chunk)
+                if len(body) > 65536:
+                    return False
+            if cancelled.is_set() or time.monotonic() >= deadline:
+                return False
+            health = json.loads(body.decode("utf-8"))
         return (isinstance(health, dict) and type(health.get("pid")) is int
                 and health["pid"] == pid and _same_folder(health.get("data_dir"), data_dir))
     except (OSError, ValueError):
@@ -123,6 +207,9 @@ def ensure_backend(argv: list[str], data_dir: Path, override: Path | None,
     command = list(argv) + ["--ensure-backend"]
     if cancelled.is_set():
         raise LauncherError("WG backend startup was cancelled.")
+    reason = _launcher_error(argv)
+    if reason is not None:
+        raise LauncherError(f"Invalid WG installed launcher: {reason}.")
     if override is not None:
         command += ["--data-dir", str(override)]
     kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
@@ -171,7 +258,7 @@ class BackendAdmission:
         self.thread: threading.Thread | None = None
 
     def request(self, ipc: Path, data_dir: Path, argv: list[str], override: Path | None,
-                callback: Callable, dispatch: Callable) -> None:
+                callback: Callable, dispatch: Callable, starting: Callable | None = None) -> None:
         with self._lock:
             if self._cancelled.is_set():
                 raise LauncherError("WGLink is stopping; start WG manually.")
@@ -182,24 +269,41 @@ class BackendAdmission:
                 return
             self._folder = data_dir.resolve()
             self._callbacks.append(callback)
+            pending = self._callbacks
 
         def work() -> None:
             error = None
             try:
-                if not collecting(ipc, data_dir):
+                if not collecting(ipc, data_dir, self._cancelled) and not self.cancelled:
+                    if starting is not None:
+                        def show_starting() -> None:
+                            with self._lock:
+                                if self._callbacks is not pending or not pending:
+                                    return
+                            if not self.cancelled:
+                                starting()
+                        dispatch(show_starting)
                     ensure_backend(argv, data_dir, override, self._cancelled)
             except Exception as exc:  # worker boundary: all failures reach the UI
                 error = str(exc)
 
             def deliver() -> None:
                 with self._lock:
+                    if self._callbacks is not pending:
+                        return
                     callbacks, self._callbacks = self._callbacks, []
-                if not self._cancelled.is_set():
-                    for done in callbacks:
-                        done(error)
+                for done in callbacks:
+                    if self.cancelled:
+                        break
+                    done(error)
 
-            if not self._cancelled.is_set():
-                dispatch(deliver)
+            try:
+                if not self.cancelled:
+                    dispatch(deliver)
+            except Exception:  # the event bridge may disappear during shutdown
+                with self._lock:
+                    if self._callbacks is pending:
+                        self._callbacks = []
 
         self.thread = threading.Thread(target=work, name="WGLinkBackendAdmission", daemon=True)
         try:
@@ -211,3 +315,9 @@ class BackendAdmission:
 
     def close(self) -> None:
         self._cancelled.set()
+        with self._lock:
+            self._callbacks.clear()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()

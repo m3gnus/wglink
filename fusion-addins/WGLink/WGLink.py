@@ -259,6 +259,7 @@ _followups: list[object] = []
 _followups_lock = threading.Lock()
 _timers: list[threading.Timer] = []
 _backend_admission = wglink_launcher.BackendAdmission()
+_backend_progress = None
 
 
 def _note_outcome(channel: str, request_id: str, outcome: str) -> None:
@@ -1557,7 +1558,7 @@ def _delivery_notice_text(notice: dict[str, object]) -> str:
     )
 
 
-def _show_export_progress(operation: str) -> object | None:
+def _show_export_progress(operation: str, message: str = "Surveying the assembly…") -> object | None:
     """Open Fusion's modeless progress surface for the slow return path."""
 
     ui = _ui()
@@ -1570,7 +1571,7 @@ def _show_export_progress(operation: str) -> object | None:
         dialog.isBackgroundTranslucent = False
         dialog.show(
             "Solve in WG" if operation == "solve" else "Send to WG",
-            "Surveying the assembly…",
+            message,
             0,
             3,
             0,
@@ -1628,7 +1629,8 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         with wglink_activity.because(wglink_activity.command_cause(self.operation)):
             self._execute(args)
 
-    def _execute(self, args: object, *, send_options: dict[str, object] | None = None) -> None:
+    def _execute(self, args: object, *, send_options: dict[str, object] | None = None,
+                 admission: wglink_launcher.BackendAdmission | None = None) -> None:
         global _command_busy
         progress = None
         # Whether this command got as far as producing a report. A user who
@@ -1640,6 +1642,8 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         _command_busy = True
         try:
             adsk.doEvents()
+            if admission is not None and admission.cancelled:
+                return
             if self.operation in {"send", "solve"} and send_options is None:
                 if self._admit_backend(args):
                     return
@@ -1664,6 +1668,8 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 _update_export_progress(
                     progress, 1, "Exporting STEP and validating the return bundle…"
                 )
+                if admission is not None and admission.cancelled:
+                    return
                 report = wglink_send.send(
                     _app(),
                     send_options if send_options is not None else _send_options(inputs),
@@ -1683,6 +1689,8 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                     if solve
                     else "Return written. Handing it to Waveguide Generator…",
                 )
+                if admission is not None and admission.cancelled:
+                    return
                 report = dict(report)
                 report["request_id"] = _submit_to_wg(
                     report,
@@ -1745,7 +1753,10 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         """
 
         ipc = wglink_workspace.ipc_folder()
-        argv = wglink_launcher.launcher_argv(ipc) if ipc is not None else None
+        try:
+            argv = wglink_launcher.launcher_argv(ipc, strict=True) if ipc is not None else None
+        except wglink_launcher.LauncherError as exc:
+            raise wglink_core.WgLinkError(str(exc)) from exc
         if argv is None:
             return False
         try:
@@ -1763,8 +1774,21 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         # IPC comes exclusively from workspace.data_dir(), not the CAD workspace.
         data_dir = ipc.parent.parent
         override = wglink_workspace.launcher_data_dir()
+        admission = _backend_admission
+
+        def starting() -> None:
+            global _backend_progress
+            if not admission.cancelled and _backend_progress is None:
+                _backend_progress = _show_export_progress(self.operation, "Starting Waveguide Generator…")
+                if _backend_progress is None:
+                    _log("Starting Waveguide Generator…")
 
         def resume(error: str | None) -> None:
+            global _backend_progress
+            _hide_export_progress(_backend_progress)
+            _backend_progress = None
+            if admission.cancelled:
+                return
             if error is not None:
                 _modal(f"Could not start Waveguide Generator. Start WG manually, then try again.\n\n{error}", "WGLink refused")
                 return
@@ -1779,8 +1803,10 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             except wglink_core.WgLinkError as exc:
                 _modal(str(exc), "WGLink refused")
                 return
-            self._execute(None, send_options=options)
+            if not admission.cancelled:
+                self._execute(None, send_options=options, admission=admission)
 
+        starting = wglink_activity.carrying(starting)
         resume = wglink_activity.carrying(resume)
         event = _followup_event
 
@@ -1791,10 +1817,17 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 if _followup_event is not event:
                     return
                 _followups.append(job)
-            app.fireCustomEvent(FOLLOWUP_EVENT_ID)
+            try:
+                if app.fireCustomEvent(FOLLOWUP_EVENT_ID) is False:
+                    raise RuntimeError("WGLink's main-thread event could not be fired.")
+            except Exception:
+                with _followups_lock:
+                    if job in _followups:
+                        _followups.remove(job)
+                raise
 
         try:
-            _backend_admission.request(ipc, data_dir, argv, override, resume, dispatch)
+            admission.request(ipc, data_dir, argv, override, resume, dispatch, starting)
         except wglink_launcher.LauncherError as exc:
             raise wglink_core.WgLinkError(str(exc)) from exc
         return True
@@ -3960,8 +3993,10 @@ def _start_followups(app: object) -> bool:
 
 
 def _stop_followups(app: object) -> None:
-    global _followup_event, _followup_handler
+    global _followup_event, _followup_handler, _backend_progress
     _backend_admission.close()
+    _hide_export_progress(_backend_progress)
+    _backend_progress = None
     if _followup_event is not None and _followup_handler is not None:
         try:
             _followup_event.remove(_followup_handler)

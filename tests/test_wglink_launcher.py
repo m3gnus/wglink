@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import types
 import threading
+import time
 
 import pytest
 
@@ -23,11 +24,32 @@ def _success(root):
             "data_dir": str(root), "version": "test", "commit": "test", "extra": "ignored"}
 
 
+def _installed_entry(tmp_path, platform=None, basename=None):
+    platform = sys.platform if platform is None else platform
+    if platform == "darwin":
+        contents = tmp_path / "WG.app" / "Contents"
+        (contents / "Resources" / "app").mkdir(parents=True, exist_ok=True)
+        folder = contents / "MacOS"
+        name = "Waveguide Generator"
+    else:
+        folder = tmp_path / "installed"
+        (folder / "app").mkdir(parents=True, exist_ok=True)
+        name = "Waveguide Generator.exe" if platform == "win32" else "waveguide-generator"
+        if platform == "win32":
+            (folder / "Waveguide Generator.ensure-backend-v1").write_bytes(b"WG_NATIVE_ENSURE_BACKEND_V1")
+    folder.mkdir(parents=True, exist_ok=True)
+    entry = folder / (basename or name)
+    entry.touch()
+    return entry
+
+
 def _script(tmp_path, body):
-    script = tmp_path / "fake launcher.py"
+    if os.name == "nt":
+        pytest.skip("real subprocess fixtures require a native Windows installed launcher")
+    script = _installed_entry(tmp_path)
     script.write_text("#!" + sys.executable + "\nimport json, sys, time, os\nfrom pathlib import Path\n" + body)
     script.chmod(0o755)
-    return [sys.executable, str(script)] if os.name == "nt" else [str(script)]
+    return [str(script)]
 
 
 def _advertise_launcher(fixture, argv):
@@ -207,6 +229,8 @@ def _owner_health(monkeypatch, launcher, root, *, pid=42, reported_root=None):
     calls = []
 
     class Response:
+        read_once = False
+
         def __enter__(self):
             return self
 
@@ -214,7 +238,10 @@ def _owner_health(monkeypatch, launcher, root, *, pid=42, reported_root=None):
             pass
 
         def read(self, size):
-            assert size == 65537
+            assert 0 < size <= 65537
+            if self.read_once:
+                return b""
+            self.read_once = True
             return health
 
     def open_health(url, timeout):
@@ -320,13 +347,14 @@ def test_stop_cancels_pending_start_and_drops_continuation(monkeypatch, tmp_path
     assert fixture.module._followups == []
 
 
-def test_missing_installed_entry_is_a_visible_spawn_failure(monkeypatch, tmp_path):
+def test_missing_installed_entry_is_a_visible_validation_failure(monkeypatch, tmp_path):
     fixture = _checked_fixture(monkeypatch, tmp_path, "WGLink_start_missing_entry")
     _advertise_launcher(fixture, [str(tmp_path / "missing installed launcher")])
+    monkeypatch.setattr(fixture.module.wglink_launcher.subprocess, "Popen", lambda *a, **k: pytest.fail("spawn"))
     _run(fixture.module, "send")
-    _finish(fixture)
     assert fixture.exports == [] and _inbox(fixture.ipc) == []
-    assert "Could not run WG's installed launcher" in fixture.ui.messages[-1][1]
+    assert fixture.module._backend_admission.thread is None
+    assert "missing or is not a regular file" in fixture.ui.messages[-1][1]
     assert "Start WG manually" in fixture.ui.messages[-1][1]
 
 
@@ -417,3 +445,293 @@ def test_launcher_timeout_leaves_foreign_process_alive(monkeypatch, tmp_path):
     finally:
         foreign.terminate()
         foreign.wait(timeout=5)
+
+
+@pytest.mark.parametrize("operation", ["send", "solve"])
+@pytest.mark.parametrize("invalid,reason", [
+    ("shell", "exactly one"), ("extra", "exactly one"),
+    ("basename", "expected"), ("relative", "absolute"),
+    ("directory", "regular file"), ("app", "app directory"),
+])
+def test_invalid_advertised_launcher_refuses_before_export_or_spawn(monkeypatch, tmp_path, operation, invalid, reason):
+    fixture = _checked_fixture(monkeypatch, tmp_path, "WGLink_invalid_entry")
+    entry = _installed_entry(tmp_path)
+    argv = [str(entry)]
+    if invalid == "shell":
+        argv = ["/bin/sh", "-c", "exit 0"]
+    elif invalid == "extra":
+        argv.append("extra")
+    elif invalid == "basename":
+        wrong = entry.with_name("wrong-entry")
+        entry.rename(wrong)
+        argv = [str(wrong)]
+    elif invalid == "relative":
+        argv = [entry.name]
+    elif invalid == "directory":
+        entry.unlink()
+        entry.mkdir()
+    elif invalid == "app":
+        app = entry.parent.parent / "Resources" / "app" if sys.platform == "darwin" else entry.parent / "app"
+        app.rmdir()
+    _advertise_launcher(fixture, argv)
+    monkeypatch.setattr(fixture.module.wglink_launcher.subprocess, "Popen", lambda *a, **k: pytest.fail("spawn"))
+    _run(fixture.module, operation)
+    assert fixture.exports == [] and _inbox(fixture.ipc) == []
+    assert fixture.module._backend_admission.thread is None
+    assert "Invalid WG installed launcher" in fixture.ui.messages[-1][1]
+    assert reason in fixture.ui.messages[-1][1]
+    assert wglink_launcher.launcher_argv(fixture.ipc) is None
+
+
+@pytest.mark.parametrize("platform,basename", [
+    ("darwin", None), ("win32", None), ("linux", "waveguide-generator"), ("linux", "launch-wg.sh"),
+])
+def test_installed_layout_validation(monkeypatch, tmp_path, platform, basename):
+    entry = _installed_entry(tmp_path, platform, basename)
+    monkeypatch.setattr(wglink_launcher.sys, "platform", platform)
+    (tmp_path / "wg-capabilities.json").write_text(json.dumps({
+        "schemaVersion": 1, "launcher": {"argv": [str(entry)], "ensureBackend": True}}))
+    assert wglink_launcher.launcher_argv(tmp_path, strict=True) == [str(entry)]
+
+
+def test_macos_entry_requires_app_bundle_shape(monkeypatch, tmp_path):
+    entry = _installed_entry(tmp_path, "darwin")
+    bundle = tmp_path / "WG.app"
+    bundle.rename(tmp_path / "WG")
+    entry = tmp_path / "WG" / entry.relative_to(bundle)
+    monkeypatch.setattr(wglink_launcher.sys, "platform", "darwin")
+    assert ".app/Contents/MacOS" in wglink_launcher._launcher_error([str(entry)])
+
+
+def test_spawn_boundary_revalidates_installed_entry(monkeypatch, tmp_path):
+    entry = _installed_entry(tmp_path)
+    entry.unlink()
+    monkeypatch.setattr(wglink_launcher.subprocess, "Popen", lambda *a, **k: pytest.fail("spawn"))
+    with pytest.raises(wglink_launcher.LauncherError, match="missing or is not a regular file"):
+        wglink_launcher.ensure_backend([str(entry)], tmp_path, None, threading.Event())
+
+
+@pytest.mark.parametrize("marker", [None, b"wrong", b"WG_NATIVE_ENSURE_BACKEND_V1\n"])
+def test_windows_marker_is_required_exactly(monkeypatch, tmp_path, marker):
+    entry = _installed_entry(tmp_path, "win32")
+    path = entry.parent / "Waveguide Generator.ensure-backend-v1"
+    if marker is None:
+        path.unlink()
+    else:
+        path.write_bytes(marker)
+    monkeypatch.setattr(wglink_launcher.sys, "platform", "win32")
+    assert "marker" in wglink_launcher._launcher_error([str(entry)])
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_blocked_discovery_releases_admission_on_deadline_or_close(monkeypatch, tmp_path, cancel):
+    entered, release = threading.Event(), threading.Event()
+    launched = []
+
+    def probe(*args):
+        entered.set()
+        release.wait(5)
+        return False
+
+    monkeypatch.setattr(wglink_launcher, "_collecting_probe", probe)
+    monkeypatch.setattr(wglink_launcher, "DISCOVERY_TIMEOUT", 0.1)
+    monkeypatch.setattr(wglink_launcher, "ensure_backend", lambda *a: launched.append(True))
+    admission = wglink_launcher.BackendAdmission()
+    delivered = []
+    admission.request(tmp_path, tmp_path, [], None, delivered.append, lambda job: job())
+    try:
+        assert entered.wait(1)
+        if cancel:
+            admission.close()
+        admission.thread.join(timeout=0.5)
+        assert not admission.thread.is_alive()
+        assert launched == ([] if cancel else [True])
+        assert delivered == ([] if cancel else [None])
+    finally:
+        release.set()
+        admission.close()
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_trickling_health_has_overall_deadline_and_cancellation(monkeypatch, tmp_path, cancel):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    entered, stop = threading.Event(), threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "10000")
+            self.end_headers()
+            entered.set()
+            try:
+                while not stop.is_set():
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+                    stop.wait(0.05)
+            except OSError:
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    ipc = tmp_path / "ipc" / "wglink"
+    ipc.mkdir(parents=True)
+    (ipc / "wg-capabilities.json").write_text(json.dumps({
+        "schemaVersion": 1, "solveCommandDelivery": 4, "fusionRequestDelivery": 3}))
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    (locks / "server.pid").write_text(json.dumps({"pid": 42, "port": server.server_port}))
+    launched, delivered = [], []
+    monkeypatch.setattr(wglink_launcher, "ensure_backend", lambda *a: launched.append(True))
+    admission = wglink_launcher.BackendAdmission()
+    began = time.monotonic()
+    try:
+        admission.request(ipc, tmp_path, [], None, delivered.append, lambda job: job())
+        assert entered.wait(1)
+        if cancel:
+            admission.close()
+            admission.thread.join(timeout=0.5)
+        else:
+            admission.thread.join(timeout=wglink_launcher.DISCOVERY_TIMEOUT + 0.8)
+        assert not admission.thread.is_alive()
+        assert time.monotonic() - began < (1.5 if cancel else wglink_launcher.DISCOVERY_TIMEOUT + 0.8)
+        assert launched == ([] if cancel else [True])
+        assert delivered == ([] if cancel else [None])
+    finally:
+        admission.close()
+        stop.set()
+        server.shutdown()
+        server.server_close()
+        serving.join(timeout=1)
+
+
+def test_close_during_first_joined_continuation_skips_second(monkeypatch, tmp_path):
+    fixture = _checked_fixture(monkeypatch, tmp_path, "WGLink_close_joined")
+    _advertise_launcher(fixture, [_installed_entry(tmp_path).as_posix()])
+    monkeypatch.setattr(fixture.module.wglink_launcher, "collecting", lambda *a: True)
+    _run(fixture.module, "send")
+    fixture.module._backend_admission.thread.join(timeout=1)
+    _run(fixture.module, "solve")
+    real_send = fixture.module.wglink_send.send
+
+    def send(*args, **kwargs):
+        report = real_send(*args, **kwargs)
+        fixture.module._backend_admission.close()
+        return report
+
+    monkeypatch.setattr(fixture.module.wglink_send, "send", send)
+    _finish(fixture)
+    assert len(fixture.exports) == 1
+    assert _inbox(fixture.ipc) == []
+
+
+@pytest.mark.parametrize("pump", [1, 2, 3])
+def test_close_during_resume_event_pumping_prevents_export_or_submit(monkeypatch, tmp_path, pump):
+    fixture = _checked_fixture(monkeypatch, tmp_path, "WGLink_close_pump")
+    _advertise_launcher(fixture, [_installed_entry(tmp_path).as_posix()])
+    monkeypatch.setattr(fixture.module.wglink_launcher, "collecting", lambda *a: True)
+    _run(fixture.module, "solve")
+    calls = []
+
+    def do_events():
+        calls.append(True)
+        if len(calls) == pump:
+            fixture.module._backend_admission.close()
+
+    monkeypatch.setattr(fixture.module.adsk, "doEvents", do_events)
+    _finish(fixture)
+    assert len(fixture.exports) == (1 if pump == 3 else 0)
+    assert _inbox(fixture.ipc) == []
+
+
+def test_dispatch_exception_settles_callbacks_and_next_press_starts_worker(monkeypatch, tmp_path):
+    monkeypatch.setattr(wglink_launcher, "collecting", lambda *a: True)
+    admission = wglink_launcher.BackendAdmission()
+    done = []
+
+    def failed(job):
+        raise RuntimeError("event bridge unavailable")
+
+    admission.request(tmp_path, tmp_path, [], None, done.append, failed)
+    first = admission.thread
+    first.join(timeout=1)
+    assert not first.is_alive() and admission._callbacks == [] and done == []
+    admission.request(tmp_path, tmp_path, [], None, done.append, lambda job: job())
+    admission.thread.join(timeout=1)
+    assert admission.thread is not first and done == [None]
+
+
+def test_failed_completion_dispatch_drops_queued_start_status(monkeypatch, tmp_path):
+    monkeypatch.setattr(wglink_launcher, "collecting", lambda *a: False)
+    monkeypatch.setattr(wglink_launcher, "ensure_backend", lambda *a: None)
+    admission = wglink_launcher.BackendAdmission()
+    queued, shown = [], []
+
+    def dispatch(job):
+        if queued:
+            raise RuntimeError("event bridge failed")
+        queued.append(job)
+
+    admission.request(tmp_path, tmp_path, [], None, lambda error: pytest.fail("continuation"),
+                      dispatch, lambda: shown.append(True))
+    admission.thread.join(timeout=1)
+    assert not admission.thread.is_alive() and admission._callbacks == []
+    queued[0]()
+    assert shown == []
+
+
+def test_launch_status_is_modeless_and_only_shown_on_main_event(monkeypatch, tmp_path):
+    fixture = _checked_fixture(monkeypatch, tmp_path, "WGLink_start_status")
+    _advertise_launcher(fixture, [str(_installed_entry(tmp_path))])
+    launcher = fixture.module.wglink_launcher
+    monkeypatch.setattr(launcher, "collecting", lambda *a: False)
+    monkeypatch.setattr(launcher, "ensure_backend", lambda *a: None)
+    main = threading.get_ident()
+    real_factory = fixture.ui.createProgressDialog
+
+    def factory():
+        assert threading.get_ident() == main
+        return real_factory()
+
+    monkeypatch.setattr(fixture.ui, "createProgressDialog", factory)
+    _run(fixture.module, "send")
+    fixture.module._backend_admission.thread.join(timeout=1)
+    assert fixture.ui.progress_dialogs == [] and fixture.ui.messages == []
+    _finish(fixture)
+    dialog = fixture.ui.progress_dialogs[0]
+    assert dialog.events[0][0] == "show"
+    assert dialog.events[0][2] == "Starting Waveguide Generator…"
+    assert dialog.isCancelButtonShown is False
+    assert dialog.events[-1][0] == "hide"
+
+
+def test_stop_hides_pending_launch_status(monkeypatch, tmp_path):
+    fixture = _checked_fixture(monkeypatch, tmp_path, "WGLink_stop_status")
+    _advertise_launcher(fixture, [str(_installed_entry(tmp_path))])
+    launcher = fixture.module.wglink_launcher
+    entered = threading.Event()
+    monkeypatch.setattr(launcher, "collecting", lambda *a: False)
+
+    def ensure(argv, data_dir, override, cancelled):
+        entered.set()
+        cancelled.wait(2)
+
+    monkeypatch.setattr(launcher, "ensure_backend", ensure)
+    _run(fixture.module, "send")
+    try:
+        assert entered.wait(1)
+        fixture.module.FollowupEventHandler().notify(None)
+        dialog = fixture.ui.progress_dialogs[0]
+        assert dialog.events[0][2] == "Starting Waveguide Generator…"
+        fixture.module._stop_followups(fixture.app)
+        fixture.module._backend_admission.thread.join(timeout=1)
+        assert not fixture.module._backend_admission.thread.is_alive()
+        assert dialog.events[-1][0] == "hide"
+        assert fixture.exports == [] and _inbox(fixture.ipc) == []
+    finally:
+        fixture.module._backend_admission.close()
