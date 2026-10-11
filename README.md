@@ -1,4 +1,4 @@
-# hornlab-fusion-addin
+# WGLink
 
 WGLink is the maintained Fusion add-in for sending Fusion geometry to Waveguide Generator (WG), solving it there, and inserting or updating native WG geometry in Fusion. The add-in lives in `fusion-addins/WGLink/`. WG's platform installers package WGLink for macOS and Windows.
 
@@ -17,7 +17,6 @@ Send and Solve can start an installed WG backend through its advertised launcher
 - [Naming a WGLink link](docs/WGLINK-LINK-NAMING.md)
 - [Validating a WGLink change without a release](docs/WGLINK-DEV-LOOP.md)
 - [Headless workflow status](docs/HEADLESS.md)
-- [Retired pipeline guide](docs/WGMETAL-PIPELINE-GUIDE.md)
 
 WGLink's Send and Solve dialogs use an automatic model domain; there is no manual Model dropdown. With a current WG, explicit exports also record surviving Fusion origin-plane cut history and the Y-up/Z-up modelling orientation. Send/Solve also require WG to advertise those manifest capabilities before a return is exported.
 

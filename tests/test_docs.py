@@ -30,7 +30,7 @@ def test_wglink_install_docs_reference_current_installer():
 
 
 def test_pipeline_guides_do_not_offer_removed_commands():
-    for rel_path in ("docs/HEADLESS.md", "docs/WGMETAL-PIPELINE-GUIDE.md"):
+    for rel_path in ("docs/HEADLESS.md",):
         text = (ROOT / rel_path).read_text(encoding="utf-8")
         assert "python scripts/" not in text
         assert "WGLink" in text
