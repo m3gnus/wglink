@@ -300,7 +300,53 @@ back onto the assembly origin by editing or deleting the joint or Move feature
 that placed it. (Fusion's **Ground** is not one of them: it freezes an
 occurrence where it already is and never moves it back to the origin.)
 
-## 7. Troubleshooting
+## 7. FEM regions for coupled FEM/BEM solves
+
+A WG that advertises `femRegions` can solve bounded air (a rear chamber, a
+port, a phase plug, a compression-driver cavity) with tetrahedral FEM and
+couple it to the BEM exterior, the way Boundary Lab does. Model each air
+volume as **one closed solid body**, then run **Manage WG Link… > Declare FEM
+Region…** on it:
+
+1. Select the air body. A body declared before reloads its settings and faces.
+2. Name the region, and set its mesh size and bulk loss factor (0 is lossless
+   air; Boundary Lab's presets 0.002 to 0.05 add damping).
+3. **Add group** for every face set that is not a plain wall, and give each a
+   name, a kind, a local mesh size and its faces:
+   - **Driver diaphragm (moving)** with a drive role (LF, MF or HF). It joins
+     the same drive channel as a painted source of that role.
+   - **Interface to exterior air** for each opening where the chamber meets
+     the exterior: a port exit, a horn throat. WG makes the exterior mesh
+     conform to it.
+   - **Plane-wave termination** for an anechoic tube end.
+   - **Rigid wall (local size)** for a wall that needs a finer mesh.
+
+   Every face in no group is a rigid wall at the region size. OK stays
+   disabled, with the reason shown, until the declaration is complete: one
+   group per face, faces of the selected body only, unique names, and a drive
+   role for each diaphragm.
+4. **Hide the air body** before Send or Solve. Fusion exports by visibility, so
+   a visible air body would also be sent as exterior geometry; WGLink refuses
+   that by name and exports each region separately.
+
+The declaration lives on the body and on each face as WGLink attributes, so it
+follows the faces through later edits. A group whose faces all disappeared
+(a face rebuilt by an edit) refuses the Send rather than silently becoming a
+wall: reopen the dialog and reselect its faces. A diaphragm in a FEM region
+drives the return on its own, so a compression driver needs no painted source.
+
+Pre-flight lists each region as, for example, **FEM region: Rear chamber
+(8 mm; 1 interface, 1 moving)**. The return carries `fem-regions/<id>.step`
+per region and `scope.fem_regions` under the `fem-regions-v1` feature. Faces
+travel as area, centroid, normal and bounding box in millimetres; WG matches
+them to the meshed surfaces and keeps ownership of every mesh tag. Against a WG
+without `femRegions`, a design that declares regions is refused, and one that
+declares none sends exactly as before.
+
+FEM regions are sent in the root frame only: leave Assembly scope empty, or
+select an occurrence placed at the assembly origin.
+
+## 8. Troubleshooting
 
 - **"Why is this link called something I never typed?"** — it is WG's name for
   the design, not a name for your Fusion document. See *The three names a link

@@ -125,6 +125,14 @@ def draw_declare(draw: ImageDraw.ImageDraw) -> None:
     draw.line([(_s(33), _s(11)), (_s(38), _s(16))], fill=POSITIVE, width=_w(4.6))
 
 
+def draw_fem(draw: ImageDraw.ImageDraw) -> None:
+    # A tetrahedron above the mouth: the volume WG meshes for the FEM air.
+    _mouth(draw)
+    draw.polygon([(_s(16), _s(19)), (_s(48), _s(19)), (_s(32), _s(1))], outline=ACCENT, width=_w(3.4))
+    draw.line([(_s(32), _s(1)), (_s(36), _s(13))], fill=ACCENT, width=_w(3.0))
+    draw.line([(_s(16), _s(19)), (_s(36), _s(13)), (_s(48), _s(19))], fill=ACCENT, width=_w(3.0))
+
+
 def draw_manage(draw: ImageDraw.ImageDraw) -> None:
     _mouth(draw)
     draw.line([(_s(18), _s(4)), (_s(46), _s(4))], fill=INK, width=_w(3.2))
@@ -201,6 +209,13 @@ def compact_declare(draw: ImageDraw.ImageDraw) -> None:
     draw.line([(_s(26), _s(22)), (_s(38), _s(34))], fill=POSITIVE, width=_w(8))
 
 
+def compact_fem(draw: ImageDraw.ImageDraw) -> None:
+    _bar(draw)
+    draw.polygon([(_s(6), _s(40)), (_s(58), _s(40)), (_s(32), _s(2))], outline=ACCENT, width=_w(6))
+    draw.line([(_s(32), _s(2)), (_s(38), _s(28))], fill=ACCENT, width=_w(5))
+    draw.line([(_s(6), _s(40)), (_s(38), _s(28)), (_s(58), _s(40))], fill=ACCENT, width=_w(5))
+
+
 def compact_manage(draw: ImageDraw.ImageDraw) -> None:
     _bar(draw)
     draw.line([(_s(6), _s(8)), (_s(58), _s(8))], fill=INK, width=_w(6))
@@ -214,6 +229,7 @@ def compact_manage(draw: ImageDraw.ImageDraw) -> None:
 GLYPHS = {
     "source": (draw_source, compact_source),
     "declare": (draw_declare, compact_declare),
+    "fem": (draw_fem, compact_fem),
     "solve": (draw_solve, compact_solve),
     "insert": (draw_insert, compact_insert),
     "update": (draw_update, compact_update),

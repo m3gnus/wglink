@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import importlib
 import json
 import math
@@ -44,6 +45,7 @@ def _load_registration_package() -> dict[str, types.ModuleType]:
         "wglink_activity",
         "wglink_workspace",
         "wglink_author",
+        "wglink_fem",
         "wglink_bundle",
         "wglink_core",
         "wglink_return",
@@ -62,6 +64,7 @@ _registration_modules = _load_registration_package()
 wglink_activity = _registration_modules["wglink_activity"]
 wglink_workspace = _registration_modules["wglink_workspace"]
 wglink_author = _registration_modules["wglink_author"]
+wglink_fem = _registration_modules["wglink_fem"]
 wglink_core = _registration_modules["wglink_core"]
 wglink_send = _registration_modules["wglink_send"]
 wglink_inbox = _registration_modules["wglink_inbox"]
@@ -87,6 +90,12 @@ COMMANDS = {
         "hornlab_wglink_declare_body",
         "Declare Body…",
         "Classify a body as the exterior WG solves, or leave it out of the return.",
+    ),
+    "fem": (
+        "hornlab_wglink_declare_fem_region",
+        "Declare FEM Region…",
+        "Mark a solid body of air as a FEM region and name its driver, interface "
+        "and termination faces for a coupled FEM/BEM solve.",
     ),
     "solve": (
         "hornlab_wglink_solve",
@@ -760,7 +769,13 @@ def _required_manifest_features() -> dict[str, bool]:
             + " and ".join(missing)
             + ". Update and restart WG, then try again."
         )
-    return {"automatic_domain": True, "document_up": True}
+    # FEM regions are optional: a design that declares none sends to any WG,
+    # and wglink_send refuses one that does when WG cannot solve them.
+    return {
+        "automatic_domain": True,
+        "document_up": True,
+        "fem_regions": _manifest_feature_enabled(wglink_inbox.FEM_REGIONS),
+    }
 
 
 def _no_workspace_text(action: str = "send again") -> str:
@@ -1061,7 +1076,7 @@ def _warnings(report: dict[str, object]) -> str:
 
 
 def _summary(operation: str, report: dict[str, object]) -> str:
-    if operation in {"source", "declare"}:
+    if operation in {"source", "declare", "fem"}:
         # The plan already states what changed, in the plan's own words.
         return str(report.get("summary", ""))
     if operation == "insert":
@@ -1622,6 +1637,8 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
     def __init__(self, operation: str):
         super().__init__()
         self.operation = operation
+        # The Declare FEM Region dialog's group bookkeeping, set when it is built.
+        self.fem_state: FemDialogState | None = None
 
     def notify(self, args: object) -> None:
         # Everything this command inspects or changes, including the follow-up
@@ -1704,6 +1721,8 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 report = _apply_source_role(inputs)
             elif self.operation == "declare":
                 report = _apply_body_declaration(inputs)
+            elif self.operation == "fem":
+                report = _apply_fem_region(inputs, self.fem_state)
             elif self.operation == "detach":
                 if not _confirm_detach():
                     return
@@ -1831,6 +1850,356 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         except wglink_launcher.LauncherError as exc:
             raise wglink_core.WgLinkError(str(exc)) from exc
         return True
+
+
+# ---------------------------------------------------------- Declare FEM Region
+#
+# Modelled on the FEM export dialog of the Fusion-to-MSH add-in: one target
+# body, a default size, and any number of named surface groups, each with a
+# kind, a local size and its faces, validated live so OK stays disabled until
+# the declaration is complete. Unlike that add-in nothing is meshed here: the
+# declaration is stored on the body and its faces, and WG meshes at Send.
+
+FEM_CLEAR_LABEL = "Clear the FEM region on this body"
+FEM_DECLARE_LABEL = "Declare or update the FEM region"
+
+
+class FemDialogState:
+    def __init__(self) -> None:
+        self.group_ids: list[int] = []
+        self.next_group_id = 1
+        self.region_id: str | None = None
+        self.restoring = False
+
+
+def _fem_input_id(prefix: str, group_id: int) -> str:
+    return f"fem_{prefix}_{group_id}"
+
+
+def _mm_input(value_mm: float) -> object:
+    # Fusion value inputs hold internal units (cm) whatever unit they display.
+    return adsk.core.ValueInput.createByReal(float(value_mm) / wglink_fem.CM_TO_MM)
+
+
+def _mm_value(command_inputs: object, input_id: str) -> float | None:
+    item = _input(command_inputs, input_id)
+    try:
+        return float(item.value) * wglink_fem.CM_TO_MM
+    except Exception:  # noqa: BLE001 - an unreadable value is refused by the plan
+        return None
+
+
+def _build_fem_dialog(inputs: object, state: FemDialogState) -> None:
+    body = inputs.addSelectionInput(
+        "fem_body", "Air body", "Select one closed solid body of air."
+    )
+    _add_selection_filters(body, "SolidBodies")
+    body.setSelectionLimits(1, 1)
+    action = inputs.addDropDownCommandInput(
+        "fem_action", "Action", adsk.core.DropDownStyles.TextListDropDownStyle
+    )
+    action.listItems.add(FEM_DECLARE_LABEL, True)
+    action.listItems.add(FEM_CLEAR_LABEL, False)
+    inputs.addStringValueInput("fem_name", "Region name", "")
+    inputs.addValueInput(
+        "fem_size", "Mesh size", "mm", _mm_input(wglink_fem.DEFAULT_REGION_SIZE_MM)
+    )
+    loss = inputs.addDropDownCommandInput(
+        "fem_loss", "Bulk loss factor", adsk.core.DropDownStyles.TextListDropDownStyle
+    )
+    for preset in wglink_fem.BULK_LOSS_PRESETS:
+        loss.listItems.add(f"{preset:g}", preset == wglink_fem.DEFAULT_BULK_LOSS_FACTOR)
+    inputs.addTextBoxCommandInput(
+        "fem_note",
+        "",
+        "Faces in no group are rigid walls at the region size. Add a group for "
+        "each driver diaphragm, each opening to the exterior air (interface), "
+        "and any face that needs its own size. Hide the body before Send.",
+        3,
+        True,
+    )
+    groups = inputs.addGroupCommandInput("fem_groups", "Surface groups")
+    groups.isExpanded = True
+    add = groups.children.addBoolValueInput("fem_add_group", "Add group", False, "", False)
+    add.isFullWidth = True
+    remove = groups.children.addBoolValueInput(
+        "fem_remove_group", "Remove last group", False, "", False
+    )
+    remove.isFullWidth = True
+    remove.isEnabled = False
+    inputs.addTextBoxCommandInput(
+        "fem_validation", "", "<b>Select one solid body of air.</b>", 2, True
+    )
+
+
+def _add_fem_group(
+    inputs: object,
+    state: FemDialogState,
+    *,
+    name: str = "",
+    kind: str = "moving",
+    size_mm: float = wglink_fem.DEFAULT_GROUP_SIZE_MM,
+    role: str = "LF",
+    faces: list[object] | None = None,
+) -> None:
+    container = _input(inputs, "fem_groups")
+    if container is None:
+        return
+    group_id = state.next_group_id
+    state.next_group_id += 1
+    state.group_ids.append(group_id)
+    group = container.children.addGroupCommandInput(
+        _fem_input_id("group", group_id), name or f"Surface group {group_id}"
+    )
+    group.isExpanded = True
+    children = group.children
+    children.addStringValueInput(_fem_input_id("name", group_id), "Name", name)
+    kinds = children.addDropDownCommandInput(
+        _fem_input_id("kind", group_id), "Kind",
+        adsk.core.DropDownStyles.TextListDropDownStyle,
+    )
+    for label, value in wglink_fem.KIND_CHOICES:
+        kinds.listItems.add(label, value == kind)
+    roles = children.addDropDownCommandInput(
+        _fem_input_id("role", group_id), "Drive role",
+        adsk.core.DropDownStyles.TextListDropDownStyle,
+    )
+    for value in wglink_fem.DRIVE_ROLES:
+        roles.listItems.add(value, value == role)
+    roles.isVisible = kind == "moving"
+    children.addValueInput(_fem_input_id("size", group_id), "Mesh size", "mm", _mm_input(size_mm))
+    selection = children.addSelectionInput(
+        _fem_input_id("faces", group_id), "Faces", "Select faces of the air body."
+    )
+    _add_selection_filters(selection, "Faces")
+    selection.setSelectionLimits(0, 0)
+    for face in faces or ():
+        try:
+            selection.addSelection(face)
+        except Exception:  # noqa: BLE001 - a stale face is reported by validation
+            pass
+    remove = _input(inputs, "fem_remove_group")
+    if remove is not None:
+        remove.isEnabled = True
+
+
+def _remove_fem_group(inputs: object, state: FemDialogState, group_id: int) -> None:
+    group = _input(inputs, _fem_input_id("group", group_id))
+    if group is not None:
+        group.deleteMe()
+    state.group_ids = [item for item in state.group_ids if item != group_id]
+    remove = _input(inputs, "fem_remove_group")
+    if remove is not None:
+        remove.isEnabled = bool(state.group_ids)
+
+
+def _restore_fem_region(inputs: object, state: FemDialogState, body: object) -> None:
+    """Fill the dialog from the body's stored region, like a saved preset."""
+
+    state.restoring = True
+    try:
+        for group_id in list(state.group_ids):
+            _remove_fem_group(inputs, state, group_id)
+        region = wglink_send.read_fem_region(body)
+        state.region_id = region.get("region_id") if region else None
+        name = _input(inputs, "fem_name")
+        if name is not None:
+            name.value = str((region or {}).get("name") or getattr(body, "name", "") or "")
+        size = _input(inputs, "fem_size")
+        if size is not None:
+            size.value = float(
+                (region or {}).get("mesh_size_mm") or wglink_fem.DEFAULT_REGION_SIZE_MM
+            ) / wglink_fem.CM_TO_MM
+        loss = _input(inputs, "fem_loss")
+        wanted = float(((region or {}).get("medium") or {}).get("bulk_loss_factor", 0.0))
+        try:
+            for index in range(loss.listItems.count):
+                item = loss.listItems.item(index)
+                item.isSelected = abs(float(item.name) - wanted) < 1e-12
+        except Exception:  # noqa: BLE001
+            pass
+        if region is None:
+            return
+        faces = wglink_send.fem_region_faces(body, str(region["region_id"]))
+        for group in region.get("groups") or ():
+            _add_fem_group(
+                inputs,
+                state,
+                name=str(group.get("name") or ""),
+                kind=str(group.get("kind") or "rigid"),
+                size_mm=float(group.get("mesh_size_mm") or wglink_fem.DEFAULT_GROUP_SIZE_MM),
+                role=str(group.get("drive_role") or "LF"),
+                faces=faces.get(str(group.get("group_id")), []),
+            )
+    finally:
+        state.restoring = False
+
+
+def _fem_group_rows(inputs: object, state: FemDialogState, body: object) -> list[dict[str, object]]:
+    target = _native(body) if body is not None else None
+    rows = []
+    for group_id in state.group_ids:
+        faces = []
+        for face in _selected_entities(inputs, _fem_input_id("faces", group_id)):
+            native = _native(face)
+            try:
+                matches = target is not None and _native(face.body) == target
+            except Exception:  # noqa: BLE001
+                matches = False
+            faces.append({
+                "key": wglink_send.face_identity(native),
+                "body_matches": matches,
+                "face": face,
+            })
+        rows.append({
+            "name": str(_input_value(inputs, _fem_input_id("name", group_id)) or ""),
+            "kind": _selected_name(inputs, _fem_input_id("kind", group_id), ""),
+            "drive_role": _selected_name(inputs, _fem_input_id("role", group_id), ""),
+            "mesh_size_mm": _mm_value(inputs, _fem_input_id("size", group_id)),
+            "faces": faces,
+        })
+    return rows
+
+
+def _other_region_ids(body: object) -> list[str]:
+    target = _native(body)
+    ids = []
+    try:
+        found = wglink_core._design(_app()).findAttributes(
+            wglink_core.ATTRIBUTE_GROUP, wglink_fem.REGION_ATTRIBUTE
+        )
+    except Exception:  # noqa: BLE001 - uniqueness is re-checked at Send
+        return ids
+    for attribute in found or ():
+        try:
+            if attribute.parent == target:
+                continue
+            region = wglink_fem.read_region_attribute(attribute.value)
+        except Exception:  # noqa: BLE001
+            continue
+        if region is not None:
+            ids.append(str(region["region_id"]))
+    return ids
+
+
+def _plan_fem_region(inputs: object, state: FemDialogState) -> tuple[object, "wglink_fem.RegionDeclaration", list[dict[str, object]]]:
+    bodies = _selected_entities(inputs, "fem_body")
+    if not bodies:
+        raise wglink_fem.FemDeclarationError("Select one closed solid body of air.")
+    body = bodies[0]
+    rows = _fem_group_rows(inputs, state, body)
+    plan = wglink_fem.plan_region_declaration(
+        name=_input_value(inputs, "fem_name"),
+        mesh_size_mm=_mm_value(inputs, "fem_size"),
+        body_is_solid=bool(getattr(body, "isSolid", False)),
+        groups=rows,
+        other_region_ids=_other_region_ids(body),
+        region_id=state.region_id,
+        medium={"bulk_loss_factor": _selected_name(inputs, "fem_loss", "0")},
+    )
+    return body, plan, rows
+
+
+def _fem_clearing(inputs: object) -> bool:
+    return _selected_name(inputs, "fem_action", FEM_DECLARE_LABEL) == FEM_CLEAR_LABEL
+
+
+def _fem_validation_error(inputs: object, state: FemDialogState) -> str | None:
+    if _fem_clearing(inputs):
+        return None if _selected_entities(inputs, "fem_body") else "Select the body to clear."
+    try:
+        _plan_fem_region(inputs, state)
+    except wglink_fem.FemDeclarationError as exc:
+        return str(exc)
+    return None
+
+
+def _sync_fem_validation(inputs: object, state: FemDialogState) -> bool:
+    error = _fem_validation_error(inputs, state)
+    box = _input(inputs, "fem_validation")
+    if box is not None:
+        box.formattedText = (
+            f"<b>Fix before OK:</b> {html.escape(error)}" if error else "<b>Ready.</b>"
+        )
+    return error is None
+
+
+def _apply_fem_region(inputs: object, state: FemDialogState | None) -> dict[str, object]:
+    state = state or FemDialogState()
+    if _fem_clearing(inputs):
+        bodies = _selected_entities(inputs, "fem_body")
+        if not bodies:
+            raise wglink_author.AuthorError("Select the body to clear.")
+        cleared = wglink_send.clear_fem_region(bodies[0])
+        return {"summary": "Cleared the FEM region and its surface groups."
+                if cleared else "That body was not a FEM region, so nothing changed."}
+    try:
+        body, plan, rows = _plan_fem_region(inputs, state)
+    except wglink_fem.FemDeclarationError as exc:
+        raise wglink_author.AuthorError(str(exc)) from exc
+    faces_by_group = {
+        group.group_id: [face["face"] for face in row["faces"]]
+        for group, row in zip(plan.groups, rows)
+    }
+    wglink_send.declare_fem_region(body, plan, faces_by_group)
+    return {"summary": plan.summary}
+
+
+class FemInputChangedHandler(adsk.core.InputChangedEventHandler):
+    def __init__(self, state: FemDialogState):
+        super().__init__()
+        self.state = state
+
+    def notify(self, args: object) -> None:
+        with wglink_activity.because(wglink_activity.command_cause("fem")):
+            self._changed(args)
+
+    def _changed(self, args: object) -> None:
+        if self.state.restoring:
+            return
+        try:
+            changed = getattr(args, "input", None)
+            input_id = str(getattr(changed, "id", ""))
+            command = getattr(changed, "parentCommand", None)
+            inputs = command.commandInputs if command is not None else args.inputs
+            if input_id == "fem_add_group":
+                _add_fem_group(inputs, self.state)
+            elif input_id == "fem_remove_group" and self.state.group_ids:
+                _remove_fem_group(inputs, self.state, self.state.group_ids[-1])
+            elif input_id == "fem_body":
+                bodies = _selected_entities(inputs, "fem_body")
+                if bodies:
+                    _restore_fem_region(inputs, self.state, bodies[0])
+            elif input_id.startswith("fem_kind_"):
+                group_id = int(input_id.rsplit("_", 1)[-1])
+                role = _input(inputs, _fem_input_id("role", group_id))
+                if role is not None:
+                    role.isVisible = wglink_fem.resolve_kind(
+                        _selected_name(inputs, input_id, "")
+                    ) == "moving"
+            elif input_id.startswith("fem_name_"):
+                group_id = int(input_id.rsplit("_", 1)[-1])
+                group = _input(inputs, _fem_input_id("group", group_id))
+                if group is not None and str(changed.value).strip():
+                    group.name = str(changed.value).strip()
+            _sync_fem_validation(inputs, self.state)
+        except Exception as exc:  # noqa: BLE001 - the dialog must keep working
+            _log(f"Declare FEM Region input update failed: {exc}")
+
+
+class FemValidateInputsHandler(adsk.core.ValidateInputsEventHandler):
+    def __init__(self, state: FemDialogState):
+        super().__init__()
+        self.state = state
+
+    def notify(self, args: object) -> None:
+        try:
+            args.areInputsValid = _sync_fem_validation(args.inputs, self.state)
+        except Exception:  # noqa: BLE001 - execute repeats the validation
+            try:
+                args.areInputsValid = False
+            except Exception:  # noqa: BLE001
+                pass
 
 
 class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
@@ -2013,6 +2382,20 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                     3,
                     True,
                 )
+            if self.operation == "fem":
+                state = FemDialogState()
+                _build_fem_dialog(inputs, state)
+                changed = FemInputChangedHandler(state)
+                args.command.inputChanged.add(changed)
+                _handlers.append(changed)
+                validate = FemValidateInputsHandler(state)
+                args.command.validateInputs.add(validate)
+                _handlers.append(validate)
+                handler = CommandExecuteHandler(self.operation)
+                handler.fem_state = state
+                args.command.execute.add(handler)
+                _handlers.append(handler)
+                return
             if self.operation not in {"insert", "send", "solve", "source", "declare"}:
                 # A document with one link needs no choice, and the old free
                 # text field required a separate diagnostic call just to learn

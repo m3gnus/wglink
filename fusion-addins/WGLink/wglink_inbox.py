@@ -50,6 +50,8 @@ FUSION_REQUEST_DELIVERY = "fusionRequestDelivery"
 SOURCE_IDENTITY = "sourceIdentity"
 AUTOMATIC_DOMAIN = "automaticDomain"
 DOCUMENT_UP = "documentUp"
+# Optional: a WG that solves declared FEM regions (fem-regions-v1).
+FEM_REGIONS = "femRegions"
 # The schema-3 solve writer retained for the WG packaged-pair contract.
 # New commands use WG_REQUEST_SCHEMA_VERSION; Fusion-bound delivery stays 3.
 REQUEST_SCHEMA_VERSION = wglink_protocol.SOLVE_COMMAND_SCHEMA_VERSION

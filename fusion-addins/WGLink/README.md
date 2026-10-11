@@ -204,6 +204,29 @@ Relink remain full head-less APIs but are not panel commands.
   identity removal is permanent, and inserting a fresh WG copy is the only way
   to obtain a managed link again.
 
+## FEM regions (`fem-regions-v1`)
+
+**Declare FEM Region…** (under Manage) stores a bounded-air declaration for a
+coupled FEM/BEM solve, following the FEM export dialog of the Fusion-to-MSH
+add-in: one solid body, a region size and bulk loss, and any number of named
+surface groups (moving diaphragm with a drive role, interface to the exterior,
+plane-wave termination, rigid wall), each with a local size and its faces.
+
+- `wglink_fem.py` (no `adsk`) owns validation, the attribute payloads, face
+  descriptors and the `scope.fem_regions` records.
+- The native body carries `WGLink/fem_region` (JSON: region id, name, size,
+  medium, groups) and each grouped face carries `WGLink/fem_surface_group`
+  (JSON: region id, group id). Faces are compared by entity token or temp id,
+  never by wrapper identity.
+- Send (`wglink_send._fem_region_exports`) refuses a visible region body,
+  a non-root frame, and a group whose faces are gone. It exports each region by
+  copying the body into a temporary root component, which is deleted again,
+  and gates the member to one solid.
+- No meshing happens in Fusion. Faces are described by geometry in the export
+  frame and WG matches them to its own gmsh surfaces, so mesh tags stay WG's.
+- `wglink_protocol.validate_fem_regions` is shared by both profiles; the
+  feature is optional and gated on WG's `femRegions` capability.
+
 ## The workspace is WG's setting
 
 The WGLink folder is chosen once, under **Settings → CAD Link** in Waveguide

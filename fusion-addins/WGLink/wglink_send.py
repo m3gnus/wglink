@@ -32,7 +32,7 @@ else:
     import wglink_protocol
 
 if __package__:
-    from . import wglink_activity, wglink_author, wglink_core
+    from . import wglink_activity, wglink_author, wglink_core, wglink_fem
     from .wglink_return import (
         BASE_RETURN_FEATURES,
         DOCUMENT_UP_FEATURE,
@@ -51,6 +51,7 @@ else:
     import wglink_activity
     import wglink_author
     import wglink_core
+    import wglink_fem
     from wglink_return import (
         BASE_RETURN_FEATURES,
         DOCUMENT_UP_FEATURE,
@@ -183,6 +184,108 @@ def clear_declaration(body: object) -> None:
     except Exception as exc:  # noqa: BLE001 - surfaced as an actionable refusal
         raise wglink_core.WgLinkError(
             f"Could not clear the WG declaration on this body: {exc}."
+        ) from exc
+
+
+@wglink_activity.counted(wglink_activity.MUTATION_BODY_DECLARATION)
+def declare_fem_region(
+    body: object,
+    plan: "wglink_fem.RegionDeclaration",
+    faces_by_group: dict[str, list[object]],
+) -> None:
+    """Store a FEM region on its native body and its group on each face.
+
+    Faces that carried this region's group before and are no longer selected
+    lose the attribute, so a reselection replaces the old one exactly.
+    """
+
+    native = getattr(body, "nativeObject", None) or body
+    wanted: dict[object, tuple[object, str]] = {}
+    for group in plan.groups:
+        for face in faces_by_group.get(group.group_id, ()):
+            face = getattr(face, "nativeObject", None) or face
+            wanted[face_identity(face)] = (face, plan.face_attribute(group))
+    for face in _collection(native, "faces"):
+        current = wglink_fem.read_face_attribute(
+            wglink_core._attribute_value(face, wglink_fem.FACE_ATTRIBUTE)
+        )
+        if (
+            current is not None
+            and current[0] == plan.region_id
+            and face_identity(face) not in wanted
+        ):
+            _delete_attribute(face, wglink_fem.FACE_ATTRIBUTE)
+    for face, value in wanted.values():
+        wglink_core._set_attribute(face, wglink_fem.FACE_ATTRIBUTE, value)
+    wglink_core._set_attribute(native, wglink_fem.REGION_ATTRIBUTE, plan.body_attribute())
+
+
+@wglink_activity.counted(wglink_activity.MUTATION_BODY_DECLARATION)
+def clear_fem_region(body: object) -> bool:
+    """Remove a FEM region and its face groups; ``False`` if there was none."""
+
+    native = getattr(body, "nativeObject", None) or body
+    region = read_fem_region(native)
+    if region is None:
+        return False
+    for face in _collection(native, "faces"):
+        current = wglink_fem.read_face_attribute(
+            wglink_core._attribute_value(face, wglink_fem.FACE_ATTRIBUTE)
+        )
+        if current is not None and current[0] == region["region_id"]:
+            _delete_attribute(face, wglink_fem.FACE_ATTRIBUTE)
+    _delete_attribute(native, wglink_fem.REGION_ATTRIBUTE)
+    return True
+
+
+def face_identity(face: object) -> object:
+    """A comparable key for one face across Fusion's per-read wrappers.
+
+    Two reads of the same face may return different Python wrappers, so a face
+    is keyed by its entity token, or by its temporary id within the session.
+    """
+
+    native = getattr(face, "nativeObject", None) or face
+    for name in ("entityToken", "tempId"):
+        try:
+            value = getattr(native, name)
+        except Exception:  # noqa: BLE001
+            continue
+        if value not in (None, ""):
+            return (name, value)
+    return ("object", id(native))
+
+
+def read_fem_region(body: object) -> dict[str, Any] | None:
+    native = getattr(body, "nativeObject", None) or body
+    return wglink_fem.read_region_attribute(
+        wglink_core._attribute_value(native, wglink_fem.REGION_ATTRIBUTE)
+    )
+
+
+def fem_region_faces(body: object, region_id: str) -> dict[str, list[object]]:
+    """The body's faces grouped by the FEM surface group they carry."""
+
+    grouped: dict[str, list[object]] = {}
+    for face in _collection(body, "faces"):
+        native = getattr(face, "nativeObject", None) or face
+        current = wglink_fem.read_face_attribute(
+            wglink_core._attribute_value(native, wglink_fem.FACE_ATTRIBUTE)
+        )
+        if current is not None and current[0] == region_id:
+            grouped.setdefault(current[1], []).append(face)
+    return grouped
+
+
+def _delete_attribute(entity: object, name: str) -> None:
+    attribute = wglink_core._attribute(entity, name)
+    if attribute is None:
+        return
+    try:
+        attribute.deleteMe()
+    except Exception as exc:  # noqa: BLE001 - surfaced as an actionable refusal
+        raise wglink_core.WgLinkError(
+            f"Could not remove the WG FEM region attribute: {exc}."
         ) from exc
 
 
@@ -798,6 +901,7 @@ def _scope_walk(design: object, selection_value: object) -> dict[str, Any]:
     measured: dict[str, object] = {}
     fem_components: dict[str, object] = {}
     fem_exported_bodies: list[dict[str, Any]] = []
+    fem_regions: list[dict[str, Any]] = []
     components: list[object] = []
     construction_count = 0
     serial = 0
@@ -829,6 +933,25 @@ def _scope_walk(design: object, selection_value: object) -> dict[str, Any]:
         # the native body carried the whole payload), so identity is read from
         # the native object; the proxy stays the geometry/claim handle.
         native = getattr(body, "nativeObject", None) or body
+        region = None if mesh else wglink_fem.read_region_attribute(
+            wglink_core._attribute_value(native, wglink_fem.REGION_ATTRIBUTE)
+        )
+        if region is not None:
+            # A declared FEM region is bounded air, never exterior geometry:
+            # it stays out of the exterior inventory and gets its own member.
+            fem_regions.append(
+                {
+                    "object_id": object_id,
+                    "name": name,
+                    "path": body_path,
+                    "visible": visible,
+                    "suppressed": suppressed or _bool(body, ("isSuppressed",), False),
+                    "solid": bool(getattr(body, "isSolid", False)),
+                    "declaration": region,
+                    "body": body,
+                }
+            )
+            return
         instance_id = _instance_id(native)
         managed_role = _role(native)
         candidate = {
@@ -1035,6 +1158,8 @@ def _scope_walk(design: object, selection_value: object) -> dict[str, Any]:
         "measured": measured,
         "fem_components": fem_components,
         "fem_exported_bodies": fem_exported_bodies,
+        "fem_regions": fem_regions,
+        "placed": placed,
         "components": components,
     }
 
@@ -1213,7 +1338,22 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None) -> dict[
         "cut_provenance": [],
         "bounds_mm": None,
         "source_bounds_mm": None,
+        "fem_regions": [],
+        "fem_region_error": None,
     }
+    fem_driven = False
+    try:
+        fem_records = wglink_fem.plan_fem_regions(
+            [export for export, _body in _fem_region_exports(walk)]
+        )
+        report["fem_regions"] = wglink_fem.preflight_lines(fem_records)
+        fem_driven = any(
+            group["kind"] == "moving"
+            for record in fem_records
+            for group in record["surface_groups"]
+        )
+    except (wglink_core.WgLinkError, wglink_fem.FemDeclarationError) as exc:
+        report["fem_region_error"] = str(exc)
     _mark_solver_anchor(walk["candidates"], anchor)
     try:
         scope = plan_export_scope(walk["selection"], walk["candidates"]).manifest_scope()
@@ -1276,6 +1416,7 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None) -> dict[
             fractions,
             source_identity=bool(opts.get("source_identity")),
             design=design,
+            allow_empty=fem_driven,
         )
     except wglink_core.WgLinkError as exc:
         report["source_error"] = str(exc)
@@ -1329,6 +1470,17 @@ def return_state(app: object, options: dict[str, Any] | None = None) -> dict[str
     opts = dict(options or {})
     design = wglink_core._design(app)
     walk = _scope_walk(design, opts.get("selection"))
+    try:
+        fem_regions = wglink_fem.plan_fem_regions(
+            [export for export, _body in _fem_region_exports(walk)]
+        )
+    except (wglink_core.WgLinkError, wglink_fem.FemDeclarationError) as exc:
+        return {"hash": None, "reason": str(exc)}
+    fem_driven = any(
+        group["kind"] == "moving"
+        for record in fem_regions
+        for group in record["surface_groups"]
+    )
     records = _records_in_scope(design, walk)
     instance_ids = [str(record["instance_id"]) for record in records]
     requested_anchor = _nullable(opts.get("anchor_instance_id"))
@@ -1387,6 +1539,7 @@ def return_state(app: object, options: dict[str, Any] | None = None) -> dict[str
             ),
             source_identity=bool(opts.get("source_identity")),
             design=design,
+            allow_empty=fem_driven,
         )
     except wglink_core.WgLinkError as exc:
         return {"hash": None, "reason": str(exc)}
@@ -1436,6 +1589,8 @@ def return_state(app: object, options: dict[str, Any] | None = None) -> dict[str
         "sources": source_state,
         **({"domain": {"kind": "automatic"}, "cut_provenance": cut_state} if automatic_domain else {}),
         **({"document_up": document_up} if document_up is not None else {}),
+        # Only when declared, so a design without regions keeps its hash.
+        **({"fem_regions": fem_regions} if fem_regions else {}),
     }
     return {
         "hash": _canonical_hash(state),
@@ -3021,8 +3176,12 @@ def _sources(
     adopt: Callable[[str, int], bool] | None = None,
     adopt_seeded: bool = False,
     adopted: list[tuple[str, bool]] | None = None,
+    allow_empty: bool = False,
 ) -> list[dict[str, Any]]:
     """Every drivable source the return carries.
+
+    ``allow_empty`` is set when a FEM region carries a driver diaphragm, which
+    drives the return without any painted exterior face.
 
     ``source_identity`` is on only when WG advertises ``source-identity-v1``;
     off, every id is the legacy role-derived one, byte for byte.
@@ -3097,7 +3256,7 @@ def _sources(
                 "suggested_resolution_mm": SOURCE_RESOLUTION_MM[role],
             }
         )
-    if not sources:
+    if not sources and not allow_empty:
         raise wglink_core.WgLinkError(
             "Return export has no drivable source. Paint an included face LF, MF, HF, or PASSIVE_CARDIOID and try again."
         )
@@ -3582,6 +3741,130 @@ def _export_step(design: object, path: Path, geometry: object) -> None:
         raise wglink_core.WgLinkError(f"Fusion STEP export failed for {path.name}.")
 
 
+# ----------------------------------------------------------------- FEM regions
+
+
+def _vector(value: object) -> list[float] | None:
+    try:
+        return [float(value.x), float(value.y), float(value.z)]  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _fem_face_descriptor(face: object) -> dict[str, Any]:
+    """One face as WG matches it: area, centroid, normal and box, in mm.
+
+    The handle is the one the walk measured (a proxy under root scope), so its
+    coordinates are already in the export frame. A normal is stated only for a
+    plane, where it is one vector; a curved face is matched by the rest.
+    """
+
+    centroid = _vector(getattr(face, "centroid", None)) or _vector(
+        getattr(face, "pointOnFace", None)
+    )
+    box = getattr(face, "boundingBox", None)
+    low = _vector(getattr(box, "minPoint", None))
+    high = _vector(getattr(box, "maxPoint", None))
+    area = getattr(face, "area", None)
+    if centroid is None or low is None or high is None or area is None:
+        raise wglink_core.WgLinkError(
+            "Could not measure a face of a FEM region; Fusion did not report its "
+            "area, centroid or bounding box."
+        )
+    normal = None
+    geometry = getattr(face, "geometry", None)
+    if "Plane" in str(getattr(geometry, "objectType", "") or ""):
+        normal = _vector(getattr(geometry, "normal", None))
+        if normal is not None and bool(getattr(face, "isParamReversed", False)):
+            normal = [-item for item in normal]
+    return wglink_fem.face_descriptor(
+        area_cm2=float(area),
+        centroid_cm=centroid,
+        normal=normal,
+        bbox_min_cm=low,
+        bbox_max_cm=high,
+    )
+
+
+def _fem_region_exports(walk: dict[str, Any]) -> list[tuple["wglink_fem.RegionExport", object]]:
+    """Resolve every declared FEM region in scope, refusing by name.
+
+    A visible region body would also land in assembly.step, which Fusion
+    exports by visibility, so it must be hidden: WGLink writes it on its own.
+    """
+
+    regions = [item for item in walk.get("fem_regions", ()) if not item["suppressed"]]
+    if not regions:
+        return []
+    if walk.get("placed"):
+        raise wglink_core.WgLinkError(
+            "FEM regions can be sent only in the root frame. Leave Assembly scope "
+            "empty, or select an occurrence placed at the assembly origin."
+        )
+    visible = sorted(item["name"] for item in regions if item["visible"])
+    if visible:
+        raise wglink_core.WgLinkError(
+            "Hide the FEM region "
+            + ("body " if len(visible) == 1 else "bodies ")
+            + ", ".join(repr(name) for name in visible)
+            + " before sending: WGLink exports each region on its own, and a "
+            "visible one would also be exported as exterior geometry."
+        )
+    exports = []
+    for item in regions:
+        if not item["solid"]:
+            raise wglink_core.WgLinkError(
+                f"FEM region body {item['name']!r} is no longer a closed solid."
+            )
+        region_id = str(item["declaration"]["region_id"])
+        faces: dict[str, list[dict[str, Any]]] = {}
+        for face in _collection(item["body"], "faces"):
+            native = getattr(face, "nativeObject", None) or face
+            key = wglink_fem.read_face_attribute(
+                wglink_core._attribute_value(native, wglink_fem.FACE_ATTRIBUTE)
+            )
+            if key is None or key[0] != region_id:
+                continue
+            faces.setdefault(key[1], []).append(_fem_face_descriptor(face))
+        exports.append(
+            (
+                wglink_fem.RegionExport(
+                    object_id=item["object_id"],
+                    declaration=item["declaration"],
+                    faces_by_group=faces,
+                ),
+                item["body"],
+            )
+        )
+    return exports
+
+
+def _export_body_step(design: object, path: Path, body: object) -> None:
+    """Export one body by copying it into a temporary root component.
+
+    Fusion's STEP export takes a Component and writes its visible bodies, and a
+    region body is hidden so the exterior export leaves it out. The copy lives
+    for the export only and is shown inside its own component.
+    """
+
+    transform = adsk.core.Matrix3D.create()
+    occurrence = None
+    try:
+        occurrence = design.rootComponent.occurrences.addNewComponent(transform)
+        copy = body.copyToComponent(occurrence)
+        try:
+            copy.isLightBulbOn = True
+        except Exception:  # noqa: BLE001 - visibility is checked by the count gate
+            pass
+        _export_step(design, path, occurrence.component)
+    finally:
+        if occurrence is not None:
+            try:
+                occurrence.deleteMe()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 CAD_DOCUMENT_MEMBER = "document.f3d"
 CAD_DOCUMENT_MEDIA_TYPE = "application/vnd.autodesk.fusion360"
 
@@ -3827,6 +4110,25 @@ def send(
     # component would land in assembly.step, and no inventory rule can account
     # for it there.
     _refuse_fem_bodies_in_export(walk["fem_exported_bodies"])
+    region_exports = _fem_region_exports(walk)
+    fem_regions_enabled = bool(options.get("fem_regions"))
+    if region_exports and not fem_regions_enabled:
+        raise wglink_core.WgLinkError(
+            "This design declares FEM regions, and this Waveguide Generator cannot "
+            "solve them yet. Update Waveguide Generator, or clear the FEM region "
+            "declarations."
+        )
+    try:
+        fem_region_records = wglink_fem.plan_fem_regions(
+            [export for export, _body in region_exports]
+        )
+    except wglink_fem.FemDeclarationError as exc:
+        raise wglink_core.WgLinkError(str(exc)) from exc
+    fem_driven = any(
+        group["kind"] == "moving"
+        for record in fem_region_records
+        for group in record["surface_groups"]
+    )
     records = _records_in_scope(design, walk)
     instance_ids = [str(record["instance_id"]) for record in records]
     requested_anchor = _nullable(options.get("anchor_instance_id"))
@@ -3926,6 +4228,7 @@ def send(
         adopt=confirm_adoption,
         adopt_seeded=True,
         adopted=adopted_sources,
+        allow_empty=fem_driven,
     )
     # After ``_sources``, deliberately: an adoption above has already written
     # its stamps, so the fingerprint is taken of the document as it now is
@@ -3999,6 +4302,22 @@ def send(
                     f"FEM STEP {member!r} contains {fem_count} bodies; exactly one solid is required."
                 )
             files[member] = _file_record(fem_path, "fem-air-volume")
+        for record, (_export, body) in zip(fem_region_records, sorted(
+            region_exports, key=lambda pair: str(pair[0].declaration.get("region_id"))
+        )):
+            member = str(record["file"])
+            region_path = temp / Path(member)
+            region_path.parent.mkdir(parents=True, exist_ok=True)
+            _export_body_step(design, region_path, body)
+            region_count = count_step_bodies(region_path)
+            if region_count != 1:
+                raise wglink_core.WgLinkError(
+                    f"FEM region STEP {member!r} contains {region_count} bodies; "
+                    "exactly one solid is required."
+                )
+            files[member] = _file_record(region_path, wglink_fem.FEM_REGION_PURPOSE)
+        if fem_region_records:
+            scope = {**scope, "fem_regions": fem_region_records}
 
         coordinate = {
             "length_unit": "mm",
@@ -4048,6 +4367,7 @@ def send(
                 *([SOURCE_IDENTITY_FEATURE] if source_identity else []),
                 *([DOMAIN_AUTOMATIC_FEATURE] if automatic_domain else []),
                 *([DOCUMENT_UP_FEATURE] if document_up is not None else []),
+                *([wglink_fem.FEM_REGIONS_FEATURE] if fem_region_records else []),
             ],
         )
         (temp / "wgreturn.json").write_text(

@@ -564,10 +564,17 @@ def preflight_summary(scope: Mapping[str, Any]) -> Preflight:
         if name and plane:
             lines.append(f"Cut: {name} at {plane}")
 
+    fem_lines = [str(line) for line in (scope.get("fem_regions") or ())]
+    lines.extend(fem_lines)
+    fem_region_error = str(scope.get("fem_region_error") or "").strip()
+    fem_driven = any("moving" in line for line in fem_lines if line.startswith("FEM region:"))
+
     warnings: list[str] = []
     if domain_error:
         warnings.append(f"Model domain: {domain_error}")
-    if not sources:
+    if fem_region_error:
+        warnings.append(f"FEM regions: {fem_region_error}")
+    if not sources and not fem_driven:
         warnings.append(source_error or NO_SOURCE_WARNING)
 
     return Preflight(lines=tuple(lines), warnings=tuple(warnings))

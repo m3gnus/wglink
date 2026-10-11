@@ -1545,6 +1545,7 @@ def test_a_second_registration_adopts_the_panel_instead_of_rebuilding_it(
     assert list(first.COMMANDS) == [
         "source",
         "declare",
+        "fem",
         "solve",
         "insert",
         "update",
@@ -1560,6 +1561,7 @@ def test_a_second_registration_adopts_the_panel_instead_of_rebuilding_it(
     assert manage is not None
     assert [control.definition.id for control in manage.controls._items] == [
         "hornlab_wglink_declare_body",
+        "hornlab_wglink_declare_fem_region",
         "hornlab_wglink_insert",
         "hornlab_wglink_update",
         "hornlab_wglink_detach",
@@ -1576,7 +1578,7 @@ def test_a_second_registration_adopts_the_panel_instead_of_rebuilding_it(
     assert first._owned is True
     # Every command ships an icon folder holding the 16 px art Fusion draws in
     # the panel dropdown; a missing folder would silently give a blank button.
-    assert len(definitions.resource_folders) == 7
+    assert len(definitions.resource_folders) == 8
     for folder in definitions.resource_folders:
         assert folder and (Path(folder) / "16x16.png").is_file()
 
