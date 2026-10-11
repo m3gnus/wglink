@@ -206,7 +206,15 @@ Relink remain full head-less APIs but are not panel commands.
 
 ## FEM regions (`fem-regions-v1`)
 
-**Declare FEM Region…** (under Manage) stores a bounded-air declaration for a
+**Declare FEM Region…** appears under Manage only when `wg-capabilities.json`
+advertises `femRegions` at add-in startup. WG advertises it only with
+`WG2_FEM_REGIONS=1`. Restart the add-in after enabling it; there is no polling
+or toolbar refresh. Opening the command and executing it both re-check the
+capability and refuse if it has been withdrawn. Without the capability, no
+FEM command or icon is registered, and a design without declared regions keeps
+the existing manifest and bundle bytes.
+
+The command stores a bounded-air declaration for a
 coupled FEM/BEM solve, following the FEM export dialog of the Fusion-to-MSH
 add-in: one solid body, a region size and bulk loss, and any number of named
 surface groups (moving diaphragm with a drive role, interface to the exterior,

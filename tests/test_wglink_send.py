@@ -1494,6 +1494,53 @@ def _contract_design(root, manager=None):
     return design, app, manager
 
 
+def _no_fem_export(send_module, monkeypatch, output, profile, **extra_options):
+    """The deterministic design used to capture the e9f0dfb bundle goldens.
+
+    Send, Solve and the returns after Insert/Update all use this exporter.
+    Freeze only the clock and return id; do not normalize any emitted bytes.
+    """
+    painted = face("HF")
+    painted.attributes = Attributes()
+    painted.entityToken = "face-hf"
+    painted.attributes.add("WGLink", "source_identity", json.dumps({
+        "schema": 1, "id": "source-stable-hf", "role": "HF",
+        "face": "stable-face-hf", "faces": 1,
+    }, sort_keys=True, separators=(",", ":")))
+    root = component("Speaker", [body("cabinet", faces=[painted])])
+    design, app, _manager = _contract_design(root)
+    app.preferences = types.SimpleNamespace(
+        generalPreferences=types.SimpleNamespace(defaultModelingOrientation=0)
+    )
+    monkeypatch.setattr(send_module.wglink_core, "_design", lambda _app: design)
+    monkeypatch.setattr(send_module, "_utc_timestamp", lambda: "2026-01-01T00:00:00Z")
+    monkeypatch.setattr(send_module, "generate_return_id", lambda: "wgr_01KDVDNA000000000000000000")
+    options = {"output_folder": str(output), "capture_document": False}
+    if profile == "modern":
+        options.update(automatic_domain=True, document_up=True, source_identity=True)
+    options.update(extra_options)
+    return send_module.send(app, options)
+
+
+@pytest.mark.parametrize("profile", ["legacy", "modern"])
+@pytest.mark.parametrize("fem_options", [{}, {"fem_regions": False}, {"fem_regions": True}],
+                         ids=["capability-absent", "capability-off", "capability-on"])
+def test_no_declared_regions_keep_e9f0dfb_bundle_bytes(
+    send_module, monkeypatch, tmp_path, profile, fem_options
+):
+    report = _no_fem_export(send_module, monkeypatch, tmp_path, profile, **fem_options)
+    actual = Path(report["bundle_path"])
+    golden = ROOT / "tests" / "fixtures" / "no-fem-e9f0dfb" / profile
+
+    def members(folder):
+        return {path.relative_to(folder).as_posix(): path.read_bytes()
+                for path in folder.rglob("*") if path.is_file()}
+
+    assert members(actual) == members(golden)
+    assert "fem_regions" not in report["manifest"]["scope"]
+    assert "fem-regions-v1" not in report["manifest"]["required_features"]
+
+
 def _occurrence(
     component_value, bodies, *, placement=None, name="Horn:1", children=()
 ):

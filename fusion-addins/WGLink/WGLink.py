@@ -751,6 +751,15 @@ def _manifest_feature_enabled(name: str) -> bool:
         return False
 
 
+def _require_fem_regions() -> None:
+    if not _manifest_feature_enabled(wglink_inbox.FEM_REGIONS):
+        raise wglink_core.WgLinkError(
+            "Waveguide Generator no longer advertises FEM regions. Enable "
+            "WG2_FEM_REGIONS=1 in WG and restart WG and this add-in before "
+            "declaring a FEM region."
+        )
+
+
 def _required_manifest_features() -> dict[str, bool]:
     """The M1 manifest features this add-in requires WG to understand."""
 
@@ -771,11 +780,13 @@ def _required_manifest_features() -> dict[str, bool]:
         )
     # FEM regions are optional: a design that declares none sends to any WG,
     # and wglink_send refuses one that does when WG cannot solve them.
-    return {
+    features = {
         "automatic_domain": True,
         "document_up": True,
-        "fem_regions": _manifest_feature_enabled(wglink_inbox.FEM_REGIONS),
     }
+    if _manifest_feature_enabled(wglink_inbox.FEM_REGIONS):
+        features["fem_regions"] = True
+    return features
 
 
 def _no_workspace_text(action: str = "send again") -> str:
@@ -1722,6 +1733,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             elif self.operation == "declare":
                 report = _apply_body_declaration(inputs)
             elif self.operation == "fem":
+                _require_fem_regions()
                 report = _apply_fem_region(inputs, self.fem_state)
             elif self.operation == "detach":
                 if not _confirm_detach():
@@ -1817,6 +1829,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 return
             # Negotiate the freshly advertised manifest features before export.
             try:
+                options.pop("fem_regions", None)
                 options.update(_required_manifest_features())
                 options["source_identity"] = _source_identity_enabled()
             except wglink_core.WgLinkError as exc:
@@ -2261,6 +2274,8 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
 
     def _created(self, args: object) -> None:
         try:
+            if self.operation == "fem":
+                _require_fem_regions()
             inputs = args.command.commandInputs
             if self.operation in {"send", "solve"}:
                 selection = inputs.addSelectionInput(
@@ -4525,10 +4540,13 @@ def _build_owner(app: object, ui: object) -> None:
         # commands, are demoted under one dropdown so the panel reads as the two
         # actions a user actually starts.
         manage = None
+        fem_regions_enabled = _manifest_feature_enabled(wglink_inbox.FEM_REGIONS)
         for operation, (command_id, name, description) in COMMANDS.items():
             stale = ui.commandDefinitions.itemById(command_id)
             if stale:
                 _delete_quietly(stale)
+            if operation == "fem" and not fem_regions_enabled:
+                continue
             definition = ui.commandDefinitions.addButtonDefinition(
                 command_id,
                 name,
