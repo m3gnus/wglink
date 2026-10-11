@@ -189,26 +189,21 @@ class LegacyClaims:
 def convert_outbox(ipc_folder: Path, *, solve_files: Any) -> dict[str, list[str]]:
     """Write unchanged ids and fields to WG before removing unanswered items.
 
-    Schema 4 takes Send and Solve. Schema 3 takes only Solve; an earlier Send
-    is removed with an explicit not-delivered notice. Without a compatible WG,
+    A compatible WG takes Send and Solve. Without both delivery channels,
     nothing moves. Answered items and foreign files are left untouched.
     """
 
     result: dict[str, list[str]] = {
         "converted": [], "left": [], "abandoned": [], "failed": [],
     }
-    advertised = solve_files.wg_request_capability(ipc_folder)
     queue = LegacyQueue(ipc_folder)
     items, _foreign = queue.scan()
     pending = [item for item in items if item.get("answer") is None]
-    if advertised is None or advertised < solve_files.DELIVERY_VERSION:
+    if not solve_files.wg_speaks_delivery_version(ipc_folder):
         result["left"] = [item["operationId"] for item in pending]
         return result
     for item in pending:
         operation_id = item["operationId"]
-        if item["kind"] == KIND_SNAPSHOT and advertised < solve_files.WG_REQUEST_SCHEMA_VERSION:
-            result["abandoned" if queue.delete(operation_id) else "failed"].append(operation_id)
-            continue
         try:
             if not (item["kind"] == KIND_SOLVE and item.get("fileWritten")):
                 solve_files.write_wg_request(

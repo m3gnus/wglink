@@ -146,8 +146,8 @@ Relink remain full head-less APIs but are not panel commands.
   full WG viewport model. **Send to CAD** in Waveguide Generator also publishes
   a one-shot handoff beside the completed bundle: WGLink inserts a new link into
   the active Fusion design automatically, including after a cold start. If that
-  bundle is already linked in the active document, the existing watcher offers
-  the normal in-place Update instead of inserting a duplicate. For assemblies
+  bundle is already linked, WG must send an explicit Update handoff for its
+  exact target; an Insert refuses the duplicate. Exports are no longer watched. For assemblies
   containing repeated placements of one design, WG includes the chosen
   `expectedInstanceId` beside the expected document id. WGLink updates only the
   uniquely matching managed instance. A missing selection for repeated links,
@@ -227,20 +227,19 @@ Commands and requests cross through WG's machine-local IPC folder,
 `<WG data folder>/ipc/wglink`. The contract is WG's
 `docs/architecture/CAD-OPERATIONS.md`; WGLink implements the add-in's half.
 
-- **Delivery version 3, and nothing older.** Every request, in either
-  direction, is its own file with `schemaVersion` 3. There is no single-slot
-  marker and no twin. The heartbeat reports `deliveryVersion: 3`, and WG
-  refuses an add-in that reports less, asking for the add-in it installs. WGLink
-  in turn needs WG to advertise version 3 in `wg-capabilities.json`; an older WG
-  gets no solve command, its requests are never run, and WGLink says once per
-  session that WG needs updating. WG installs and updates its own managed
-  WGLink, so the two are always the pair that shipped together.
+- **Capability gate before export or mutation.** Send, Solve, Insert and Update
+  require a schema-1 `wg-capabilities.json` advertising integer
+  `solveCommandDelivery >= 4` and `fusionRequestDelivery >= 3`. Product version
+  strings do not establish compatibility. A WG advertising older or invalid
+  delivery values is refused with "Update Waveguide Generator" before export
+  or mutation; missing inbox advertisement reports "not collecting requests".
+  Fusion-bound requests and the heartbeat retain delivery version 3. Optional
+  manifest requirements are checked separately (Send/Solve also need
+  `automaticDomain` and `documentUp`; source identity is optional). The add-in version stays 0.2.1.
 - **Send and Solve: one request file each (the WG request inbox).** Both write
   `.wg-solve-requests/<operationId>.json` and nothing else, whatever the activation gate says — and differ only in `kind`
-  (`receive_snapshot` or `prepare_and_solve`). For a WG that advertises
-  `solveCommandDelivery` 4 the file is schema 4; for one that advertises 3,
-  Solve writes the schema-3 file as before and **Send is refused**, because a
-  schema-3 reader ignores `kind` and would start a solve. A WG that advertises
+  (`receive_snapshot` or `prepare_and_solve`). Both write schema 4; a WG
+  advertising only inbox 3 is refused for both commands. A WG that advertises
   nothing is "not collecting requests", and both refuse. The outcome is said at
   command time: "Written to WG's inbox (request …)" when WG advertises
   `solveAcknowledgement` (then WGLink looks for WG's
@@ -280,9 +279,9 @@ Commands and requests cross through WG's machine-local IPC folder,
   guaranteed to reach it either.
 - **Items an earlier session queued** in `.wglink-outbox` are converted at
   start-up, against what WG advertises then:
-  into request files at schema 4; at 3, solves convert and snapshots are
-  reported as not delivered and removed with one notice;
-  with nothing advertised, nothing moves until a later start-up. An item whose
+  into request files when both delivery channels are compatible. With an
+  incompatible WG or no inbox advertised, unanswered items stay queued until
+  a later start-up with a compatible WG. An item whose
   write fails, or whose outbox file is held, is kept and reported once; the next
   start-up writes it again under the same id, which WG recovers as the same
   operation. A final answer stored by an earlier session is never resent; an
@@ -424,12 +423,82 @@ read, so neither `id(document)` nor holding the object says anything durable
 about the document. A document that cannot be named at all is cached under
 nothing and reports "cannot tell".
 
+## File delivery modules
+
+`WGLink.py` owns the Fusion UI, main-thread dispatch and optional file request
+service. The former `wglink_watch.py` is split by responsibility:
+
+| Module | Responsibility | Old range at `7ec3c90` |
+|---|---|---|
+| `wglink_inbox.py` | WG capabilities, Send/Solve inbox writer, acknowledgement reader, atomic request helpers | 133–706, with the relevant constants/helpers from the header |
+| `wglink_handoff.py` | Insert/Update handoffs, return-request readers, ordering, claims and recovery | 708–1135 |
+| `wglink_status.py` | `.fusion-status.json` payload and durable writer/removal | 1152–1385 |
+
+The planned status start at line 1137 was the export `Announcement` record;
+status actually starts at line 1152 in `7ec3c90`. At this slice's starting HEAD,
+inbox definitions were at 133–700, handoff definitions at 702–1118, and status
+at 1135–1375. A5-1's durable directory sync in status publication is retained. `Announcement`, `ExportWatcher`,
+export identity scanning and newer-export prompts are deleted. The user presses
+Send; publishing a new export alone never prompts or changes Fusion geometry.
+Explicit Insert/Update commands and WG handoffs remain.
+
+## WG packaged-pair references and R-2 re-pin
+
+The WG `dev` files `server/tests/test_wglink_packaged_pair.py`,
+`server/tests/test_wglink_shared_protocol.py` and
+`scripts/build_wglink_package.py` reference these add-in paths/symbols:
+
+| Add-in source path | Referenced symbols or contract |
+|---|---|
+| `fusion-addins/WGLink/WGLink.py` | `_fingerprint_hash` extracted by the shared-protocol test; package builder requires the file |
+| `fusion-addins/WGLink/WGLink.manifest` | `version` must match WG's `integrations/wglink/source.json` `addinVersion` (still 0.2.1) |
+| `fusion-addins/WGLink/wglink_core.py` | literal `PACKAGED_RUNTIME_FILE = "wglink_runtime.json"` |
+| `fusion-addins/WGLink/wglink_return.py` | `build_return_manifest`, `dumps_return_manifest`; standalone loader and its failure/foreign-module checks |
+| `fusion-addins/WGLink/wglink_watch.py` | packaged-pair test: `CAPABILITIES_FILENAME`, `write_solve_request`; shared-protocol test: `write_wg_request` |
+| `fusion-addins/WGLink/wglink_protocol.py` | standalone loader dependency and byte-for-byte vendored provenance; protocol contracts listed below |
+| `tests/fixtures/wgreturn-endpoint-oracle/` | shared `PROVENANCE.json`, `cases.json`, `goldens.json`, `wg_ingress_cases.json` bytes |
+| `scripts/wglink_resample.py` | required source-preserving package member |
+| `LICENSE` | required source-preserving package member |
+| `fusion-addins/WGLink/**` | every regular file is included recursively, excluding bytecode/cache; new modules need no builder enumeration change |
+
+The shared-protocol tests reference the preserved vendored protocol symbols
+`canonical_json`, `UTF8_STRICT` and the `_wg_`-prefixed profile objects:
+`SUPPORTED_MAJOR`, `SUPPORTED_VERSION`, `SUPPORTED_FEATURES`, `EXPORT_FRAMES`,
+`DOCUMENT_UP_FEATURE`, `DOCUMENT_UP_AXES`, `DOMAIN_PLANES`,
+`DOMAIN_KIND_FOR_PLANES`, `REDUCED_DOMAIN_FEATURE`, `DOMAIN_AUTOMATIC_FEATURE`,
+`DOMAIN_AUTOMATIC`, `CUT_FEATURE_KINDS`, `CUT_TOOL_KINDS`, `CUT_ORIGIN_PLANES`,
+`CUT_KEPT_SIDES`, `SOURCE_IDENTITY_FEATURE`, `GMSH_PHYSICAL_NAME_MAX_BYTES`,
+`SOURCE_IDENTITY_MAX_BYTES`, `WORST_CASE_SOURCE_TAG`, `REQUIRED_BASE_FEATURES`,
+`FORBIDDEN_VERDICT_KEYS`, `_WINDOWS_DRIVE`, plus `_mapping`, `_list`, `_string`,
+`_integer`, `_required`, `_portable_member_name`, `_fail` and `validate_manifest`.
+The literal comparison also scans all `_wg_` functions and uppercase constants.
+These protocol bytes and fixtures are unchanged by this split.
+
+**R-2:** in both WG test files, change the `_from_package(...,
+"wglink_watch.py")` load to `"wglink_inbox.py"`. The three inbox symbols above
+keep their names and signatures. The existing loader already supplies
+`wglink_protocol`, the only dependency of the standalone inbox, so it needs no
+other change. `write_solve_request` still writes schema 3 for the packaged-pair
+oracle, but now requires advertised inbox 4 and Fusion delivery 3; WG `dev`'s
+`capabilities()` already advertises these. The production Send/Solve planner
+always writes schema 4. No compatibility re-export is retained.
+
+When re-pinning, update WG's `integrations/wglink/source.json` commit and
+`server/cadlink/wglink_protocol.source.json` provenance commit together as
+appropriate; the protocol SHA stays the same. WG's `server/tests/fixtures/wgreturn-endpoint-oracle/PROVENANCE.json`
+`addin_commit` must match the package pin (its test asserts this), so
+regenerate/update that provenance. If the add-in shared-fixture provenance
+changes, re-copy it to WG's `server/tests/fixtures/wglink-shared-protocol/` and
+update that directory's `MANIFEST.sha256` consistently. Rebuild the package and run both WG suites against the new pin.
+The builder itself needs no code change, and `addinVersion` remains 0.2.1.
+
 ## Automatic coordination, and switching it on
 
 WGLink runs two engines that act without a user command: the four-second
 watch tick and owner-candidate promotion. Together they resolve every managed link
 on a timer, publish status every tick, apply WG's handoffs and return requests,
-and offer newer exports. That is **automatic coordination**, and it is off by
+from explicit requests. Exports are no longer watched and no newer-export
+prompt is offered. That is **automatic coordination**, and it is off by
 default.
 
 The owner can switch it on in WGLink's own settings file,
@@ -445,8 +514,7 @@ change it. A missing or invalid value leaves coordination off; only a JSON
 `true` enables it. An invalid value is reported as `invalid`. With it off:
 
 - neither engine starts or registers;
-- WG's handoffs and return requests, and the newer-export prompt, are not
-  consumed. Insert and Update remain as commands;
+- WG's handoffs and return requests are not consumed. Insert and Update remain as commands;
 - status is published once at start-up, after each command, and removed at
   shutdown, never on a clock. WG therefore sees Fusion's status age out between
   commands;
@@ -501,7 +569,7 @@ lease with two phases:
    session id, because they cannot service session-scoped requests. An orderly
    owner removes its panel/status before releasing. If its worker disappears,
    the lease expires after three watch intervals; exactly one candidate claims
-   it, transactionally rebuilds the panel/watcher, and becomes the IPC owner.
+   it, transactionally rebuilds the panel and file request service, and becomes the IPC owner.
    A delayed stop from the former owner sees that its lease is gone and cannot
    delete its successor's UI or event.
 
@@ -673,8 +741,7 @@ Restart Fusion and use the WGLink toolbar panel under **Utilities**. The
 manifest sets `runOnStartup` to `true`: start-up only registers a panel and its
 command definitions, and every piece of geometry work happens when a command is
 executed, so there is nothing heavy to defer. Leaving it `false` meant the panel
-was gone after each Fusion restart until it was started by hand, which also kept
-the export watcher from ever running.
+was gone after each Fusion restart until it was started by hand.
 
 Icons live in `resources/<operation>/{16x16,32x32,64x64}.png` and are generated
 by `scripts/make_wglink_icons.py`. A checkout without them still works; Fusion

@@ -213,16 +213,16 @@ def test_source_identity_is_declared_only_when_wg_advertises_an_integer(
 ):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "fusion-addins" / "WGLink"))
     try:
-        import wglink_watch
+        import wglink_inbox
     finally:
         sys.path.pop(0)
-    target = tmp_path / wglink_watch.CAPABILITIES_FILENAME
+    target = tmp_path / wglink_inbox.CAPABILITIES_FILENAME
     if isinstance(payload, str):
         target.write_text(payload, encoding="utf-8")
     elif payload is not None:
         target.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert wglink_watch.wg_source_identity(tmp_path) is expected
+    assert wglink_inbox.wg_source_identity(tmp_path) is expected
 
 
 # --------------------------------------------------------- legacy is unchanged

@@ -1,6 +1,6 @@
 """Author WG source roles and body declarations, and preview a return.
 
-Deliberately free of ``adsk``, exactly like :mod:`wglink_watch`: every Fusion
+Deliberately free of ``adsk``, exactly like :mod:`wglink_inbox`: every Fusion
 API call has to happen on Fusion's main thread inside a command handler, so
 WGLink.py owns the dialogs, the live entities and every write, while this
 module owns the decisions -- which appearance name a role means, which of the

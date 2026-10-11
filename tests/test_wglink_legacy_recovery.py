@@ -94,13 +94,13 @@ def test_legacy_published_outcome_is_used(monkeypatch, tmp_path, kind, outcome, 
 def test_legacy_claim_is_kept_when_publication_fails(monkeypatch, tmp_path):
     module, ipc, _snapshot = _fixture(monkeypatch, tmp_path)
     claim = _claim(ipc)
-    original = module.wglink_watch.write_fusion_status_payload
+    original = module.wglink_status.write_fusion_status_payload
     def failed(*args):
         raise OSError("held status")
-    monkeypatch.setattr(module.wglink_watch, "write_fusion_status_payload", failed)
+    monkeypatch.setattr(module.wglink_status, "write_fusion_status_payload", failed)
     module._start_without_coordination()
     assert claim.exists()
-    monkeypatch.setattr(module.wglink_watch, "write_fusion_status_payload", original)
+    monkeypatch.setattr(module.wglink_status, "write_fusion_status_payload", original)
     module._start_without_coordination()
     assert not claim.exists()
 

@@ -2,7 +2,9 @@
 
 WGLink is the maintained Fusion add-in for sending Fusion geometry to Waveguide Generator (WG), solving it there, and inserting or updating native WG geometry in Fusion. The add-in lives in `fusion-addins/WGLink/`. WG's platform installers package WGLink for macOS and Windows.
 
-Send, Solve, Insert/Update handoffs, acknowledgements and status exchange use files in WG's IPC folder. Send imports a snapshot; Solve also requests a solve. Each explicit command has its own request id.
+Send, Solve, Insert/Update handoffs, acknowledgements and status exchange use files in WG's IPC folder. Send imports a snapshot; Solve also requests a solve. Each explicit command has its own request id. Exports are no longer watched: the user presses Send, or explicitly requests Insert/Update. A new export alone never prompts Fusion.
+
+File delivery is split into `wglink_inbox.py` (capabilities, requests and acknowledgements), `wglink_handoff.py` (Insert/Update and return requests) and `wglink_status.py` (Fusion status). Send, Solve, Insert and Update require WG to advertise request inbox 4 and Fusion delivery 3; incompatible delivery is refused with "Update Waveguide Generator". See the implementation guide for the WG packaged-pair references and R-2 re-pin changes.
 
 The former WG Metal pipeline is maintained separately as a frozen fallback. It is not part of this repository or WGLink's updater.
 
@@ -15,7 +17,7 @@ The former WG Metal pipeline is maintained separately as a frozen fallback. It i
 - [Headless workflow status](docs/HEADLESS.md)
 - [Retired pipeline guide](docs/WGMETAL-PIPELINE-GUIDE.md)
 
-WGLink's Send and Solve dialogs use an automatic model domain; there is no manual Model dropdown. With a current WG, explicit exports also record surviving Fusion origin-plane cut history and the Y-up/Z-up modelling orientation. Older WG versions receive neither new manifest feature and retain their previous absent-domain behaviour.
+WGLink's Send and Solve dialogs use an automatic model domain; there is no manual Model dropdown. With a current WG, explicit exports also record surviving Fusion origin-plane cut history and the Y-up/Z-up modelling orientation. Send/Solve also require WG to advertise those manifest capabilities before a return is exported.
 
 ## Install
 

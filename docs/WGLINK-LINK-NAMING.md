@@ -56,7 +56,7 @@ Traced, not guessed. The surprise is how little it carries.
 | `wglink_core.py:~2754` | the timeline group's name |
 | `wglink_core.py:3176` | rewritten from the bundle on every Update |
 | `wglink_core.py:~3481` | `bundle_design_name` in the Audit report |
-| `wglink_watch.py:260` | published as `designName` in `.fusion-status.json` |
+| `wglink_status.py:97` | published as `designName` in `.fusion-status.json` |
 | `wglink_workspace.py:53, :197` | the Insert dropdown's bundle label |
 | `WGLink.py:444` | the managed-link chooser's label |
 

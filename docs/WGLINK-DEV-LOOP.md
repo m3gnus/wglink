@@ -36,6 +36,22 @@ first's panel and command definitions, and the symptoms (an empty panel, or
 buttons that vanish on stop) look nothing like the cause. Syncing in place keeps
 exactly one registration at exactly one path.
 
+## File delivery layout
+
+`WGLink.py` owns the UI and main-thread request service. `wglink_inbox.py`
+handles WG capabilities, Send/Solve request writes and acknowledgement reads;
+`wglink_handoff.py` handles explicit Insert/Update and return requests;
+`wglink_status.py` writes `.fusion-status.json`. The old `wglink_watch.py`
+and export watcher are removed. Exports are no longer watched: the user presses
+Send, and new WG exports require an explicit Insert/Update command or handoff.
+The optional tick only services explicit file requests and publishes status.
+
+Send, Solve, Insert and Update require advertised `solveCommandDelivery >= 4`
+and `fusionRequestDelivery >= 3` under capability schema 1. Test the refusal
+with older advertised values; product version strings are ignored. Keep the
+add-in version at 0.2.1 during feature work. WG's R-2 test-loader and provenance
+changes are listed in the implementation guide's packaged-pair reference table.
+
 ## Reading file status
 
 WGLink exchanges requests and acknowledgements through files; there is no HTTP

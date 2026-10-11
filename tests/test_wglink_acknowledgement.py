@@ -27,7 +27,7 @@ from test_wglink_transfer import (
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "fusion-addins" / "WGLink"))
-import wglink_watch  # noqa: E402
+import wglink_inbox  # noqa: E402
 
 
 def _ack_payload(request_id: str, outcome: str, reason: str | None = None, **extra) -> dict:
@@ -46,7 +46,7 @@ def _ack_payload(request_id: str, outcome: str, reason: str | None = None, **ext
 
 
 def _write_ack(ipc: Path, request_id: str, payload: object) -> Path:
-    folder = ipc / wglink_watch.ACK_DIRECTORY
+    folder = ipc / wglink_inbox.ACK_DIRECTORY
     folder.mkdir(exist_ok=True)
     path = folder / f"{request_id}.json"
     path.write_text(payload if isinstance(payload, str) else json.dumps(payload, indent=2, sort_keys=True))
@@ -54,7 +54,7 @@ def _write_ack(ipc: Path, request_id: str, payload: object) -> Path:
 
 
 def _advertise_acks(ipc: Path, value: object = 1) -> None:
-    path = ipc / wglink_watch.CAPABILITIES_FILENAME
+    path = ipc / wglink_inbox.CAPABILITIES_FILENAME
     payload = json.loads(path.read_text())
     payload["solveAcknowledgement"] = value
     path.write_text(json.dumps(payload))
@@ -81,7 +81,7 @@ def _tick(fixture) -> list[str]:
 
 
 def _claim(fixture, request_id: str) -> None:
-    folder = fixture.ipc / wglink_watch.SOLVE_REQUESTS_DIRECTORY
+    folder = fixture.ipc / wglink_inbox.SOLVE_REQUESTS_DIRECTORY
     (folder / f"{request_id}.json").rename(folder / f".wglink-claim-{request_id}.json")
 
 
@@ -143,7 +143,7 @@ def test_an_ack_that_appears_late_moves_the_wording_on(monkeypatch, tmp_path: Pa
     for _ in range(3):
         assert _tick(fixture) == []
         assert len(fixture.timers) == 1  # one timer re-armed, no thread
-        assert fixture.timers[0][0] == wglink_watch.ACK_POLL_SECONDS
+        assert fixture.timers[0][0] == wglink_inbox.ACK_POLL_SECONDS
     _write_ack(fixture.ipc, request_id, _ack_payload(request_id, "accepted"))
 
     assert _tick(fixture) == []
@@ -164,7 +164,7 @@ def test_an_unparsable_ack_is_not_yet(monkeypatch, tmp_path: Path, content: str)
 def test_no_ack_after_the_wait_is_taken_not_confirmed(monkeypatch, tmp_path: Path) -> None:
     fixture, request_id = _acknowledging(monkeypatch, tmp_path, "WGLink_ack_timeout")
     _claim(fixture, request_id)
-    monkeypatch.setattr(fixture.module.wglink_watch, "ACK_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(fixture.module.wglink_inbox, "ACK_WAIT_SECONDS", 0.0)
 
     assert _tick(fixture) == ["WGLink request not confirmed"]
 
@@ -179,7 +179,7 @@ def test_a_request_still_in_the_inbox_after_a_minute_is_the_not_picked_up_notice
     monkeypatch, tmp_path: Path
 ) -> None:
     fixture, request_id = _acknowledging(monkeypatch, tmp_path, "WGLink_ack_untaken")
-    monkeypatch.setattr(fixture.module.wglink_watch, "SOLVE_PICKUP_NOTICE_SECONDS", 0.0)
+    monkeypatch.setattr(fixture.module.wglink_inbox, "SOLVE_PICKUP_NOTICE_SECONDS", 0.0)
 
     assert _tick(fixture) == ["WGLink request waiting"]
     assert fixture.module._recent_outcomes[-1]["outcome"] == "notTaken"
@@ -219,19 +219,19 @@ def test_matching_manifest_and_kind_are_accepted(monkeypatch, tmp_path: Path) ->
 def test_unknown_fields_and_other_schema_versions(tmp_path: Path) -> None:
     rid = "0b1c2d3e-0000-4000-8000-000000000001"
     _write_ack(tmp_path, rid, _ack_payload(rid, "accepted", jobId="job-1", future="x"))
-    assert wglink_watch.read_acknowledgement(tmp_path, rid) == ("accepted", None)
+    assert wglink_inbox.read_acknowledgement(tmp_path, rid) == ("accepted", None)
 
     _write_ack(tmp_path, rid, _ack_payload(rid, "accepted", schemaVersion=2))
-    assert wglink_watch.read_acknowledgement(tmp_path, rid) is None
+    assert wglink_inbox.read_acknowledgement(tmp_path, rid) is None
 
     _write_ack(tmp_path, rid, _ack_payload(rid, "maybe"))
-    assert wglink_watch.read_acknowledgement(tmp_path, rid) is None
+    assert wglink_inbox.read_acknowledgement(tmp_path, rid) is None
 
     _write_ack(tmp_path, rid, _ack_payload(rid, "accepted", operationId="another"))
-    assert wglink_watch.read_acknowledgement(tmp_path, rid) is None
+    assert wglink_inbox.read_acknowledgement(tmp_path, rid) is None
 
-    assert wglink_watch.read_acknowledgement(tmp_path, "../escape") is None
-    assert wglink_watch.read_acknowledgement(tmp_path / "missing", rid) is None
+    assert wglink_inbox.read_acknowledgement(tmp_path, "../escape") is None
+    assert wglink_inbox.read_acknowledgement(tmp_path / "missing", rid) is None
 
 
 @pytest.mark.parametrize("value", [None, 0, True, "1"], ids=["absent", "zero", "bool", "string"])
@@ -239,14 +239,14 @@ def test_only_a_capability_of_at_least_one_enables_ack_reading(tmp_path: Path, v
     _advertise(tmp_path, 4)
     if value is not None:
         _advertise_acks(tmp_path, value)
-    assert wglink_watch.wg_acknowledges(tmp_path) is False
+    assert wglink_inbox.wg_acknowledges(tmp_path) is False
 
     _advertise_acks(tmp_path, 1)
-    assert wglink_watch.wg_acknowledges(tmp_path) is True
-    payload = json.loads((tmp_path / wglink_watch.CAPABILITIES_FILENAME).read_text())
+    assert wglink_inbox.wg_acknowledges(tmp_path) is True
+    payload = json.loads((tmp_path / wglink_inbox.CAPABILITIES_FILENAME).read_text())
     payload["schemaVersion"] = 2
-    (tmp_path / wglink_watch.CAPABILITIES_FILENAME).write_text(json.dumps(payload))
-    assert wglink_watch.wg_acknowledges(tmp_path) is False
+    (tmp_path / wglink_inbox.CAPABILITIES_FILENAME).write_text(json.dumps(payload))
+    assert wglink_inbox.wg_acknowledges(tmp_path) is False
 
 
 @pytest.mark.parametrize("operation", ["send", "solve"])
@@ -263,7 +263,7 @@ def test_without_the_capability_the_legacy_path_stays_and_never_says_solving(
     assert "solving" not in text.lower() and "Written to WG's inbox" not in text
     assert f"(request {payload['operationId'][:8]})" in text
     [(delay, _function)] = fixture.timers
-    assert delay == wglink_watch.SOLVE_PICKUP_NOTICE_SECONDS
+    assert delay == wglink_inbox.SOLVE_PICKUP_NOTICE_SECONDS
     assert _tick(fixture) == ["WGLink request waiting"]  # today's not-taken notice only
 
 
@@ -287,7 +287,7 @@ def test_the_reader_understands_what_wgs_writer_produced(tmp_path: Path, name: s
     payload = _packaged(name)
     _write_ack(tmp_path, payload["commandId"], payload)
 
-    outcome, reason = wglink_watch.read_acknowledgement(
+    outcome, reason = wglink_inbox.read_acknowledgement(
         tmp_path,
         payload["commandId"],
         kind=payload["kind"],
@@ -299,9 +299,9 @@ def test_the_reader_understands_what_wgs_writer_produced(tmp_path: Path, name: s
     if outcome == "refused":
         assert reason  # WG's text, shown verbatim
     # A request of another kind or manifest under the same id is not this ack's.
-    assert wglink_watch.read_acknowledgement(tmp_path, payload["commandId"], kind="other") is None
+    assert wglink_inbox.read_acknowledgement(tmp_path, payload["commandId"], kind="other") is None
     assert (
-        wglink_watch.read_acknowledgement(
+        wglink_inbox.read_acknowledgement(
             tmp_path, payload["commandId"], manifest_sha256="sha256:" + "f" * 64
         )
         is None

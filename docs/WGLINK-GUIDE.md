@@ -42,6 +42,18 @@ One-time setup on the WG side: choose a **WGLink folder** in WG under
 **Settings → CAD Link**. The add-in reads the same setting, so Insert and
 Send need no folder dialogs afterwards.
 
+Exports are no longer watched. Press **Send to WG** to send Fusion geometry;
+use **Update** or an explicit WG **Send to CAD** Update handoff to apply a new
+WG export. Creating an export alone never raises a newer-export prompt.
+Send, Solve, Insert and Update refuse incompatible WG delivery before export
+or model mutation and ask you to **Update Waveguide Generator**. Compatibility
+comes from WG's advertised capabilities, not its product version string.
+
+Internally, `wglink_inbox.py` handles WG requests and acknowledgements,
+`wglink_handoff.py` reads Insert/Update and return requests, and
+`wglink_status.py` publishes Fusion status. `WGLink.py` owns the panel and
+main-thread command execution.
+
 ## 2. The panel
 
 Three everyday commands sit directly on the WGLink panel. **Manage WG Link…**
@@ -324,6 +336,6 @@ occurrence where it already is and never moves it back to the origin.)
   reports **Update interrupted — recovery required**: undo the partial change
   or repair the link, then send it from WG again.
 - **Duplicate WGLink installations** — remove the extra registration and
-  restart Fusion. Current copies elect one active panel/watcher and promote a
+  restart Fusion. Current copies elect one active panel and file request service and promote a
   surviving standby if the owner stops, but a mixed-version duplicate remains
   an unsupported installation to diagnose.

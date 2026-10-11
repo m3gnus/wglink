@@ -29,7 +29,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "fusion-addins" / "WGLink"))
-import wglink_watch  # noqa: E402
+import wglink_inbox  # noqa: E402
+import wglink_handoff  # noqa: E402
+import wglink_status  # noqa: E402
 
 
 CAPABILITIES = "wg-capabilities.json"
@@ -46,7 +48,7 @@ SESSION = "session-a"
 ADVERTISED = {
     "schemaVersion": 1,
     "producer": "waveguide-generator",
-    "solveCommandDelivery": 3,
+    "solveCommandDelivery": 4,
     "fusionRequestDelivery": 3,
 }
 
@@ -66,13 +68,13 @@ def test_manifest_features_are_used_only_when_wg_advertises_them(
 ) -> None:
     _write(ipc / CAPABILITIES, {"schemaVersion": 1, field: capability})
 
-    assert wglink_watch.wg_manifest_feature(ipc, field) is expected
+    assert wglink_inbox.wg_manifest_feature(ipc, field) is expected
 
 
 def test_manifest_features_are_absent_for_an_old_or_unreadable_wg(ipc: Path) -> None:
-    assert wglink_watch.wg_manifest_feature(ipc, "automaticDomain") is False
+    assert wglink_inbox.wg_manifest_feature(ipc, "automaticDomain") is False
     _write(ipc / CAPABILITIES, {"schemaVersion": 2, "automaticDomain": 1})
-    assert wglink_watch.wg_manifest_feature(ipc, "automaticDomain") is False
+    assert wglink_inbox.wg_manifest_feature(ipc, "automaticDomain") is False
 
 
 @pytest.fixture(autouse=True)
@@ -225,14 +227,14 @@ class OldWG:
 
 def _next(kind: str, ipc: Path, bundles: Path, session: str = SESSION):
     if kind == RETURNS:
-        return wglink_watch.next_return_request(ipc, session_id=session)
-    return wglink_watch.next_pending_handoff(ipc, bundle_root=bundles)
+        return wglink_handoff.next_return_request(ipc, session_id=session)
+    return wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles)
 
 
 def _acknowledge(kind: str, pending) -> bool:
     if kind == RETURNS:
-        return wglink_watch.acknowledge_return_request(pending)
-    return wglink_watch.acknowledge_handoff(pending)
+        return wglink_handoff.acknowledge_return_request(pending)
+    return wglink_handoff.acknowledge_handoff(pending)
 
 
 def _take(
@@ -254,14 +256,14 @@ def _take(
     seen: set[str] = set()
     while True:
         if kind == HANDOFFS:
-            wglink_watch.discard_superseded_handoffs(ipc, bundle_root=bundles)
+            wglink_handoff.discard_superseded_handoffs(ipc, bundle_root=bundles)
         pending = _next(kind, ipc, bundles, session)
         if pending is None:
             return ran
         if pending.request_id in seen:
             return ran
         seen.add(pending.request_id)
-        claimed = wglink_watch.claim_request(pending)
+        claimed = wglink_handoff.claim_request(pending)
         if claimed is None:
             return ran
         ran.append(claimed.request_id)
@@ -286,7 +288,7 @@ def _write_solve(ipc: Path, tmp_path: Path, command_id: str = "cmd-1") -> Path:
     bundle = workspace / "wgreturn" / "speaker.wgreturn"
     if not bundle.is_dir():
         _return_bundle(tmp_path)
-    return wglink_watch.write_solve_request(
+    return wglink_inbox.write_solve_request(
         ipc,
         command_id=command_id,
         return_id="wgr_1",
@@ -336,13 +338,13 @@ def test_unknown_capability_fields_and_later_versions_are_still_read(
         None,
         "not json at all",
         [],
-        {"schemaVersion": 2, "solveCommandDelivery": 3},
-        {"schemaVersion": True, "solveCommandDelivery": 3},
+        {"schemaVersion": 2, "solveCommandDelivery": 4},
+        {"schemaVersion": True, "solveCommandDelivery": 4},
         {"schemaVersion": 1},
         {"schemaVersion": 1, "solveCommandDelivery": 2},
         {"schemaVersion": 1, "solveCommandDelivery": "3"},
         {"schemaVersion": 1, "solveCommandDelivery": True},
-        {"schemaVersion": 1, "solveCommandDelivery": 3.0},
+        {"schemaVersion": 1, "solveCommandDelivery": 4.0},
     ],
     ids=[
         "absent",
@@ -367,7 +369,7 @@ def test_a_wg_that_does_not_advertise_version_3_gets_no_solve_command(
     elif capability is not None:
         _write(ipc / CAPABILITIES, capability)
 
-    with pytest.raises(wglink_watch.WgOutdatedError, match="Update Waveguide Generator"):
+    with pytest.raises(wglink_inbox.WgOutdatedError, match="Update Waveguide Generator"):
         _write_solve(ipc, tmp_path)
 
     assert not (ipc / ".wg-solve-request.json").exists()
@@ -550,7 +552,7 @@ def test_only_the_newest_unstarted_update_for_one_target_runs(
     insert_two = wg.publish(HANDOFFS, 4, instance=None)
     newer = wg.publish(HANDOFFS, 5, instance="instance-a")
 
-    dropped = wglink_watch.discard_superseded_handoffs(ipc, bundle_root=bundles)
+    dropped = wglink_handoff.discard_superseded_handoffs(ipc, bundle_root=bundles)
 
     assert dropped == [older]
     assert _take(HANDOFFS, ipc, bundles) == [other_target, insert_one, insert_two, newer]
@@ -571,7 +573,7 @@ def test_a_superseded_update_being_claimed_elsewhere_is_left_to_that_claim(
 
     monkeypatch.setattr(os, "rename", taken_first)
 
-    assert wglink_watch.discard_superseded_handoffs(ipc, bundle_root=bundles) == []
+    assert wglink_handoff.discard_superseded_handoffs(ipc, bundle_root=bundles) == []
 
 
 # -- claims an interrupted session left behind ------------------------------------
@@ -583,15 +585,15 @@ def test_leftover_claims_are_listed_with_what_reconciliation_reads(
     wg = WG(ipc, bundles)
     handoff = wg.publish(HANDOFFS, 1, instance="instance-a")
     ret = wg.publish(RETURNS, 2)
-    claimed_handoff = wglink_watch.claim_request(
-        wglink_watch.next_pending_handoff(ipc, bundle_root=bundles)
+    claimed_handoff = wglink_handoff.claim_request(
+        wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles)
     )
-    claimed_return = wglink_watch.claim_request(
-        wglink_watch.next_return_request(ipc, session_id=SESSION)
+    claimed_return = wglink_handoff.claim_request(
+        wglink_handoff.next_return_request(ipc, session_id=SESSION)
     )
     assert claimed_handoff is not None and claimed_return is not None
 
-    claims = wglink_watch.leftover_claims(ipc)
+    claims = wglink_handoff.leftover_claims(ipc)
 
     assert [(claim.channel, claim.request_id) for claim in claims] == [
         ("handoff", handoff), ("returnRequest", ret),
@@ -601,8 +603,8 @@ def test_leftover_claims_are_listed_with_what_reconciliation_reads(
     assert (first.expected_document_id, first.expected_instance_id) == (
         "fusion:doc-a", "instance-a",
     )
-    assert all(wglink_watch.remove_leftover_claim(claim) for claim in claims)
-    assert wglink_watch.leftover_claims(ipc) == []
+    assert all(wglink_handoff.remove_leftover_claim(claim) for claim in claims)
+    assert wglink_handoff.leftover_claims(ipc) == []
 
 
 # -- an older WG is named, not guessed at ------------------------------------------
@@ -614,7 +616,7 @@ def test_requests_from_an_older_wg_are_reported(
 ) -> None:
     OldWG(ipc, bundles).publish(kind, 1)
 
-    found = wglink_watch.outdated_wg_requests(ipc)
+    found = wglink_handoff.outdated_wg_requests(ipc)
 
     folder, slot = KINDS[kind]
     assert found == [slot, f"{folder}/old-req-{kind}-1.json"]
@@ -633,8 +635,8 @@ def test_old_files_beside_a_version_3_advertisement_are_still_an_older_wgs(
     OldWG(ipc, bundles).publish(HANDOFFS, 1)
     _write(ipc / CAPABILITIES, ADVERTISED)
 
-    assert wglink_watch.wg_speaks_delivery_version(ipc) is True
-    assert wglink_watch.outdated_wg_requests(ipc) == [
+    assert wglink_inbox.wg_speaks_delivery_version(ipc) is True
+    assert wglink_handoff.outdated_wg_requests(ipc) == [
         ".fusion-handoff.json", ".fusion-handoffs/old-req-handoff-1.json",
     ]
 
@@ -648,7 +650,7 @@ def test_a_handoff_carries_its_operation_identity_and_exact_target(
     wg = WG(ipc, bundles)
     update = wg.publish(HANDOFFS, 7, instance="instance-a")
 
-    pending = wglink_watch.next_pending_handoff(ipc, bundle_root=bundles)
+    pending = wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles)
 
     assert pending is not None
     assert pending.request_id == pending.operation_id == update
@@ -657,9 +659,9 @@ def test_a_handoff_carries_its_operation_identity_and_exact_target(
     assert pending.exact_target == ("fusion:doc-a", "instance-a")
     assert pending.expected_return_state_hash == "sha256:state-7"
 
-    wglink_watch.acknowledge_handoff(wglink_watch.claim_request(pending))
+    wglink_handoff.acknowledge_handoff(wglink_handoff.claim_request(pending))
     wg.publish(HANDOFFS, 8, instance=None)
-    insert = wglink_watch.next_pending_handoff(ipc, bundle_root=bundles)
+    insert = wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles)
     assert insert is not None and insert.exact_target is None
 
 
@@ -674,7 +676,7 @@ def test_a_handoff_outside_the_bundle_folder_is_never_offered(
     payload["bundlePath"] = str(elsewhere)
     _write(path, payload)
 
-    assert wglink_watch.next_pending_handoff(ipc, bundle_root=bundles) is None
+    assert wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles) is None
 
 
 def test_an_insert_handoff_reads_its_additive_destination_and_requested_time(
@@ -689,7 +691,7 @@ def test_an_insert_handoff_reads_its_additive_destination_and_requested_time(
     })
     _write(path, payload)
 
-    handoff = wglink_watch.read_pending_handoff(path, bundle_root=bundles)
+    handoff = wglink_handoff.read_pending_handoff(path, bundle_root=bundles)
 
     assert handoff.destination == {"kind": "document", "value": "fusion:doc-a"}
     assert handoff.requested_at == "2026-09-15T09:00:00Z"
@@ -707,7 +709,7 @@ def test_new_marker_fields_are_additive_to_the_v3_reader_contract(
     })
     _write(path, payload)
 
-    handoff = wglink_watch.read_pending_handoff(path, bundle_root=bundles)
+    handoff = wglink_handoff.read_pending_handoff(path, bundle_root=bundles)
 
     assert handoff is not None
     assert handoff.request_id == request_id
@@ -720,7 +722,7 @@ def test_new_marker_fields_are_additive_to_the_v3_reader_contract(
 def test_the_heartbeat_publishes_a_links_operation_id_beside_its_export(
     tmp_path: Path,
 ) -> None:
-    marker = wglink_watch.write_fusion_status(
+    marker = wglink_status.write_fusion_status(
         tmp_path,
         session_id="session-a",
         document_name="waveguide v1",
@@ -741,7 +743,7 @@ def test_the_heartbeat_states_its_delivery_version_and_an_interrupted_operation(
 ) -> None:
     """WG refuses an add-in below its version, and reports recovery from this."""
 
-    marker = wglink_watch.write_fusion_status(
+    marker = wglink_status.write_fusion_status(
         tmp_path,
         session_id="session-a",
         document_name="waveguide v1",
@@ -762,7 +764,7 @@ def test_the_heartbeat_states_its_delivery_version_and_an_interrupted_operation(
     }
 
     quiet = json.loads(
-        wglink_watch.write_fusion_status(
+        wglink_status.write_fusion_status(
             tmp_path, session_id="session-a", document_name="waveguide v1", links=[],
         ).read_text(encoding="utf-8")
     )

@@ -48,7 +48,9 @@ def _load_registration_package() -> dict[str, types.ModuleType]:
         "wglink_core",
         "wglink_return",
         "wglink_send",
-        "wglink_watch",
+        "wglink_inbox",
+        "wglink_handoff",
+        "wglink_status",
         "wglink_legacy_queue",
     ):
         loaded[name] = importlib.import_module(f"{_registration_package_name}.{name}")
@@ -61,7 +63,9 @@ wglink_workspace = _registration_modules["wglink_workspace"]
 wglink_author = _registration_modules["wglink_author"]
 wglink_core = _registration_modules["wglink_core"]
 wglink_send = _registration_modules["wglink_send"]
-wglink_watch = _registration_modules["wglink_watch"]
+wglink_inbox = _registration_modules["wglink_inbox"]
+wglink_handoff = _registration_modules["wglink_handoff"]
+wglink_status = _registration_modules["wglink_status"]
 wglink_legacy_queue = _registration_modules["wglink_legacy_queue"]
 format_measurement_mm = _registration_modules["wglink_bundle"].format_measurement_mm
 
@@ -125,7 +129,7 @@ _handlers: list[object] = []
 _definitions: list[object] = []
 _controls: list[object] = []
 _panel = None
-# True only after this registration committed a complete panel + watcher
+# True only after this registration committed a complete panel + file request service
 # transaction. The process-wide lease is separately checked before touching
 # shared UI during shutdown, because an expired owner may already be replaced.
 _owned = False
@@ -159,7 +163,7 @@ GEOMETRY_REFRESH_RETRY_SECONDS = 60.0
 _GEOMETRY_REFRESH_ATTEMPTS_TRACKED = 64
 _geometry_refresh_attempts: dict[str, float] = {}
 OWNER_LEASE_SECONDS = WATCH_INTERVAL_SECONDS * 3
-WATCH_EVENT_ID = f"hornlab_wglink_export_available_{_watch_session_id}"
+WATCH_EVENT_ID = f"hornlab_wglink_file_requests_{_watch_session_id}"
 _candidate_event_id = f"hornlab_wglink_owner_candidate_{_watch_session_id}"
 
 # Executable add-in modules are registration-local. This deliberately tiny
@@ -178,7 +182,6 @@ _ipc_owner_runtime = sys.modules.setdefault(_RUNTIME_MODULE_NAME, _runtime_candi
 if not hasattr(_ipc_owner_runtime, "watch_event_id"):
     _ipc_owner_runtime.watch_event_id = None
 
-_watcher = wglink_watch.ExportWatcher()
 _watch_event = None
 _watch_handler = None
 _watch_stop: threading.Event | None = None
@@ -360,7 +363,7 @@ def _claim_ipc_lease() -> bool:
 
 
 def _activate_ipc_lease() -> bool:
-    """Commit the lease after panel construction and watcher registration."""
+    """Commit the lease after panel construction and file request service registration."""
 
     with _ipc_owner_runtime.lock:
         if _ipc_owner_runtime.owner != _watch_session_id:
@@ -721,14 +724,14 @@ def _source_identity_enabled() -> bool:
     """
 
     try:
-        return wglink_watch.wg_source_identity(wglink_workspace.ipc_folder())
+        return wglink_inbox.wg_source_identity(wglink_workspace.ipc_folder())
     except Exception:  # noqa: BLE001 - an unreadable capability declares nothing
         return False
 
 
 def _manifest_feature_enabled(name: str) -> bool:
     try:
-        return wglink_watch.wg_manifest_feature(
+        return wglink_inbox.wg_manifest_feature(
             wglink_workspace.ipc_folder(), name
         )
     except Exception:  # noqa: BLE001 - an unreadable capability declares nothing
@@ -741,8 +744,8 @@ def _required_manifest_features() -> dict[str, bool]:
     missing = [
         label
         for capability, label in (
-            (wglink_watch.AUTOMATIC_DOMAIN, "automatic CAD domains"),
-            (wglink_watch.DOCUMENT_UP, "Fusion's modelling orientation"),
+            (wglink_inbox.AUTOMATIC_DOMAIN, "automatic CAD domains"),
+            (wglink_inbox.DOCUMENT_UP, "Fusion's modelling orientation"),
         )
         if not _manifest_feature_enabled(capability)
     ]
@@ -1098,7 +1101,7 @@ def _summary(operation: str, report: dict[str, object]) -> str:
             # the one confirmation Fusion shows -- not a second progress bar
             # racing WG's own.
             if report.get("acknowledgement_expected"):
-                closing = wglink_watch.written_to_inbox_text(request_id)
+                closing = wglink_inbox.written_to_inbox_text(request_id)
             else:
                 closing = (
                     f"Sent to WG (request {request_id[:8]}). Progress and results "
@@ -1107,7 +1110,7 @@ def _summary(operation: str, report: dict[str, object]) -> str:
                     else "Sent to WG. Progress and results appear in Waveguide Generator."
                 )
         elif report.get("acknowledgement_expected"):
-            closing = wglink_watch.written_to_inbox_text(request_id)
+            closing = wglink_inbox.written_to_inbox_text(request_id)
         else:
             sent = (
                 f"Sent to Waveguide Generator (request {request_id[:8]}). "
@@ -1186,18 +1189,18 @@ def _write_wg_request(ipc: Path, **fields: object) -> tuple[Path, bool]:
     attempt when none of them reached the rename, so nothing was written.
     """
 
-    path, payload = wglink_watch.plan_wg_request(ipc, **fields)
+    path, payload = wglink_inbox.plan_wg_request(ipc, **fields)
     unknown = False
     last: OSError | None = None
     for attempt in range(WG_REQUEST_WRITE_ATTEMPTS):
         if attempt:
             _retry_pause(WG_REQUEST_RETRY_PAUSE_SECONDS * attempt)
         try:
-            return wglink_watch.publish_wg_request(path, payload), True
+            return wglink_inbox.publish_wg_request(path, payload), True
         except OSError as exc:
             last = exc
-            unknown = unknown or isinstance(exc, wglink_watch.WriteOutcomeUnknown)
-    if wglink_watch.landed_request(path, payload) is not None:
+            unknown = unknown or isinstance(exc, wglink_inbox.WriteOutcomeUnknown)
+    if wglink_inbox.landed_request(path, payload) is not None:
         return path, True
     if unknown:
         return path, False
@@ -1227,7 +1230,7 @@ def _submit_to_wg(report: dict[str, object], kind: str) -> str:
     so later if WG never takes the file.
     """
 
-    channel = "solveCommand" if kind == wglink_watch.KIND_PREPARE_AND_SOLVE else "snapshot"
+    channel = "solveCommand" if kind == wglink_inbox.KIND_PREPARE_AND_SOLVE else "snapshot"
     action = "solve again" if channel == "solveCommand" else "send again"
     ipc = wglink_workspace.ipc_folder(create=True)
     workspace = wglink_workspace.workspace_root()
@@ -1240,7 +1243,7 @@ def _submit_to_wg(report: dict[str, object], kind: str) -> str:
     )
     request_id = str(uuid.uuid4())
     try:
-        relative, manifest = wglink_watch.return_reference(bundle, workspace)
+        relative, manifest = wglink_inbox.return_reference(bundle, workspace)
         path, confirmed = _write_wg_request(
             ipc,
             kind=kind,
@@ -1248,9 +1251,9 @@ def _submit_to_wg(report: dict[str, object], kind: str) -> str:
             return_id=str(report.get("return_id") or "") if channel == "solveCommand" else None,
             bundle_relative=relative,
             manifest_sha256=manifest,
-            requested_at=wglink_watch.utc_timestamp(),
+            requested_at=wglink_inbox.utc_timestamp(),
         )
-    except (wglink_watch.WgOutdatedError, wglink_watch.WgNotCollectingError) as exc:
+    except (wglink_inbox.WgOutdatedError, wglink_inbox.WgNotCollectingError) as exc:
         _begin_request(channel, request_id, DELIVERY)["outcome"] = "refused"
         raise wglink_core.WgLinkError(f"{not_asked}{exc}") from exc
     except OSError as exc:
@@ -1265,7 +1268,7 @@ def _submit_to_wg(report: dict[str, object], kind: str) -> str:
         _begin_request(channel, request_id, DELIVERY)["outcome"] = "unconfirmed"
         report["delivery_unconfirmed"] = True
     # Unconfirmed included: if the file is there after a minute, WG never took it.
-    if wglink_watch.wg_acknowledges(ipc):
+    if wglink_inbox.wg_acknowledges(ipc):
         # WG will say whether it accepted or refused: say only "written" until it does.
         report["acknowledgement_expected"] = True
         _schedule_pickup_check(
@@ -1297,13 +1300,13 @@ def _schedule_pickup_check(
 
     if ack is None:
         _start_pickup_timer(
-            wglink_watch.SOLVE_PICKUP_NOTICE_SECONDS,
+            wglink_inbox.SOLVE_PICKUP_NOTICE_SECONDS,
             wglink_activity.carrying(lambda: _pickup_check(path, channel, request_id)),
         )
         return
     started = time.monotonic()
     _start_pickup_timer(
-        wglink_watch.ACK_POLL_SECONDS,
+        wglink_inbox.ACK_POLL_SECONDS,
         wglink_activity.carrying(
             lambda: _acknowledgement_check(path, channel, request_id, ack, started)
         ),
@@ -1327,15 +1330,15 @@ def _acknowledgement_check(
 
     ipc, kind, manifest = ack
     wglink_activity.record(wglink_activity.PICKUP_CHECK)
-    result = wglink_watch.read_acknowledgement(
+    result = wglink_inbox.read_acknowledgement(
         ipc, request_id, kind=kind, manifest_sha256=manifest
     )
     if result is not None:
         outcome, reason = result
-        if outcome == wglink_watch.ACK_ACCEPTED:
+        if outcome == wglink_inbox.ACK_ACCEPTED:
             _note_outcome(channel, request_id, "accepted")
             # Good news is not worth a prompt: WG shows the operation itself.
-            _log(f"[{PANEL_NAME}] request {request_id[:8]}: {wglink_watch.ACK_ACCEPTED_TEXT}")
+            _log(f"[{PANEL_NAME}] request {request_id[:8]}: {wglink_inbox.ACK_ACCEPTED_TEXT}")
         else:
             _note_outcome(channel, request_id, "refused")
             _modal(
@@ -1345,16 +1348,16 @@ def _acknowledgement_check(
         return
     elapsed = time.monotonic() - started
     if path.exists():
-        if elapsed >= wglink_watch.SOLVE_PICKUP_NOTICE_SECONDS:
+        if elapsed >= wglink_inbox.SOLVE_PICKUP_NOTICE_SECONDS:
             _note_outcome(channel, request_id, "notTaken")
-            _modal(wglink_watch.REQUEST_NOT_TAKEN_MESSAGE, f"{PANEL_NAME} request waiting")
+            _modal(wglink_inbox.REQUEST_NOT_TAKEN_MESSAGE, f"{PANEL_NAME} request waiting")
             return
-    elif elapsed >= wglink_watch.ACK_WAIT_SECONDS:
+    elif elapsed >= wglink_inbox.ACK_WAIT_SECONDS:
         _note_outcome(channel, request_id, "takenUnconfirmed")
-        _modal(wglink_watch.ACK_UNCONFIRMED_TEXT, f"{PANEL_NAME} request not confirmed")
+        _modal(wglink_inbox.ACK_UNCONFIRMED_TEXT, f"{PANEL_NAME} request not confirmed")
         return
     _start_pickup_timer(
-        wglink_watch.ACK_POLL_SECONDS,
+        wglink_inbox.ACK_POLL_SECONDS,
         wglink_activity.carrying(
             lambda: _acknowledgement_check(path, channel, request_id, ack, started)
         ),
@@ -1393,7 +1396,7 @@ def _pickup_check(path: Path, channel: str, request_id: str) -> None:
         _note_outcome(channel, request_id, "taken")
         return
     _note_outcome(channel, request_id, "notTaken")
-    _modal(wglink_watch.REQUEST_NOT_TAKEN_MESSAGE, f"{PANEL_NAME} request waiting")
+    _modal(wglink_inbox.REQUEST_NOT_TAKEN_MESSAGE, f"{PANEL_NAME} request waiting")
 
 
 #: At most this many inbox entries are looked at when WGLink starts.
@@ -1421,11 +1424,11 @@ def _recheck_requests_at_startup() -> None:
     if ipc is None:
         return
     try:
-        pending = wglink_watch.untaken_requests(ipc, limit=STARTUP_RECHECK_LIMIT)
+        pending = wglink_inbox.untaken_requests(ipc, limit=STARTUP_RECHECK_LIMIT)
         if not pending:
             return
         paths = [path for path, _age in pending]
-        remaining = wglink_watch.SOLVE_PICKUP_NOTICE_SECONDS - min(age for _path, age in pending)
+        remaining = wglink_inbox.SOLVE_PICKUP_NOTICE_SECONDS - min(age for _path, age in pending)
         job = wglink_activity.carrying(lambda: _startup_pickup_check(paths))
         if remaining <= 0.0:
             job()
@@ -1442,7 +1445,7 @@ def _startup_pickup_check(paths: list[Path]) -> None:
         _note_outcome("startup", path.stem, "notTaken" if path in waiting else "taken")
     if waiting:
         _modal(
-            wglink_watch.requests_not_taken_at_startup_message(len(waiting)),
+            wglink_inbox.requests_not_taken_at_startup_message(len(waiting)),
             f"{PANEL_NAME} request waiting",
         )
 
@@ -1486,7 +1489,7 @@ def _convert_outbox_at_startup() -> None:
             queue.delete(operation_id)
         result = wglink_legacy_queue.convert_outbox(
             ipc,
-            solve_files=wglink_watch,
+            solve_files=wglink_inbox,
         )
     except Exception as exc:  # noqa: BLE001 - the commands must still load
         _log(f"[{PANEL_NAME}] could not convert queued deliveries: {exc}")
@@ -1594,6 +1597,20 @@ def _hide_export_progress(dialog: object | None) -> None:
         pass
 
 
+def _require_compatible_wg() -> None:
+    """Refuse before export or mutation unless WG advertises the file contract."""
+
+    ipc = wglink_workspace.ipc_folder()
+    try:
+        if ipc is None:
+            if wglink_workspace.missing_workspace() is not None:
+                raise wglink_core.WgLinkError(_no_workspace_text())
+            raise wglink_inbox.WgNotCollectingError(wglink_inbox.WG_NOT_COLLECTING_MESSAGE)
+        wglink_inbox.require_wg_delivery(ipc)
+    except (wglink_inbox.WgOutdatedError, wglink_inbox.WgNotCollectingError) as exc:
+        raise wglink_core.WgLinkError(str(exc)) from exc
+
+
 class CommandExecuteHandler(adsk.core.CommandEventHandler):
     def __init__(self, operation: str):
         super().__init__()
@@ -1612,13 +1629,13 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         # cancelled the bundle picker or the detach confirmation changed
         # nothing, so there is nothing for the next tick to look at.
         ran = False
-        # Hold the watcher off: it must not open a prompt over a running
-        # command, and an operation that rewrites a link's stored export id
-        # would otherwise be surveyed halfway through.
+        # Keep file requests from running over an explicit command.
         exported = False
         _command_busy = True
         try:
             adsk.doEvents()
+            if self.operation in {"send", "solve", "insert", "update"}:
+                _require_compatible_wg()
             inputs = args.command.commandInputs
             options = _command_options(inputs)
             if self.operation == "insert":
@@ -1660,9 +1677,9 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 report = dict(report)
                 report["request_id"] = _submit_to_wg(
                     report,
-                    wglink_watch.KIND_PREPARE_AND_SOLVE
+                    wglink_inbox.KIND_PREPARE_AND_SOLVE
                     if solve
-                    else wglink_watch.KIND_RECEIVE_SNAPSHOT,
+                    else wglink_inbox.KIND_RECEIVE_SNAPSHOT,
                 )
                 report["solve_requested"] = solve
                 _update_export_progress(progress, 3, "Return ready in Waveguide Generator.")
@@ -1698,10 +1715,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             # Cleared here; re-driven by the _command_finished() below, after
             # this command has scheduled its own follow-up.
             _command_busy = False
-            # This command may have moved the link on; re-survey from scratch so
-            # a stale announcement cannot re-offer what was just applied.
-            _watcher.reset()
-            # It may also have moved the geometry, and a command the user ran
+            # This command may have moved the geometry, and a command the user ran
             # is an explicit cause. One coalesced refresh, paid for on the next
             # tick, is how a linked document's published state becomes current
             # again without a timer measuring anything. A cancelled command
@@ -1966,8 +1980,8 @@ def _geometry_change_key(design: object, records: dict) -> tuple:
     alone; the stored export id and edit version catch an Update.
     """
 
-    automatic_domain = _manifest_feature_enabled(wglink_watch.AUTOMATIC_DOMAIN)
-    document_up = _manifest_feature_enabled(wglink_watch.DOCUMENT_UP)
+    automatic_domain = _manifest_feature_enabled(wglink_inbox.AUTOMATIC_DOMAIN)
+    document_up = _manifest_feature_enabled(wglink_inbox.DOCUMENT_UP)
     parts: list[object] = [
         _source_authoring_generation,
         _source_identity_enabled(),
@@ -2013,9 +2027,9 @@ def _measure_geometry_state(app: object, records: dict) -> dict[str, object]:
                 **({"anchor_instance_id": first_instance} if first_instance else {}),
                 "source_identity": _source_identity_enabled(),
                 "automatic_domain": _manifest_feature_enabled(
-                    wglink_watch.AUTOMATIC_DOMAIN
+                    wglink_inbox.AUTOMATIC_DOMAIN
                 ),
-                "document_up": _manifest_feature_enabled(wglink_watch.DOCUMENT_UP),
+                "document_up": _manifest_feature_enabled(wglink_inbox.DOCUMENT_UP),
             },
         )
         document_signature_hash = str(return_state.get("hash") or "")
@@ -2476,7 +2490,7 @@ def _document_links(timings: dict[str, float] | None = None) -> list[dict[str, o
     only *shows* links catches it; one that decides from them refuses.
 
     Called on Fusion's main thread only. What it returns is deliberately inert
-    data: the watcher runs on another thread and must never hold a live Fusion
+    data: the file request worker runs on another thread and must never hold a live Fusion
     object.
 
     Identity comes from stored attributes and costs nothing, so it is read on
@@ -2827,7 +2841,7 @@ def _publish_fusion_status(snapshot: dict[str, object] | None = None) -> bool:
     if _recent_outcomes:
         diagnostics["recentOutcomes"] = [dict(item) for item in _recent_outcomes]
     try:
-        payload = wglink_watch.fusion_status_payload(
+        payload = wglink_status.fusion_status_payload(
             session_id=_watch_session_id,
             document_name=current["document_name"],
             document_id=current["document_id"],
@@ -2840,52 +2854,28 @@ def _publish_fusion_status(snapshot: dict[str, object] | None = None) -> bool:
     except Exception:  # noqa: BLE001 - presence must never block CAD commands
         return False
     try:
-        wglink_watch.write_fusion_status_payload(folder, payload)
+        wglink_status.write_fusion_status_payload(folder, payload)
     except Exception:  # noqa: BLE001 - presence must never block CAD commands
         return False
     return True
 
 
-def _apply_announced_updates(announcements: list) -> None:
-    applied, failed = [], []
-    for announcement in announcements:
-        try:
-            wglink_core.update(_app(), announcement.bundle_path, {
-                "instance_id": announcement.instance_id,
-            })
-        except Exception as exc:  # noqa: BLE001 - one bad link must not stop the rest
-            failed.append(f"{announcement.instance_id}: {exc}")
-            # Let the next tick offer it again rather than swallowing it. This
-            # is the whole retry: announcement state is per instance and is not
-            # gated on the bundle changing again, which it will not.
-            _watcher.forget(announcement.instance_id)
-        else:
-            applied.append(announcement.describe())
-    lines = []
-    if applied:
-        lines.append("Updated:\n" + "\n".join(f"  • {item}" for item in applied))
-    if failed:
-        lines.append("Not updated:\n" + "\n".join(f"  • {item}" for item in failed))
-    if lines:
-        _message("\n\n".join(lines), f"{PANEL_NAME} update")
-
-
-def _pending_handoff() -> wglink_watch.PendingHandoff | None:
+def _pending_handoff() -> wglink_handoff.PendingHandoff | None:
     ipc = wglink_workspace.ipc_folder(create=True)
     bundles = wglink_workspace.bundle_folder()
     if ipc is None or bundles is None:
         return None
-    for request_id in wglink_watch.discard_superseded_handoffs(ipc, bundle_root=bundles):
+    for request_id in wglink_handoff.discard_superseded_handoffs(ipc, bundle_root=bundles):
         # Visible in the heartbeat: which request was dropped, and why.
         _note_outcome("handoff", request_id, "superseded")
-    return wglink_watch.next_pending_handoff(ipc, bundle_root=bundles)
+    return wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles)
 
 
-def _pending_return_request() -> wglink_watch.PendingReturnRequest | None:
+def _pending_return_request() -> wglink_handoff.PendingReturnRequest | None:
     ipc = wglink_workspace.ipc_folder(create=True)
     if ipc is None:
         return None
-    return wglink_watch.next_return_request(ipc, session_id=_watch_session_id)
+    return wglink_handoff.next_return_request(ipc, session_id=_watch_session_id)
 
 
 def _apply_pending_return_request(
@@ -2895,8 +2885,8 @@ def _apply_pending_return_request(
 
     Returns one of ``IDLE``, ``HANDLED`` or ``SUPPRESSED``. A request already
     attempted this session is ``SUPPRESSED``: the user has seen its refusal and
-    must not see it again, but nothing ran, so the tick still belongs to the
-    survey channel behind this one.
+    must not see it again, but nothing ran, so suppression does not consume
+    the file request tick.
 
     The request is claimed before it runs, and its claim is deleted afterwards
     whatever the outcome: it runs at most once. It names its exact target and
@@ -2909,7 +2899,7 @@ def _apply_pending_return_request(
         return IDLE
     if _return_request_attempted_id == request.request_id:
         return SUPPRESSED
-    claimed = wglink_watch.claim_request(request)
+    claimed = wglink_handoff.claim_request(request)
     if claimed is None:
         # Gone, or held open by WG on Windows: the next tick looks again.
         return IDLE
@@ -2918,12 +2908,12 @@ def _apply_pending_return_request(
     try:
         _execute_return_request(request, snapshot)
     finally:
-        wglink_watch.acknowledge_return_request(request)
+        wglink_handoff.acknowledge_return_request(request)
     return HANDLED
 
 
 def _execute_return_request(
-    request: wglink_watch.PendingReturnRequest,
+    request: wglink_handoff.PendingReturnRequest,
     snapshot: dict[str, object] | None = None,
 ) -> str:
     """Run one claimed file request; its caller removes the claim afterwards."""
@@ -2933,6 +2923,7 @@ def _execute_return_request(
     outcome = "failed"
     _command_busy = True
     try:
+        _require_compatible_wg()
         if (
             not request.design_id
             or not request.document_id
@@ -2982,8 +2973,7 @@ def _execute_return_request(
             "source_identity": _source_identity_enabled(),
             **_required_manifest_features(),
         }
-        # This path holds ``_command_busy`` (above), so the adoption question
-        # cannot have the watcher's prompt stacked over it.
+        # This path holds ``_command_busy`` while adoption may prompt the user.
         wglink_send.send(_app(), options, confirm_adoption=_confirm_source_adoption)
         outcome = "applied"
     except wglink_core.WgLinkError as exc:
@@ -3172,7 +3162,7 @@ def _apply_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
 
     Returns one of ``IDLE``, ``HANDLED`` or ``SUPPRESSED``. A request already
     attempted this session is ``SUPPRESSED``, and that must not read as "this
-    tick is spoken for" -- a return request or a newer export behind it would
+    tick is spoken for" -- a return request behind it would
     then never be looked at again.
 
     The handoff is claimed before it runs and its claim deleted afterwards,
@@ -3193,7 +3183,7 @@ def _apply_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
     if _handoff_attempted_id == attempt_key:
         return SUPPRESSED
     correlation_id = handoff.operation_id
-    claimed = wglink_watch.claim_request(handoff)
+    claimed = wglink_handoff.claim_request(handoff)
     if claimed is None:
         return IDLE
     handoff = claimed
@@ -3201,16 +3191,17 @@ def _apply_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
     # may already be stale if the user switched documents during this tick.
     issue = _insert_handoff_issue(handoff, _active_document_id())
     if issue is not None:
-        wglink_watch.acknowledge_handoff(handoff)
+        wglink_handoff.acknowledge_handoff(handoff)
         _handoff_attempted_id = attempt_key
         outcome, reason = issue
         _begin_request("handoff", correlation_id, DELIVERY)["outcome"] = outcome
         _message(reason, "WGLink automatic insert refused")
         return HANDLED
     try:
+        _require_compatible_wg()
         ready = _ensure_design_ready()
     except wglink_core.WgLinkError as exc:
-        wglink_watch.acknowledge_handoff(handoff)
+        wglink_handoff.acknowledge_handoff(handoff)
         _handoff_attempted_id = attempt_key
         _begin_request("handoff", correlation_id, DELIVERY)["outcome"] = "refused"
         _message(
@@ -3219,7 +3210,7 @@ def _apply_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
         )
         return HANDLED
     if not ready:
-        wglink_watch.release_claim(handoff)
+        wglink_handoff.release_claim(handoff)
         return IDLE
     new_document_id = None
     destination = getattr(handoff, "destination", None)
@@ -3233,12 +3224,12 @@ def _apply_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
     try:
         _execute_handoff(handoff, snapshot, new_document_id=new_document_id)
     finally:
-        wglink_watch.acknowledge_handoff(handoff)
+        wglink_handoff.acknowledge_handoff(handoff)
     return HANDLED
 
 
 def _execute_handoff(
-    handoff: wglink_watch.PendingHandoff,
+    handoff: wglink_handoff.PendingHandoff,
     snapshot: dict[str, object] | None = None,
     *,
     new_document_id: str | None = None,
@@ -3259,6 +3250,7 @@ def _execute_handoff(
     operation = "update" if handoff.expected_instance_id else "insert"
     _command_busy = True
     try:
+        _require_compatible_wg()
         # Reconciliation below decides from these whether this operation
         # already applied; with no reading of them there is no deciding.
         links = _evidence_or_refuse(snapshot)
@@ -3342,7 +3334,7 @@ def _execute_handoff(
                 },
             )
             outcome = "applied"
-        _watcher.reset()
+
         # An automatic send already has two visible success signals: the model
         # appears and the browser reports the completed bundle. A modal report
         # here blocked Fusion on every send and made the ordinary Part Design
@@ -3411,7 +3403,7 @@ def _sweep_leftover_claims(snapshot: dict[str, object]) -> None:
     ipc = wglink_workspace.ipc_folder(create=True)
     if ipc is None:
         return
-    _settle_file_claims(wglink_watch.leftover_claims(ipc), snapshot)
+    _settle_file_claims(wglink_handoff.leftover_claims(ipc), snapshot)
 
 
 def _settle_file_claims(
@@ -3444,7 +3436,7 @@ def _settle_file_claims(
                     _refusal_text(_RECOVERY_REQUIRED_TEXT, _HANDOFF_RETRY_HINT),
                     "WGLink update interrupted",
                 )
-        if wglink_watch.remove_leftover_claim(claim):
+        if wglink_handoff.remove_leftover_claim(claim):
             _note_outcome(claim.channel, claim.request_id or claim.path.name, outcome)
     _deferred_file_claims[:] = deferred
     if deferred and announce:
@@ -3464,12 +3456,12 @@ def _notice_outdated_wg() -> None:
     ipc = wglink_workspace.ipc_folder(create=True)
     if ipc is None:
         return
-    found = wglink_watch.outdated_wg_requests(ipc)
+    found = wglink_handoff.outdated_wg_requests(ipc)
     if not found:
         return
     _wg_outdated_noticed = True
     _note_outcome("wgRequest", found[0], "wgOutdated")
-    _modal(wglink_watch.WG_OUTDATED_MESSAGE, f"{PANEL_NAME} cannot read this request")
+    _modal(wglink_inbox.WG_OUTDATED_MESSAGE, f"{PANEL_NAME} cannot read this request")
 
 
 def _legacy_claim_outcome(entry: dict, snapshot: dict[str, object]) -> str | None:
@@ -3534,7 +3526,7 @@ def _settle_legacy_claims(snapshot: dict[str, object]) -> None:
     if not entries:
         return
     try:
-        path = Path(ipc) / wglink_watch.FUSION_STATUS_FILENAME
+        path = Path(ipc) / wglink_status.FUSION_STATUS_FILENAME
         if path.is_symlink() or path.stat().st_size > 256 * 1024:
             raise ValueError("Unsafe status file")
         previous = json.loads(path.read_text(encoding="utf-8"))
@@ -3635,7 +3627,7 @@ def _claims_outstanding() -> bool:
 
 
 def _on_watch_tick() -> None:
-    """Main-thread half of the watcher: survey, ask, and apply if asked."""
+    """Service explicit file requests and publish status on the main thread."""
 
     global _command_busy
     if _command_busy:
@@ -3650,36 +3642,11 @@ def _on_watch_tick() -> None:
         _settle_claims(snapshot)
         _notice_outdated_wg()
         # Only a channel that did work claims the tick. A suppressed refusal
-        # must not starve the other file channel or the export survey.
+        # must not starve the other file channel.
         if _apply_pending_handoff(snapshot) == HANDLED:
             return
         if _apply_pending_return_request(snapshot) == HANDLED:
             return
-        surveyed = _link_evidence(snapshot)
-        if surveyed is None:
-            # Unread links are not an empty document: surveying [] would drop
-            # what the watcher knows about every link.
-            return
-        announcements = _watcher.survey(surveyed)
-        if not announcements:
-            return
-        ui = _ui()
-        if ui is None:
-            return
-        _command_busy = True
-        try:
-            answer = ui.messageBox(
-                wglink_watch.prompt_text(announcements),
-                f"{PANEL_NAME} — newer export available",
-                adsk.core.MessageBoxButtonTypes.YesNoButtonType,
-                adsk.core.MessageBoxIconTypes.QuestionIconType,
-            )
-            if answer == adsk.core.DialogResults.DialogYes:
-                _apply_announced_updates(announcements)
-        except Exception as exc:  # noqa: BLE001
-            _report_error("Offering a newer export", "WGLink watch error", exc)
-        finally:
-            _release_command_busy()
     finally:
         _publish_fusion_status(snapshot)
 
@@ -3694,7 +3661,7 @@ class WatchEventHandler(adsk.core.CustomEventHandler):
             with wglink_activity.because(wglink_activity.CAUSE_TICK):
                 _on_watch_tick()
         except Exception as exc:  # noqa: BLE001
-            _report_error("Watching for WG exports", "WGLink watch error", exc)
+            _report_error("Servicing WG file requests", "WGLink file request error", exc)
 
 
 class CandidateEventHandler(adsk.core.CustomEventHandler):
@@ -3869,7 +3836,6 @@ def _start_watch(app: object) -> bool:
     global _watch_event, _watch_handler, _watch_stop, _watch_thread
     global _handoff_attempted_id, _return_request_attempted_id, _request_trace
     global _claims_swept, _wg_outdated_noticed, _legacy_claims_pending
-    _watcher.reset()
     _handoff_attempted_id = None
     _return_request_attempted_id = None
     _request_trace = None
@@ -3893,7 +3859,7 @@ def _start_watch(app: object) -> bool:
     _watch_thread = threading.Thread(
         target=_watch_loop,
         args=(app, _watch_stop),
-        name="WGLinkExportWatch",
+        name="WGLinkFileRequests",
         daemon=True,
     )
     _watch_thread.start()
@@ -3963,7 +3929,7 @@ def _stop_watch(app: object) -> None:
     folder = wglink_workspace.ipc_folder()
     if folder is not None:
         try:
-            wglink_watch.remove_fusion_status(
+            wglink_status.remove_fusion_status(
                 folder, session_id=_watch_session_id
             )
         except Exception:  # noqa: BLE001 - shutdown cleanup is best effort
@@ -3975,7 +3941,6 @@ def _stop_watch(app: object) -> None:
     _claims_swept = False
     _wg_outdated_noticed = False
     _recent_outcomes.clear()
-    _watcher.reset()
 
 
 def _icon_folder(operation: str) -> str:
@@ -4039,7 +4004,7 @@ def _delete_owned_ui(ui: object | None) -> None:
 
 
 def _build_owner(app: object, ui: object) -> None:
-    """Build panel + watcher, then commit the already-claimed owner lease."""
+    """Build panel + file request service, then commit the already-claimed owner lease."""
 
     global _panel, _owned, _replaced_watch_event_id
     if _replaced_watch_event_id:

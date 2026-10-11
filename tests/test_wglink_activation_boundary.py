@@ -50,7 +50,7 @@ def _load_instance(monkeypatch, name: str, ui, app=None):
 
 
 ENGINE_THREADS = {
-    "WGLinkExportWatch",
+    "WGLinkFileRequests",
     "WGLinkOwnerCandidate",
 }
 
@@ -78,8 +78,10 @@ def _boundary(monkeypatch, tmp_path: Path, name: str, *, coordination: bool | No
         _write_gate(module, coordination)
     ipc = tmp_path / "ipc"
     ipc.mkdir(parents=True, exist_ok=True)
-    (ipc / module.wglink_watch.CAPABILITIES_FILENAME).write_text(json.dumps({
+    (ipc / module.wglink_inbox.CAPABILITIES_FILENAME).write_text(json.dumps({
         "schemaVersion": 1,
+        "solveCommandDelivery": 4,
+        "fusionRequestDelivery": 3,
         "automaticDomain": 1,
         "documentUp": 1,
     }))
@@ -240,7 +242,7 @@ def test_with_coordination_on_every_engine_starts_as_before(
             "watch_event": True,
             "followup_event": True,
         }
-        assert _started_threads(before) == {"WGLinkExportWatch"}
+        assert _started_threads(before) == {"WGLinkFileRequests"}
     finally:
         fixture.module.stop(None)
 
@@ -294,7 +296,6 @@ _TIMER_ONLY = (
     "_on_watch_tick",
     "_apply_pending_handoff",
     "_apply_pending_return_request",
-    "_apply_announced_updates",
     "_notice_outdated_wg",
 )
 
@@ -309,12 +310,6 @@ def _spy_timer_only(monkeypatch, module) -> list[str]:
             return _real(*args, **kwargs)
 
         monkeypatch.setattr(module, name, spy)
-    real_survey = module._watcher.survey
-    monkeypatch.setattr(
-        module._watcher,
-        "survey",
-        lambda links: (reached.append("survey"), real_survey(links))[1],
-    )
     return reached
 
 
@@ -359,10 +354,9 @@ def test_with_coordination_on_the_same_scenario_reaches_them(
         _document_scenario(fixture)
         assert {
             "_on_watch_tick",
-                    "_apply_pending_handoff",
+            "_apply_pending_handoff",
             "_apply_pending_return_request",
-                    "_notice_outdated_wg",
-            "survey",
+            "_notice_outdated_wg",
         } <= set(reached)
     finally:
         fixture.module.stop(None)
@@ -547,8 +541,8 @@ def _leftover_applied_claim(monkeypatch, module, tmp_path: Path):
 
     ipc, bundles = _per_request_folders(monkeypatch, module, tmp_path)
     _per_request_handoff(ipc, bundles, export_id="wge_5")
-    left = module.wglink_watch.claim_request(
-        module.wglink_watch.next_pending_handoff(ipc, bundle_root=bundles)
+    left = module.wglink_handoff.claim_request(
+        module.wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles)
     )
     assert left is not None and left.marker_path.exists()
     applied = [{
@@ -593,7 +587,7 @@ def test_start_up_never_settles_a_claim_against_links_it_could_not_read(
             assert module._claims_swept is False
             assert module._recent_outcomes == []
             # Nor was the empty list published as "this document has no links".
-            assert not (ipc / module.wglink_watch.FUSION_STATUS_FILENAME).exists()
+            assert not (ipc / module.wglink_status.FUSION_STATUS_FILENAME).exists()
     finally:
         module.stop(None)
 
@@ -669,7 +663,7 @@ def test_a_held_claim_is_kept_when_the_later_reading_is_not_one(
     module = fixture.module
     ipc, left, _applied = _leftover_applied_claim(monkeypatch, module, tmp_path / "x")
 
-    module._settle_file_claims(module.wglink_watch.leftover_claims(ipc), {
+    module._settle_file_claims(module.wglink_handoff.leftover_claims(ipc), {
         "document_name": "Horn", "document_id": "fusion:doc-a", "links": [],
         "links_inspected": inspected, "applying_operation": None,
     })
@@ -727,10 +721,10 @@ def _between_commands_scenarios(fixture) -> None:
     app.activeProduct, app.activeDocument = fixture.design, types.SimpleNamespace(name="Horn")
     _deliver_every_event(app)
     # WG restarts: it rewrites its capabilities and its view of Fusion is gone.
-    (fixture.ipc / module.wglink_watch.CAPABILITIES_FILENAME).write_text(json.dumps({
+    (fixture.ipc / module.wglink_inbox.CAPABILITIES_FILENAME).write_text(json.dumps({
         "schemaVersion": 1, "solveCommandDelivery": 3, "fusionRequestDelivery": 3,
     }))
-    (fixture.ipc / module.wglink_watch.FUSION_STATUS_FILENAME).unlink(missing_ok=True)
+    (fixture.ipc / module.wglink_status.FUSION_STATUS_FILENAME).unlink(missing_ok=True)
     _deliver_every_event(app)
 
 
@@ -755,11 +749,11 @@ def test_with_coordination_off_nothing_executes_between_commands(
         assert module.wglink_activity.LOG.between_commands() == {}
         assert fixture.app.fired == fired
         # Nothing re-published after WG restarted; the next command will.
-        assert not (fixture.ipc / module.wglink_watch.FUSION_STATUS_FILENAME).exists()
+        assert not (fixture.ipc / module.wglink_status.FUSION_STATUS_FILENAME).exists()
         _declare_command(module)
         _deliver_every_event(fixture.app)
         status = json.loads(
-            (fixture.ipc / module.wglink_watch.FUSION_STATUS_FILENAME).read_text()
+            (fixture.ipc / module.wglink_status.FUSION_STATUS_FILENAME).read_text()
         )
         assert status["diagnostics"]["activation"]["automaticCoordination"] is False
         assert status["diagnostics"]["activity"]["betweenCommands"] == {}
@@ -801,7 +795,7 @@ def test_the_heartbeat_says_how_the_add_in_is_configured(
     fixture.module.run(None)
     try:
         status = json.loads(
-            (fixture.ipc / fixture.module.wglink_watch.FUSION_STATUS_FILENAME).read_text()
+            (fixture.ipc / fixture.module.wglink_status.FUSION_STATUS_FILENAME).read_text()
         )
         activation = status["diagnostics"]["activation"]
         assert activation["automaticCoordination"] is reported
@@ -893,7 +887,7 @@ def test_back_to_back_commands_each_pay_for_their_refresh_with_coordination_off(
         assert _count(module, "geometry_measurement", "command:declare") == 2
         assert module._geometry_refresh_pending is None
         status = json.loads(
-            (fixture.ipc / module.wglink_watch.FUSION_STATUS_FILENAME).read_text()
+            (fixture.ipc / module.wglink_status.FUSION_STATUS_FILENAME).read_text()
         )
         [link] = status["document"]["links"]
         assert link["measuredRevisionToken"] == link["geometryRevisionToken"]
@@ -993,29 +987,14 @@ def _busy_handoff(module) -> None:
     )
 
 
-def _busy_newer_export_prompt(module) -> None:
-    announcement = types.SimpleNamespace(instance_id="i", describe=lambda: "i")
-    snapshot = {
-        "document_name": "Horn", "document_id": "fusion:doc-a",
-        "links": [{"instance_id": "i"}], "links_inspected": True, "diagnostics": {},
-    }
-    module._fusion_snapshot = lambda: snapshot
-    module._settle_claims = lambda _snapshot: None
-    module._notice_outdated_wg = lambda: None
-    module._publish_fusion_status = lambda _snapshot=None: None
-    module._watcher.survey = lambda _links: [announcement]
-    module.wglink_watch.prompt_text = lambda _items: "newer export"
-    module._on_watch_tick()
-
-
 def _busy_modal(module) -> None:
     module._modal("an outdated-WG or pickup notice", "WGLink")
 
 
 @pytest.mark.parametrize(
     "holder",
-    [_busy_return_request, _busy_handoff, _busy_newer_export_prompt, _busy_modal],
-    ids=["return-request", "handoff", "newer-export-prompt", "modal"],
+    [_busy_return_request, _busy_handoff, _busy_modal],
+    ids=["return-request", "handoff", "modal"],
 )
 def test_a_pickup_check_held_behind_any_busy_holder_is_re_driven_when_it_ends(
     monkeypatch, tmp_path: Path, holder
@@ -1027,8 +1006,6 @@ def test_a_pickup_check_held_behind_any_busy_holder_is_re_driven_when_it_ends(
     fixture.ui.dialog_result = "no"
     for name in ("_fusion_snapshot", "_settle_claims", "_notice_outdated_wg", "_publish_fusion_status"):
         monkeypatch.setattr(module, name, getattr(module, name))
-    monkeypatch.setattr(module._watcher, "survey", module._watcher.survey)
-    monkeypatch.setattr(module.wglink_watch, "prompt_text", module.wglink_watch.prompt_text)
     fired, _request = _queue_pickup_behind_busy(module, fixture.app, tmp_path)
 
     holder(module)
@@ -1083,7 +1060,7 @@ def test_status_publication_is_counted_whoever_calls_it(
         })
 
     assert _count(module, "status_publication", "command:probe") == 1
-    assert (fixture.ipc / module.wglink_watch.FUSION_STATUS_FILENAME).exists() is owner
+    assert (fixture.ipc / module.wglink_status.FUSION_STATUS_FILENAME).exists() is owner
 
 
 @pytest.mark.parametrize("readable", [False, True], ids=["unreadable", "control"])
@@ -1127,11 +1104,14 @@ def test_a_refused_send_still_publishes_status_after_the_command(
     monkeypatch.setattr(module.wglink_workspace, "return_folder", lambda: workspace / "wgreturn")
     monkeypatch.setattr(
         module.wglink_send, "send",
-        lambda _app, _options, **_k: {"bundle_path": str(bundle), "return_id": "wgr_1"},
+        lambda _app, _options, **_k: (
+            (fixture.ipc / "wg-capabilities.json").unlink()
+            or {"bundle_path": str(bundle), "return_id": "wgr_1"}
+        ),
     )
     module.run(None)
     try:
-        _command(module, "send")  # no capabilities file: WG is not collecting
+        _command(module, "send")  # WG stops collecting after the export, before delivery
         assert fixture.ui.messages[-1][0] == "WGLink refused"
         _deliver_every_event(fixture.app)
         assert _count(module, "status_publication", "command:send") == 1

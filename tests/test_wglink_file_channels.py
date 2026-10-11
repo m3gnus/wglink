@@ -1,10 +1,9 @@
-"""What the export watcher offers, and what it refuses to offer."""
+"""Explicit handoff claims, inbox writes and Fusion status files."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 import sys
 from datetime import datetime, timezone
@@ -14,7 +13,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "fusion-addins" / "WGLink"))
-import wglink_watch  # noqa: E402
+import wglink_inbox  # noqa: E402
+import wglink_handoff  # noqa: E402
+import wglink_status  # noqa: E402
 
 
 def _bundle(root: Path, name: str, export_id: str, sequence: int = 1) -> Path:
@@ -25,18 +26,6 @@ def _bundle(root: Path, name: str, export_id: str, sequence: int = 1) -> Path:
         encoding="utf-8",
     )
     return bundle
-
-
-def _touch(bundle: Path, when: float) -> None:
-    os.utime(bundle / "wglink.json", (when, when))
-
-
-def _link(bundle: Path, export_id: str, instance_id: str = "instance-a") -> dict[str, str]:
-    return {
-        "instance_id": instance_id,
-        "bundle_path": str(bundle),
-        "export_id": export_id,
-    }
 
 
 def _handoff(
@@ -70,7 +59,7 @@ def test_a_scoped_pending_handoff_is_read_and_acknowledged(tmp_path: Path) -> No
     bundle = _bundle(tmp_path, "horn", "wge_2", sequence=2)
     marker = _handoff(tmp_path, bundle)
 
-    handoff = wglink_watch.read_pending_handoff(marker)
+    handoff = wglink_handoff.read_pending_handoff(marker)
 
     assert handoff is not None
     assert handoff.request_id == handoff.operation_id == "req-1"
@@ -81,9 +70,9 @@ def test_a_scoped_pending_handoff_is_read_and_acknowledged(tmp_path: Path) -> No
     assert handoff.expected_document_id == "fusion:doc-a"
     assert handoff.expected_instance_id == "instance-b"
     assert handoff.expected_return_state_hash == "sha256:return-state"
-    claimed = wglink_watch.claim_request(handoff)
+    claimed = wglink_handoff.claim_request(handoff)
     assert claimed is not None and not marker.exists()
-    assert wglink_watch.acknowledge_handoff(claimed) is True
+    assert wglink_handoff.acknowledge_handoff(claimed) is True
     assert not claimed.marker_path.exists()
 
 
@@ -92,24 +81,24 @@ def test_acknowledging_a_handoff_deletes_only_its_own_claim(tmp_path: Path) -> N
 
     bundle = _bundle(tmp_path, "horn", "wge_2")
     marker = _handoff(tmp_path, bundle)
-    handoff = wglink_watch.read_pending_handoff(marker)
+    handoff = wglink_handoff.read_pending_handoff(marker)
     assert handoff is not None
-    claimed = wglink_watch.claim_request(handoff)
+    claimed = wglink_handoff.claim_request(handoff)
     assert claimed is not None
 
     _handoff(tmp_path, bundle, export_id="wge_3")
 
-    assert wglink_watch.acknowledge_handoff(claimed) is True
+    assert wglink_handoff.acknowledge_handoff(claimed) is True
     assert json.loads(marker.read_text())["exportId"] == "wge_3"
     # Acknowledging the request itself -- not a claim -- deletes nothing.
-    assert wglink_watch.acknowledge_handoff(handoff) is False
+    assert wglink_handoff.acknowledge_handoff(handoff) is False
     assert marker.exists()
 
 
 def test_fusion_status_publishes_document_config_and_parameters_atomically(
     tmp_path: Path,
 ) -> None:
-    marker = wglink_watch.write_fusion_status(
+    marker = wglink_status.write_fusion_status(
         tmp_path,
         session_id="session-a",
         document_name="Tritonia V",
@@ -177,16 +166,16 @@ def test_fusion_status_publishes_document_config_and_parameters_atomically(
     }
     link = payload["document"]["links"][0]
     assert link["parameterDriftCount"] == len(link["driftedParameters"])
-    assert list(tmp_path.glob(f"{wglink_watch.FUSION_STATUS_FILENAME}.*")) == []
-    assert wglink_watch.remove_fusion_status(tmp_path, session_id="other") is False
-    assert wglink_watch.remove_fusion_status(tmp_path, session_id="session-a") is True
+    assert list(tmp_path.glob(f"{wglink_status.FUSION_STATUS_FILENAME}.*")) == []
+    assert wglink_status.remove_fusion_status(tmp_path, session_id="other") is False
+    assert wglink_status.remove_fusion_status(tmp_path, session_id="session-a") is True
     assert not marker.exists()
 
 
 def test_fusion_status_publishes_no_parameter_drift_as_an_empty_list(
     tmp_path: Path,
 ) -> None:
-    marker = wglink_watch.write_fusion_status(
+    marker = wglink_status.write_fusion_status(
         tmp_path,
         session_id="session-a",
         document_name="Tritonia V",
@@ -206,7 +195,7 @@ def test_fusion_status_publishes_no_parameter_drift_as_an_empty_list(
 def test_fusion_status_omits_unproven_or_malformed_optional_identities(
     tmp_path: Path,
 ) -> None:
-    marker = wglink_watch.write_fusion_status(
+    marker = wglink_status.write_fusion_status(
         tmp_path,
         session_id="session-a",
         document_name="Tritonia V",
@@ -241,16 +230,16 @@ def test_return_request_is_targeted_to_one_addin_session_and_acknowledged(tmp_pa
         "expectedReturnStateHash": "sha256:return-state",
     }))
 
-    assert wglink_watch.read_return_request(marker, session_id="other") is None
-    request = wglink_watch.read_return_request(marker, session_id="session-a")
+    assert wglink_handoff.read_return_request(marker, session_id="other") is None
+    request = wglink_handoff.read_return_request(marker, session_id="session-a")
     assert request is not None
     assert request.design_id == "wgd_a"
     assert request.document_id == "fusion:doc-a"
     assert request.instance_id == "instance-a"
     assert request.expected_return_state_hash == "sha256:return-state"
-    claimed = wglink_watch.claim_request(request)
+    claimed = wglink_handoff.claim_request(request)
     assert claimed is not None
-    assert wglink_watch.acknowledge_return_request(claimed) is True
+    assert wglink_handoff.acknowledge_return_request(claimed) is True
     assert not marker.exists() and not claimed.marker_path.exists()
 
 
@@ -260,7 +249,7 @@ def test_handoff_refuses_an_out_of_workspace_bundle(tmp_path: Path) -> None:
     outside = _bundle(tmp_path, "outside", "wge_2")
     marker = _handoff(root, outside)
 
-    assert wglink_watch.read_pending_handoff(marker) is None
+    assert wglink_handoff.read_pending_handoff(marker) is None
 
 
 def test_machine_local_handoff_accepts_only_the_selected_workspace_bundle_root(
@@ -273,12 +262,12 @@ def test_machine_local_handoff_accepts_only_the_selected_workspace_bundle_root(
     ipc.mkdir(parents=True)
     marker = _handoff(ipc, bundle)
 
-    handoff = wglink_watch.read_pending_handoff(marker, bundle_root=bundles)
+    handoff = wglink_handoff.read_pending_handoff(marker, bundle_root=bundles)
 
     assert handoff is not None
-    claimed = wglink_watch.claim_request(handoff)
+    claimed = wglink_handoff.claim_request(handoff)
     assert claimed is not None
-    assert wglink_watch.acknowledge_handoff(claimed) is True
+    assert wglink_handoff.acknowledge_handoff(claimed) is True
 
 
 @pytest.mark.parametrize(
@@ -301,155 +290,13 @@ def test_an_invalid_pending_handoff_is_silent(
 ) -> None:
     marker = tmp_path / "r.json"
     marker.write_text(json.dumps(payload))
-    assert wglink_watch.read_pending_handoff(marker) is None
+    assert wglink_handoff.read_pending_handoff(marker) is None
 
 
-def test_a_newer_export_is_announced_once(tmp_path: Path) -> None:
-    bundle = _bundle(tmp_path, "horn", "wge_2", sequence=2)
-    watcher = wglink_watch.ExportWatcher()
-
-    found = watcher.survey([_link(bundle, "wge_1")])
-    assert [item.available_export_id for item in found] == ["wge_2"]
-    assert found[0].available_sequence == "2"
-
-    # Nothing changed on disk, and even once it is re-read the same export must
-    # not nag a second time.
-    assert watcher.survey([_link(bundle, "wge_1")]) == []
-    _touch(bundle, 5_000)
-    assert watcher.survey([_link(bundle, "wge_1")]) == []
-
-
-def test_the_matching_export_is_never_announced(tmp_path: Path) -> None:
-    bundle = _bundle(tmp_path, "horn", "wge_1")
-    watcher = wglink_watch.ExportWatcher()
-    assert watcher.survey([_link(bundle, "wge_1")]) == []
-
-
-def test_a_link_with_no_stored_export_is_left_alone(tmp_path: Path) -> None:
-    """Announcing it would be guessing: nothing says the bundle is its source."""
-
-    bundle = _bundle(tmp_path, "horn", "wge_2")
-    watcher = wglink_watch.ExportWatcher()
-    assert watcher.survey([_link(bundle, "")]) == []
-
-
-def test_a_later_export_after_an_announcement_is_announced_again(tmp_path: Path) -> None:
-    bundle = _bundle(tmp_path, "horn", "wge_2", sequence=2)
-    watcher = wglink_watch.ExportWatcher()
-    assert len(watcher.survey([_link(bundle, "wge_1")])) == 1
-
-    _bundle(tmp_path, "horn", "wge_3", sequence=3)
-    _touch(bundle, 9_000)
-    found = watcher.survey([_link(bundle, "wge_1")])
-    assert [item.available_export_id for item in found] == ["wge_3"]
-
-
-def test_forget_lets_a_failed_update_be_offered_again(tmp_path: Path) -> None:
-    """A failed update retries on nothing but ``forget``.
-
-    Nothing touches the bundle here, deliberately. The bundle is exactly as it
-    was when the update failed, which is the only situation `forget` exists
-    for; a `_touch` in this test manufactured the disk change production never
-    has, and hid a watcher that could not retry at all.
-    """
-
-    bundle = _bundle(tmp_path, "horn", "wge_2")
-    watcher = wglink_watch.ExportWatcher()
-    assert len(watcher.survey([_link(bundle, "wge_1")])) == 1
-
-    watcher.forget("instance-a")
-    assert len(watcher.survey([_link(bundle, "wge_1")])) == 1
-
-
-def test_a_second_instance_of_one_bundle_is_surveyed_on_its_own_terms(
-    tmp_path: Path,
-) -> None:
-    """Two insertions of one design share a bundle path and not a verdict.
-
-    The first instance is already on the current export and the second is a
-    version behind. Reading identity per link rather than per bundle read is
-    what lets the stale one be seen at all.
-    """
-
-    bundle = _bundle(tmp_path, "horn", "wge_2", sequence=2)
-    watcher = wglink_watch.ExportWatcher()
-
-    found = watcher.survey([
-        _link(bundle, "wge_2", "instance-current"),
-        _link(bundle, "wge_1", "instance-stale"),
-    ])
-
-    assert [item.instance_id for item in found] == ["instance-stale"]
-    assert found[0].available_export_id == "wge_2"
-
-
-def test_every_stale_instance_of_one_bundle_is_announced(tmp_path: Path) -> None:
-    bundle = _bundle(tmp_path, "horn", "wge_2", sequence=2)
-    watcher = wglink_watch.ExportWatcher()
-
-    found = watcher.survey([
-        _link(bundle, "wge_1", "instance-a"),
-        _link(bundle, "wge_1", "instance-b"),
-    ])
-
-    assert [item.instance_id for item in found] == ["instance-a", "instance-b"]
-
-
-@pytest.mark.parametrize(
-    "payload",
-    ['{"export": {}}', '{"export": {"id": ""}}', "not json at all", '{"export": 4}'],
-)
-def test_an_unreadable_manifest_is_silent(tmp_path: Path, payload: str) -> None:
-    bundle = tmp_path / "horn.wglink"
-    bundle.mkdir()
-    (bundle / "wglink.json").write_text(payload, encoding="utf-8")
-    watcher = wglink_watch.ExportWatcher()
-    assert watcher.survey([_link(bundle, "wge_1")]) == []
-
-
-def test_a_missing_bundle_is_silent(tmp_path: Path) -> None:
-    watcher = wglink_watch.ExportWatcher()
-    assert watcher.survey([_link(tmp_path / "gone.wglink", "wge_1")]) == []
-
-
-def test_several_links_are_surveyed_independently(tmp_path: Path) -> None:
-    fresh = _bundle(tmp_path, "fresh", "wge_9", sequence=9)
-    same = _bundle(tmp_path, "same", "wge_1")
-    watcher = wglink_watch.ExportWatcher()
-    found = watcher.survey([
-        _link(fresh, "wge_1", "instance-fresh"),
-        _link(same, "wge_1", "instance-same"),
-    ])
-    assert [item.instance_id for item in found] == ["instance-fresh"]
-
-
-def test_prompt_text_names_the_sequence_and_promises_undo(tmp_path: Path) -> None:
-    bundle = _bundle(tmp_path, "horn", "wge_2", sequence=6)
-    watcher = wglink_watch.ExportWatcher()
-    text = wglink_watch.prompt_text(watcher.survey([_link(bundle, "wge_1")]))
-    assert "sequence 6" in text
-    assert "instance-a" in text
-    assert "Undo" in text
-    assert "creates and deletes no features" in text
-
-
-def test_prompt_text_lists_every_link_when_several_moved(tmp_path: Path) -> None:
-    first = _bundle(tmp_path, "one", "wge_5", sequence=5)
-    second = _bundle(tmp_path, "two", "wge_7", sequence=7)
-    watcher = wglink_watch.ExportWatcher()
-    announcements = watcher.survey([
-        _link(first, "wge_1", "instance-one"),
-        _link(second, "wge_1", "instance-two"),
-    ])
-    text = wglink_watch.prompt_text(announcements)
-    assert "instance-one" in text and "instance-two" in text
-    assert "sequence 5" in text and "sequence 7" in text
-
-
-def _advertise_version_3(ipc: Path) -> None:
+def _advertise_current_delivery(ipc: Path) -> None:
     ipc.mkdir(parents=True, exist_ok=True)
-    (ipc / wglink_watch.CAPABILITIES_FILENAME).write_text(json.dumps({
-        "schemaVersion": 1, "solveCommandDelivery": 3, "fusionRequestDelivery": 3,
+    (ipc / wglink_inbox.CAPABILITIES_FILENAME).write_text(json.dumps({
+        "schemaVersion": 1, "solveCommandDelivery": 4, "fusionRequestDelivery": 3,
     }))
 
 
@@ -466,9 +313,9 @@ def test_a_solve_request_names_the_bundle_and_pins_its_manifest(tmp_path) -> Non
     bundle = workspace / "wgreturn" / "speaker.wgreturn"
     bundle.mkdir(parents=True)
     (bundle / "wgreturn.json").write_bytes(b'{"document": {}}')
-    _advertise_version_3(tmp_path / "ipc")
+    _advertise_current_delivery(tmp_path / "ipc")
 
-    marker = wglink_watch.write_solve_request(
+    marker = wglink_inbox.write_solve_request(
         tmp_path / "ipc",
         command_id="cmd-1",
         return_id="wgr_1",
@@ -477,7 +324,7 @@ def test_a_solve_request_names_the_bundle_and_pins_its_manifest(tmp_path) -> Non
     )
 
     payload = json.loads(marker.read_text())
-    assert marker.parent.name == wglink_watch.SOLVE_REQUESTS_DIRECTORY
+    assert marker.parent.name == wglink_inbox.SOLVE_REQUESTS_DIRECTORY
     assert marker.name == "cmd-1.json"
     assert payload["target"] == "waveguide-generator"
     assert payload["commandId"] == "cmd-1"
@@ -494,10 +341,10 @@ def test_a_solve_request_refuses_a_bundle_outside_the_workspace(tmp_path) -> Non
     (outside / "wgreturn.json").write_bytes(b"{}")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    _advertise_version_3(tmp_path / "ipc")
+    _advertise_current_delivery(tmp_path / "ipc")
 
     with pytest.raises(OSError):
-        wglink_watch.write_solve_request(
+        wglink_inbox.write_solve_request(
             tmp_path / "ipc",
             command_id="cmd-1",
             return_id="wgr_1",
@@ -509,7 +356,7 @@ def test_a_solve_request_refuses_a_bundle_outside_the_workspace(tmp_path) -> Non
 def test_fusion_status_publishes_the_link_label_beside_wgs_design_name(
     tmp_path: Path,
 ) -> None:
-    marker = wglink_watch.write_fusion_status(
+    marker = wglink_status.write_fusion_status(
         tmp_path,
         session_id="session-a",
         document_name="waveguide v1",
@@ -532,7 +379,7 @@ def test_fusion_status_publishes_the_link_label_beside_wgs_design_name(
 def test_a_link_with_no_label_publishes_a_null_rather_than_a_guess(
     tmp_path: Path,
 ) -> None:
-    marker = wglink_watch.write_fusion_status(
+    marker = wglink_status.write_fusion_status(
         tmp_path,
         session_id="session-a",
         document_name="waveguide v1",
@@ -556,7 +403,7 @@ def test_fusion_status_publishes_tick_diagnostics_when_they_are_supplied(
     wall clock is what a "Fusion feels slow" report is actually about.
     """
 
-    marker = wglink_watch.write_fusion_status(
+    marker = wglink_status.write_fusion_status(
         tmp_path,
         session_id="session-a",
         document_name="waveguide v1",
@@ -574,7 +421,7 @@ def test_fusion_status_publishes_tick_diagnostics_when_they_are_supplied(
 
 
 def test_fusion_status_omits_diagnostics_when_there_are_none(tmp_path: Path) -> None:
-    marker = wglink_watch.write_fusion_status(
+    marker = wglink_status.write_fusion_status(
         tmp_path, session_id="session-a", document_name="waveguide v1", links=[]
     )
     assert "diagnostics" not in json.loads(marker.read_text(encoding="utf-8"))

@@ -2,7 +2,7 @@
 
 A8 briefs 2 and 5, add-in side. Every other transfer test replaces
 ``write_wg_request`` whole; these inject *inside* the atomic write
-(``wglink_watch._write_json_atomically``): a rename that raises, including a
+(``wglink_inbox._write_json_atomically``): a rename that raises, including a
 Windows-style sharing violation on the retry, an fsync that fails, and a write
 that stops half way. The invariants:
 
@@ -56,7 +56,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ADDIN = ROOT / "fusion-addins" / "WGLink"
 sys.path.insert(0, str(ADDIN))
 import wglink_legacy_queue  # noqa: E402
-import wglink_watch  # noqa: E402
+import wglink_inbox  # noqa: E402
 
 
 def _sharing_violation() -> PermissionError:
@@ -116,7 +116,7 @@ def _staging(folder: Path) -> list[str]:
 
 
 def _write(tmp_path: Path, command_id: str = "op-1") -> Path:
-    return wglink_watch.write_wg_request(
+    return wglink_inbox.write_wg_request(
         tmp_path, kind=SOLVE, command_id=command_id, return_id="wgr_1", **FIELDS
     )
 
@@ -142,9 +142,9 @@ def test_a_rename_that_raises_leaves_no_request_and_no_staging_file(
         renames.append((Path(source).name, Path(destination).name))
         raise _sharing_violation()
 
-    monkeypatch.setattr(wglink_watch, "os", _os_with(wglink_watch, replace=refuse))
+    monkeypatch.setattr(wglink_inbox, "os", _os_with(wglink_inbox, replace=refuse))
 
-    with pytest.raises(wglink_watch.WriteOutcomeUnknown) as raised:
+    with pytest.raises(wglink_inbox.WriteOutcomeUnknown) as raised:
         _write(tmp_path)
 
     assert raised.value.errno == errno.EACCES
@@ -162,7 +162,7 @@ def test_an_fsync_that_fails_is_never_renamed_into_place(monkeypatch, tmp_path: 
         seen.append(_names(tmp_path / ".wg-solve-requests"))
         raise OSError(errno.EIO, "Input/output error")
 
-    monkeypatch.setattr(wglink_watch, "os", _os_with(wglink_watch, fsync=fail))
+    monkeypatch.setattr(wglink_inbox, "os", _os_with(wglink_inbox, fsync=fail))
 
     with pytest.raises(OSError, match="Input/output"):
         _write(tmp_path)
@@ -175,7 +175,7 @@ def test_an_fsync_that_fails_is_never_renamed_into_place(monkeypatch, tmp_path: 
 
 def test_a_write_that_stops_half_way_leaves_no_partial_request(monkeypatch, tmp_path: Path) -> None:
     _advertise(tmp_path, 4)
-    monkeypatch.setattr(wglink_watch, "json", _json_with_partial_dump(wglink_watch, [1]))
+    monkeypatch.setattr(wglink_inbox, "json", _json_with_partial_dump(wglink_inbox, [1]))
 
     with pytest.raises(OSError, match="No space"):
         _write(tmp_path)
@@ -187,7 +187,7 @@ def test_a_write_that_stops_half_way_leaves_no_partial_request(monkeypatch, tmp_
 
 
 def _watch(fixture):
-    return fixture.module.wglink_watch
+    return fixture.module.wglink_inbox
 
 
 def _paused(monkeypatch, fixture) -> list[float]:
@@ -425,8 +425,8 @@ _FIELDS = {
 
 def _legitimate(kind: str, schema: int = 4) -> dict:
     if schema == 3:
-        return wglink_watch.solve_request_payload(return_id="wgr_1", **_FIELDS)
-    return wglink_watch.wg_request_payload(
+        return wglink_inbox.solve_request_payload(return_id="wgr_1", **_FIELDS)
+    return wglink_inbox.wg_request_payload(
         kind=kind, return_id="wgr_1" if kind == SOLVE else None, **_FIELDS
     )
 
@@ -454,7 +454,7 @@ _NOT_THIS_REQUEST = {
 
 
 def _place(ipc: Path, payload: dict) -> Path:
-    path = wglink_watch.solve_request_path(ipc, _FIELDS["command_id"])
+    path = wglink_inbox.solve_request_path(ipc, _FIELDS["command_id"])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload))
     return path
@@ -468,7 +468,7 @@ def test_a_file_that_is_not_this_complete_request_is_not_confirmation(
     planned = _legitimate(kind)
     path = _place(tmp_path, change(planned))
 
-    assert wglink_watch.landed_request(path, planned) is None
+    assert wglink_inbox.landed_request(path, planned) is None
 
 
 # R1a: equal under Python's ``==`` but not the same JSON type -- not a request WG reads.
@@ -488,7 +488,7 @@ def test_a_field_of_another_type_is_not_confirmation(tmp_path: Path, variant: st
     planned = _legitimate(kind)
     path = _place(tmp_path, change(planned))
 
-    assert wglink_watch.landed_request(path, planned) is None
+    assert wglink_inbox.landed_request(path, planned) is None
 
 
 def test_a_bool_is_not_an_int_schema(tmp_path: Path) -> None:
@@ -497,7 +497,7 @@ def test_a_bool_is_not_an_int_schema(tmp_path: Path) -> None:
     planned = {**_legitimate(SNAPSHOT), "schemaVersion": 1}
     path = _place(tmp_path, {**planned, "schemaVersion": True})
 
-    assert wglink_watch.landed_request(path, planned) is None
+    assert wglink_inbox.landed_request(path, planned) is None
 
 
 @pytest.mark.parametrize(
@@ -507,7 +507,7 @@ def test_control_the_complete_request_is_confirmation(tmp_path: Path, kind: str,
     planned = _legitimate(kind, schema)
     path = _place(tmp_path, planned)
 
-    assert wglink_watch.landed_request(path, planned) == path
+    assert wglink_inbox.landed_request(path, planned) == path
 
 
 @pytest.mark.parametrize(("planned_schema", "found_schema"), [(4, 3), (3, 4)])
@@ -518,16 +518,16 @@ def test_a_solve_file_of_the_schema_not_planned_is_not_confirmation(
 
     path = _place(tmp_path, _legitimate(SOLVE, found_schema))
 
-    assert wglink_watch.landed_request(path, _legitimate(SOLVE, planned_schema)) is None
+    assert wglink_inbox.landed_request(path, _legitimate(SOLVE, planned_schema)) is None
 
 
 @pytest.mark.parametrize("return_id", ["", "wgr_1"])
 def test_a_schema_3_file_is_never_confirmation_for_a_send(tmp_path: Path, return_id: str) -> None:
     """A schema-3 reader ignores ``kind``: that file would be a Solve."""
 
-    path = _place(tmp_path, wglink_watch.solve_request_payload(return_id=return_id, **_FIELDS))
+    path = _place(tmp_path, wglink_inbox.solve_request_payload(return_id=return_id, **_FIELDS))
 
-    assert wglink_watch.landed_request(path, _legitimate(SNAPSHOT)) is None
+    assert wglink_inbox.landed_request(path, _legitimate(SNAPSHOT)) is None
 
 
 def test_a_file_over_the_size_cap_is_not_read_as_confirmation(tmp_path: Path) -> None:
@@ -537,7 +537,7 @@ def test_a_file_over_the_size_cap_is_not_read_as_confirmation(tmp_path: Path) ->
     path.write_text(padded)
     assert json.loads(path.read_text()) == planned  # the same request, only too large
 
-    assert wglink_watch.landed_request(path, planned) is None
+    assert wglink_inbox.landed_request(path, planned) is None
 
 
 def test_a_capability_that_changes_between_attempts_does_not_change_the_request(
@@ -546,13 +546,13 @@ def test_a_capability_that_changes_between_attempts_does_not_change_the_request(
     """The schema is decided once; every attempt writes the same bytes (A1)."""
 
     _advertise(tmp_path, 4)
-    planned_path, planned = wglink_watch.plan_wg_request(
+    planned_path, planned = wglink_inbox.plan_wg_request(
         tmp_path, kind=SOLVE, return_id="wgr_1", **_FIELDS
     )
     _advertise(tmp_path, 3)
 
     assert planned["schemaVersion"] == 4 and planned["kind"] == SOLVE
-    assert wglink_watch.publish_wg_request(planned_path, planned) == planned_path
+    assert wglink_inbox.publish_wg_request(planned_path, planned) == planned_path
     assert json.loads(planned_path.read_text()) == planned
 
 
@@ -562,8 +562,8 @@ def _fixed_command(monkeypatch, fixture) -> dict:
     module = fixture.module
     request_id = _FIELDS["command_id"]
     monkeypatch.setattr(module, "uuid", types.SimpleNamespace(uuid4=lambda: request_id))
-    monkeypatch.setattr(module.wglink_watch, "utc_timestamp", lambda *_a: _FIELDS["requested_at"])
-    relative, manifest = module.wglink_watch.return_reference(
+    monkeypatch.setattr(module.wglink_inbox, "utc_timestamp", lambda *_a: _FIELDS["requested_at"])
+    relative, manifest = module.wglink_inbox.return_reference(
         fixture.bundle, fixture.ipc.parent / "workspace"
     )
     return {**_FIELDS, "bundle_relative": relative, "manifest_sha256": manifest}
@@ -710,6 +710,11 @@ def test_a_solve_file_of_the_schema_not_attempted_does_not_say_sent(
 
     _run(fixture.module, "solve")
 
+    if advertised == 3:
+        assert staged == [] and json.loads(path.read_text()) == stale
+        assert fixture.module._request_trace is None
+        assert "Update Waveguide Generator" in fixture.ui.messages[-1][1]
+        return
     assert [payload["schemaVersion"] for payload in staged] == [advertised] * 3
     assert json.loads(path.read_text()) == stale
     _assert_unconfirmed(fixture, fields["command_id"])
@@ -738,6 +743,10 @@ def test_control_a_solve_file_of_the_schema_attempted_says_sent(
 
     _run(fixture.module, "solve")
 
+    if advertised == 3:
+        assert staged == [] and fixture.module._request_trace is None
+        assert "Update Waveguide Generator" in fixture.ui.messages[-1][1]
+        return
     assert staged == [attempted] * 3
     assert "Sent to WG (request" in fixture.ui.messages[-1][1]
     assert _outcome(fixture) == "requested"
@@ -780,7 +789,7 @@ def test_control_a_capability_refusal_with_nothing_attempted_is_still_refused(
 
     title, text = fixture.ui.messages[-1]
     assert title == "WGLink refused" and "not collecting requests from Fusion" in text
-    assert _outcome(fixture) == "refused"
+    assert fixture.module._request_trace is None  # Refused before planning a request.
     assert fixture.timers == []
 
 
@@ -817,13 +826,13 @@ def test_a_retry_that_lands_after_wg_took_the_first_is_sent_under_the_same_id(
 
 
 class _WriterThatFails:
-    """``wglink_watch`` as ``convert_outbox`` sees it, with the write refused."""
+    """``wglink_inbox`` as ``convert_outbox`` sees it, with the write refused."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
 
     def __getattr__(self, name):
-        return getattr(wglink_watch, name)
+        return getattr(wglink_inbox, name)
 
     def write_wg_request(self, _ipc, **fields):
         self.calls.append(fields["command_id"])
@@ -844,7 +853,7 @@ def test_a_conversion_whose_write_fails_keeps_the_item_and_the_next_start_rewrit
     assert _inbox(tmp_path) == []
     assert sorted(item["operationId"] for item in _outbox(tmp_path)) == ["snap-1", "solve-1"]
 
-    second = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_watch)
+    second = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_inbox)
 
     assert sorted(second["converted"]) == ["snap-1", "solve-1"]
     assert sorted(payload["operationId"] for payload in _inbox(tmp_path)) == ["snap-1", "solve-1"]
@@ -861,7 +870,7 @@ def test_a_conversion_whose_outbox_file_is_held_is_kept_and_rewritten_under_the_
     _queued(tmp_path, wglink_legacy_queue.KIND_SOLVE, "solve-9")
     monkeypatch.setattr(wglink_legacy_queue.LegacyQueue, "delete", lambda _self, _operation_id: False)
 
-    first = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_watch)
+    first = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_inbox)
 
     assert first["failed"] == ["solve-9"] and first["converted"] == []
     [written] = _inbox(tmp_path)
@@ -871,7 +880,7 @@ def test_a_conversion_whose_outbox_file_is_held_is_kept_and_rewritten_under_the_
         (tmp_path / ".wg-solve-requests" / "solve-9.json").unlink()
     monkeypatch.undo()
 
-    second = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_watch)
+    second = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_inbox)
 
     assert second["converted"] == ["solve-9"]
     # One file, the same id and fields: WG recovers a second delivery of it as
@@ -885,13 +894,13 @@ _CRASH_BETWEEN_WRITE_AND_DELETE = textwrap.dedent(
     import os, sys
     from pathlib import Path
     sys.path.insert(0, sys.argv[1])
-    import wglink_legacy_queue, wglink_watch
+    import wglink_legacy_queue, wglink_inbox
 
     def die(_self, _operation_id):
         os._exit(17)  # the process ends here: no cleanup, no finally
 
     wglink_legacy_queue.LegacyQueue.delete = die
-    wglink_legacy_queue.convert_outbox(Path(sys.argv[2]), solve_files=wglink_watch)
+    wglink_legacy_queue.convert_outbox(Path(sys.argv[2]), solve_files=wglink_inbox)
     sys.exit(0)
     """
 )
@@ -918,7 +927,7 @@ def test_a_crash_between_the_conversion_write_and_the_delete_is_finished_by_the_
     assert [item["operationId"] for item in _outbox(tmp_path)] == ["snap-7"]
     assert _staging(tmp_path / ".wg-solve-requests") == []
 
-    result = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_watch)
+    result = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_inbox)
 
     assert result["converted"] == ["snap-7"]
     assert _inbox(tmp_path) == [written]
@@ -998,7 +1007,7 @@ def test_items_start_up_could_not_convert_are_reported_and_converted_next_start_
     def refuse(_ipc, **_fields):
         raise _sharing_violation()
 
-    monkeypatch.setattr(first.module.wglink_watch, "write_wg_request", refuse)
+    monkeypatch.setattr(first.module.wglink_inbox, "write_wg_request", refuse)
     first.module.run(None)
     outcomes = {(o["requestId"], o["outcome"]) for o in first.module._recent_outcomes}
     first.module.stop(None)
@@ -1028,7 +1037,7 @@ _CAUSES = ("closed", "older than this WGLink add-in", "not collecting requests")
 
 def _leave_request(ipc: Path, command_id: str, *, kind: str = SNAPSHOT, age: float = 3600.0) -> Path:
     _advertise(ipc, 4)
-    path = wglink_watch.write_wg_request(
+    path = wglink_inbox.write_wg_request(
         ipc, kind=kind, command_id=command_id, return_id="wgr_1", **FIELDS
     )
     moment = time.time() - age
@@ -1102,7 +1111,7 @@ def test_a_request_younger_than_the_window_gets_the_rest_of_its_minute(
     try:
         assert _WAITING not in [title for title, _text in fixture.ui.messages]
         [(delay, _function)] = fixture.timers
-        window = module.wglink_watch.SOLVE_PICKUP_NOTICE_SECONDS
+        window = module.wglink_inbox.SOLVE_PICKUP_NOTICE_SECONDS
         assert window - 25.0 < delay <= window - 20.0 + 1.0
         _fire_timers(fixture)
         _deliver_followups(module, fixture.app)

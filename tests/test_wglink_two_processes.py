@@ -48,7 +48,7 @@ _WORKER = textwrap.dedent(
     sys.modules["adsk"].core = sys.modules["adsk.core"]
     sys.modules["adsk"].fusion = sys.modules["adsk.fusion"]
     sys.path.insert(0, addin)
-    import wglink_send, wglink_watch
+    import wglink_send, wglink_inbox
 
     output, ipc, workspace = Path(output), Path(ipc), Path(workspace)
     deadline = time.monotonic() + 60
@@ -67,17 +67,17 @@ _WORKER = textwrap.dedent(
             wglink_send._publish(temp, target, False)
         finally:
             reservation.unlink(missing_ok=True)
-        relative, manifest = wglink_watch.return_reference(target, workspace)
-        kind = wglink_watch.WG_REQUEST_KINDS[index % 2]
+        relative, manifest = wglink_inbox.return_reference(target, workspace)
+        kind = wglink_inbox.WG_REQUEST_KINDS[index % 2]
         command_id = str(uuid.uuid4())
-        wglink_watch.write_wg_request(
+        wglink_inbox.write_wg_request(
             ipc,
             kind=kind,
             command_id=command_id,
             return_id="wgr_" + label,
             bundle_relative=relative,
             manifest_sha256=manifest,
-            requested_at=wglink_watch.utc_timestamp(),
+            requested_at=wglink_inbox.utc_timestamp(),
         )
         records.append({
             "bundle": target.name, "id": command_id, "kind": kind,
@@ -397,8 +397,8 @@ _FILE_COMMAND_WORKER = textwrap.dedent(
                     _run(module, operation)
                     rid = module._request_trace['correlationId']
                     ids.append(rid)
-                    wait_for(lambda: (ipc / module.wglink_watch.ACK_DIRECTORY / (rid + '.json')).exists())
-                    ack = module.wglink_watch.read_acknowledgement(ipc, rid)
+                    wait_for(lambda: (ipc / module.wglink_inbox.ACK_DIRECTORY / (rid + '.json')).exists())
+                    ack = module.wglink_inbox.read_acknowledgement(ipc, rid)
                     assert ack == ('accepted', None), ack
                 assert len(set(ids)) == 2
                 assert not (ipc / '.wglink-outbox').exists()
@@ -441,7 +441,7 @@ _FILE_COMMAND_WORKER = textwrap.dedent(
                 print(json.dumps({'writes': calls, 'outcome': 'reconciled'}))
     else:
         wait_for(lambda: (folder / 'ready').exists())
-        import wglink_watch
+        import wglink_inbox
         if operation in ('send', 'solve'):
             inbox = ipc / '.wg-solve-requests'
             accepted = []
@@ -452,7 +452,7 @@ _FILE_COMMAND_WORKER = textwrap.dedent(
                 expected = 'receive_snapshot' if operation == 'send' else 'prepare_and_solve'
                 assert payload['kind'] == expected
                 bundle = folder / 'workspace' / payload['bundlePath']
-                relative, digest = wglink_watch.return_reference(bundle, folder / 'workspace')
+                relative, digest = wglink_inbox.return_reference(bundle, folder / 'workspace')
                 assert payload['manifestSha256'] == digest
                 assert (bundle / 'assembly.step').is_file()
                 rid = payload['operationId']
@@ -480,7 +480,7 @@ _FILE_COMMAND_WORKER = textwrap.dedent(
                                    expectedReturnStateHash='sha256:state-b')
                 inbox = ipc / '.fusion-handoffs'
                 inbox.mkdir(exist_ok=True)
-                wglink_watch._write_json_atomically(inbox / 'req-1.json', payload)
+                wglink_inbox._write_json_atomically(inbox / 'req-1.json', payload)
                 wait_for(lambda: (folder / ('consumed-' + str(index))).exists())
             print(json.dumps({'published': 2}))
     """

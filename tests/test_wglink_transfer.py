@@ -32,11 +32,13 @@ from test_wglink_addin_lifecycle import (
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "fusion-addins" / "WGLink"))
 import wglink_legacy_queue  # noqa: E402
-import wglink_watch  # noqa: E402
+import wglink_inbox  # noqa: E402
+import wglink_handoff  # noqa: E402
+import wglink_status  # noqa: E402
 
 
-SNAPSHOT = wglink_watch.KIND_RECEIVE_SNAPSHOT
-SOLVE = wglink_watch.KIND_PREPARE_AND_SOLVE
+SNAPSHOT = wglink_inbox.KIND_RECEIVE_SNAPSHOT
+SOLVE = wglink_inbox.KIND_PREPARE_AND_SOLVE
 FIELDS = {
     "bundle_relative": "wgreturn/speaker.wgreturn",
     "manifest_sha256": "sha256:" + "a" * 64,
@@ -55,11 +57,11 @@ def _advertise(ipc: Path, value: object, *, live: bool = False) -> None:
         payload["solveCommandDelivery"] = value
     if live:
         payload["liveProtocol"] = 1
-    (ipc / wglink_watch.CAPABILITIES_FILENAME).write_text(json.dumps(payload))
+    (ipc / wglink_inbox.CAPABILITIES_FILENAME).write_text(json.dumps(payload))
 
 
 def _inbox(ipc: Path) -> list[dict]:
-    folder = ipc / wglink_watch.SOLVE_REQUESTS_DIRECTORY
+    folder = ipc / wglink_inbox.SOLVE_REQUESTS_DIRECTORY
     if not folder.is_dir():
         return []
     return [
@@ -82,7 +84,7 @@ def test_a_send_for_a_wg_that_reads_schema_4_is_a_receive_snapshot_without_retur
 ) -> None:
     _advertise(tmp_path, 4)
 
-    path = wglink_watch.write_wg_request(
+    path = wglink_inbox.write_wg_request(
         tmp_path, kind=SNAPSHOT, command_id="op-1", return_id="wgr_ignored", **FIELDS
     )
 
@@ -105,7 +107,7 @@ def test_a_solve_for_a_wg_that_reads_schema_4_carries_its_return_id_even_empty(
 ) -> None:
     _advertise(tmp_path, 4)
 
-    path = wglink_watch.write_wg_request(
+    path = wglink_inbox.write_wg_request(
         tmp_path, kind=SOLVE, command_id="op-2", return_id=return_id, **FIELDS
     )
 
@@ -114,17 +116,13 @@ def test_a_solve_for_a_wg_that_reads_schema_4_carries_its_return_id_even_empty(
     assert payload["commandId"] == payload["operationId"] == "op-2"
 
 
-def test_a_solve_for_a_wg_that_reads_schema_3_is_written_exactly_as_before(tmp_path: Path) -> None:
+def test_a_solve_for_a_wg_that_reads_schema_3_is_refused(tmp_path: Path) -> None:
     _advertise(tmp_path, 3)
-
-    path = wglink_watch.write_wg_request(
-        tmp_path, kind=SOLVE, command_id="op-3", return_id="wgr_1", **FIELDS
-    )
-
-    payload = json.loads(path.read_text())
-    assert payload["schemaVersion"] == 3
-    assert "kind" not in payload
-    assert payload["returnId"] == "wgr_1"
+    with pytest.raises(wglink_inbox.WgOutdatedError, match="Update Waveguide Generator"):
+        wglink_inbox.write_wg_request(
+            tmp_path, kind=SOLVE, command_id="op-3", return_id="wgr_1", **FIELDS
+        )
+    assert _inbox(tmp_path) == []
 
 
 def test_a_send_for_a_wg_that_reads_only_schema_3_is_refused_and_nothing_is_written(
@@ -134,8 +132,8 @@ def test_a_send_for_a_wg_that_reads_only_schema_3_is_refused_and_nothing_is_writ
 
     _advertise(tmp_path, 3)
 
-    with pytest.raises(wglink_watch.WgOutdatedError, match="Update Waveguide Generator"):
-        wglink_watch.write_wg_request(
+    with pytest.raises(wglink_inbox.WgOutdatedError, match="Update Waveguide Generator"):
+        wglink_inbox.write_wg_request(
             tmp_path, kind=SNAPSHOT, command_id="op-4", return_id=None, **FIELDS
         )
 
@@ -145,9 +143,9 @@ def test_a_send_for_a_wg_that_reads_only_schema_3_is_refused_and_nothing_is_writ
 @pytest.mark.parametrize(
     ("advertised", "error"),
     [
-        ("no-file", wglink_watch.WgNotCollectingError),
-        (None, wglink_watch.WgNotCollectingError),
-        (2, wglink_watch.WgOutdatedError),
+        ("no-file", wglink_inbox.WgNotCollectingError),
+        (None, wglink_inbox.WgNotCollectingError),
+        (2, wglink_inbox.WgOutdatedError),
     ],
     ids=["no-capabilities", "no-solve-delivery", "older-wg"],
 )
@@ -159,7 +157,7 @@ def test_a_wg_that_advertises_nothing_or_less_than_3_gets_nothing(
         _advertise(tmp_path, advertised)
 
     with pytest.raises(error):
-        wglink_watch.write_wg_request(
+        wglink_inbox.write_wg_request(
             tmp_path, kind=kind, command_id="op-5", return_id="", **FIELDS
         )
 
@@ -175,14 +173,14 @@ def test_no_send_is_ever_written_in_a_schema_a_reader_could_run_as_a_solve(
     if advertised != "no-file":
         _advertise(tmp_path, advertised)
     try:
-        wglink_watch.write_wg_request(
+        wglink_inbox.write_wg_request(
             tmp_path, kind=SNAPSHOT, command_id="op-6", return_id=None, **FIELDS
         )
-    except (wglink_watch.WgOutdatedError, wglink_watch.WgNotCollectingError):
+    except (wglink_inbox.WgOutdatedError, wglink_inbox.WgNotCollectingError):
         pass
 
     for payload in _inbox(tmp_path):
-        assert payload["schemaVersion"] >= wglink_watch.WG_REQUEST_SCHEMA_VERSION
+        assert payload["schemaVersion"] >= wglink_inbox.WG_REQUEST_SCHEMA_VERSION
         assert payload["kind"] == SNAPSHOT
         assert "returnId" not in payload
 
@@ -190,9 +188,9 @@ def test_no_send_is_ever_written_in_a_schema_a_reader_could_run_as_a_solve(
 def test_the_inbox_schema_is_its_own_constant(tmp_path: Path) -> None:
     """The Fusion-bound reader and the heartbeat keep version 3 (C3)."""
 
-    assert wglink_watch.WG_REQUEST_SCHEMA_VERSION == 4
-    assert wglink_watch.REQUEST_SCHEMA_VERSION == 3
-    assert wglink_watch.DELIVERY_VERSION == 3
+    assert wglink_inbox.WG_REQUEST_SCHEMA_VERSION == 4
+    assert wglink_handoff.REQUEST_SCHEMA_VERSION == 3
+    assert wglink_status.DELIVERY_VERSION == 3
 
 
 @pytest.mark.parametrize("command_id", ["", "../escape", "a" * 129, "has space"])
@@ -200,7 +198,7 @@ def test_an_id_that_is_not_a_plain_file_name_is_refused(tmp_path: Path, command_
     _advertise(tmp_path, 4)
 
     with pytest.raises(ValueError):
-        wglink_watch.write_wg_request(
+        wglink_inbox.write_wg_request(
             tmp_path, kind=SNAPSHOT, command_id=command_id, return_id=None, **FIELDS
         )
 
@@ -288,22 +286,15 @@ def test_a_send_to_a_wg_that_reads_only_schema_3_is_refused_visibly(
     assert _inbox(fixture.ipc) == [] and _outbox(fixture.ipc) == []
     title, text = fixture.ui.messages[-1]
     assert title == "WGLink refused"
-    assert "was not asked to take it" in text
     assert "Update Waveguide Generator" in text
     assert fixture.timers == []
 
 
-def test_a_solve_to_a_wg_that_reads_only_schema_3_still_solves(monkeypatch, tmp_path: Path) -> None:
+def test_a_solve_to_a_wg_that_reads_only_schema_3_is_refused(monkeypatch, tmp_path: Path) -> None:
     fixture = _transfer(monkeypatch, tmp_path, "WGLink_solve_old", advertised=3)
-
     _run(fixture.module, "solve")
-
-    [payload] = _inbox(fixture.ipc)
-    assert payload["schemaVersion"] == 3 and "kind" not in payload
-    assert (
-        "Progress and results appear in Waveguide Generator."
-        in fixture.ui.messages[-1][1]
-    )
+    assert _inbox(fixture.ipc) == []
+    assert "Update Waveguide Generator" in fixture.ui.messages[-1][1]
 
 
 @pytest.mark.parametrize("operation", ["send", "solve"])
@@ -327,7 +318,7 @@ def test_a_write_whose_outcome_is_unknown_is_retried_once_with_the_same_id(
 
     fixture = _transfer(monkeypatch, tmp_path, "WGLink_retry_once")
     monkeypatch.setattr(fixture.module, "_retry_pause", lambda _seconds: None)
-    real = fixture.module.wglink_watch.publish_wg_request
+    real = fixture.module.wglink_inbox.publish_wg_request
     calls: list[tuple] = []
 
     def flaky(path, payload):
@@ -337,7 +328,7 @@ def test_a_write_whose_outcome_is_unknown_is_retried_once_with_the_same_id(
             raise OSError("the rename reported an error after it landed")
         return real(path, payload)
 
-    monkeypatch.setattr(fixture.module.wglink_watch, "publish_wg_request", flaky)
+    monkeypatch.setattr(fixture.module.wglink_inbox, "publish_wg_request", flaky)
 
     _run(fixture.module, "send")
 
@@ -356,7 +347,7 @@ def test_a_write_that_keeps_failing_is_a_visible_refusal(monkeypatch, tmp_path: 
         calls.append(1)
         raise OSError("disk full")
 
-    monkeypatch.setattr(fixture.module.wglink_watch, "publish_wg_request", failing)
+    monkeypatch.setattr(fixture.module.wglink_inbox, "publish_wg_request", failing)
 
     _run(fixture.module, "solve")
 
@@ -370,22 +361,22 @@ def test_a_refusal_is_an_answer_and_is_never_retried(monkeypatch, tmp_path: Path
     fixture = _transfer(monkeypatch, tmp_path, "WGLink_refusal_not_retried", advertised=2)
     calls: list[int] = []
     published: list[int] = []
-    real = fixture.module.wglink_watch.plan_wg_request
+    real = fixture.module.wglink_inbox.plan_wg_request
 
     def counting(ipc, **fields):
         calls.append(1)
         return real(ipc, **fields)
 
-    monkeypatch.setattr(fixture.module.wglink_watch, "plan_wg_request", counting)
+    monkeypatch.setattr(fixture.module.wglink_inbox, "plan_wg_request", counting)
     monkeypatch.setattr(
-        fixture.module.wglink_watch, "publish_wg_request", lambda *_a: published.append(1)
+        fixture.module.wglink_inbox, "publish_wg_request", lambda *_a: published.append(1)
     )
 
     _run(fixture.module, "solve")
 
     assert published == []
 
-    assert calls == [1]
+    assert calls == []  # Refused before exporting or planning an inbox write.
 
 
 def test_pressing_send_again_is_a_new_request(monkeypatch, tmp_path: Path) -> None:
@@ -425,7 +416,7 @@ def test_a_request_wg_leaves_untaken_is_reported_once_under_its_command(
 
     _run(module, operation)
     [(delay, _function)] = fixture.timers
-    assert delay == module.wglink_watch.SOLVE_PICKUP_NOTICE_SECONDS
+    assert delay == module.wglink_inbox.SOLVE_PICKUP_NOTICE_SECONDS
     before = len(fixture.ui.messages)
     _fire_timers(fixture)
     _deliver_followups(module, fixture.app)
@@ -533,7 +524,7 @@ def test_at_schema_4_every_unanswered_item_becomes_its_request_file(tmp_path: Pa
     _queue_both(tmp_path)
     _queued(tmp_path, wglink_legacy_queue.KIND_SNAPSHOT, "done-1", answered=True)
 
-    result = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_watch)
+    result = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_inbox)
 
     assert sorted(result["converted"]) == ["snap-1", "solve-1"]
     by_id = {payload["operationId"]: payload for payload in _inbox(tmp_path)}
@@ -543,13 +534,14 @@ def test_at_schema_4_every_unanswered_item_becomes_its_request_file(tmp_path: Pa
     assert [item["operationId"] for item in _outbox(tmp_path)] == ["done-1"]
 
 
-def test_at_schema_3_a_solve_converts_and_a_snapshot_is_reported_not_delivered(tmp_path: Path) -> None:
+def test_at_schema_3_every_unanswered_item_stays_queued(tmp_path: Path) -> None:
     _advertise(tmp_path, 3)
     _queue_both(tmp_path)
-    result = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_watch)
-    [solve] = _inbox(tmp_path)
-    assert solve["operationId"] == "solve-1" and solve["schemaVersion"] == 3
-    assert _outbox(tmp_path) == [] and result["abandoned"] == ["snap-1"]
+    result = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_inbox)
+    assert _inbox(tmp_path) == []
+    assert sorted(item["operationId"] for item in _outbox(tmp_path)) == ["snap-1", "solve-1"]
+    assert sorted(result["left"]) == ["snap-1", "solve-1"]
+    assert result["abandoned"] == [] and result["failed"] == []
 
 
 @pytest.mark.parametrize("advertised", ["no-file", None, 2])
@@ -558,7 +550,7 @@ def test_when_wg_advertises_nothing_nothing_moves(tmp_path: Path, advertised: ob
         _advertise(tmp_path, advertised)
     _queue_both(tmp_path)
 
-    result = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_watch)
+    result = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_inbox)
 
     assert _inbox(tmp_path) == []
     assert sorted(item["operationId"] for item in _outbox(tmp_path)) == ["snap-1", "solve-1"]
@@ -569,7 +561,7 @@ def test_a_solve_whose_file_was_written_when_queued_gets_no_second_file(tmp_path
     _advertise(tmp_path, 4)
     _queued(tmp_path, wglink_legacy_queue.KIND_SOLVE, "solve-2", file_written=True)
 
-    result = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_watch)
+    result = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_inbox)
 
     assert result["converted"] == ["solve-2"]
     assert _inbox(tmp_path) == [] and _outbox(tmp_path) == []
@@ -652,7 +644,7 @@ def _record_the_order(monkeypatch, fixture) -> list[dict]:
     module = fixture.module
     events: list[dict] = []
     real_publish = module.wglink_send._publish
-    real_request = module.wglink_watch.publish_wg_request
+    real_request = module.wglink_inbox.publish_wg_request
 
     def publish(temp, target, overwrite):
         real_publish(temp, target, overwrite)
@@ -677,7 +669,7 @@ def _record_the_order(monkeypatch, fixture) -> list[dict]:
         return real_request(path, payload)
 
     monkeypatch.setattr(module.wglink_send, "_publish", publish)
-    monkeypatch.setattr(module.wglink_watch, "publish_wg_request", request)
+    monkeypatch.setattr(module.wglink_inbox, "publish_wg_request", request)
     return events
 
 
@@ -710,7 +702,7 @@ def test_every_retry_of_the_request_also_finds_the_bundle_whole(monkeypatch, tmp
     fixture = _real_export(monkeypatch, tmp_path, "WGLink_order_retry")
     monkeypatch.setattr(fixture.module, "_retry_pause", lambda _seconds: None)
     events = _record_the_order(monkeypatch, fixture)
-    recorded = fixture.module.wglink_watch.publish_wg_request
+    recorded = fixture.module.wglink_inbox.publish_wg_request
     attempts: list[int] = []
 
     def flaky(path, payload):
@@ -720,7 +712,7 @@ def test_every_retry_of_the_request_also_finds_the_bundle_whole(monkeypatch, tmp
             raise OSError("reported an error after it landed")
         return recorded(path, payload)
 
-    monkeypatch.setattr(fixture.module.wglink_watch, "publish_wg_request", flaky)
+    monkeypatch.setattr(fixture.module.wglink_inbox, "publish_wg_request", flaky)
 
     _run(fixture.module, "send")
 
@@ -745,7 +737,7 @@ def test_a_failure_between_the_bundle_and_the_request_leaves_no_request_file(
     def refuse(_path, _payload):
         raise OSError("disk full")
 
-    monkeypatch.setattr(fixture.module.wglink_watch, "_write_json_atomically", refuse)
+    monkeypatch.setattr(fixture.module.wglink_inbox, "_write_json_atomically", refuse)
 
     _run(fixture.module, "solve")
 
@@ -763,7 +755,7 @@ def test_a_failure_taking_the_return_reference_leaves_no_request_file(
     def unreadable(_bundle, _workspace):
         raise OSError("manifest unreadable")
 
-    monkeypatch.setattr(fixture.module.wglink_watch, "return_reference", unreadable)
+    monkeypatch.setattr(fixture.module.wglink_inbox, "return_reference", unreadable)
 
     _run(fixture.module, "send")
 
@@ -774,10 +766,9 @@ def test_a_failure_taking_the_return_reference_leaves_no_request_file(
 def test_a_bundle_that_could_not_be_published_is_never_requested(monkeypatch, tmp_path: Path) -> None:
     fixture = _real_export(monkeypatch, tmp_path, "WGLink_order_bundle_fails")
     requested: list[Path] = []
-    real_request = fixture.module.wglink_watch.publish_wg_request
+    real_request = fixture.module.wglink_inbox.publish_wg_request
     monkeypatch.setattr(
-        fixture.module.wglink_watch,
-        "publish_wg_request",
+        fixture.module.wglink_inbox, "publish_wg_request",
         lambda path, payload: requested.append(path) or real_request(path, payload),
     )
 
@@ -843,7 +834,7 @@ def test_file_only_startup_never_contacts_an_advertised_endpoint(monkeypatch, tm
         assert module._owned
         assert set(fixture.app.events) == ({module.FOLLOWUP_EVENT_ID, module.WATCH_EVENT_ID}
                                           if coordination else {module.FOLLOWUP_EVENT_ID})
-        assert all(thread.name == "WGLinkExportWatch" for thread in set(threading.enumerate()) - before)
+        assert all(thread.name == "WGLinkFileRequests" for thread in set(threading.enumerate()) - before)
         assert not (fixture.ipc / ".wglink-installation.json").exists()
     finally:
         module.stop(None)

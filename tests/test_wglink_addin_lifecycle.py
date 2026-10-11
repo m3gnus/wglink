@@ -361,6 +361,24 @@ def _load_instance(monkeypatch, name: str, ui: _UI, app: _Application | None = N
     return module
 
 
+def _compatible_wg(monkeypatch, module) -> None:
+    """Give isolated dispatch tests a real, compatible file advertisement.
+
+    Keep any capability file a test deliberately supplied, including older WG.
+    """
+
+    ipc = module.wglink_workspace.ipc_folder()
+    if ipc is None:
+        ipc = module.SETTINGS_PATH.parent / "ipc"
+        monkeypatch.setattr(module.wglink_workspace, "ipc_folder", lambda **_kwargs: ipc)
+    ipc.mkdir(parents=True, exist_ok=True)
+    path = ipc / "wg-capabilities.json"
+    if not path.exists():
+        path.write_text(json.dumps({
+            "schemaVersion": 1, "solveCommandDelivery": 4, "fusionRequestDelivery": 3,
+        }), encoding="utf-8")
+
+
 def _modern_manifest_features(monkeypatch, module) -> None:
     """Keep unrelated lifecycle tests focused on their own boundary."""
 
@@ -398,7 +416,7 @@ def test_send_writes_to_wgs_workspace_and_never_overwrites(monkeypatch, tmp_path
     "capabilities, declared",
     [
         (None, False),
-        ({"schemaVersion": 1, "solveCommandDelivery": 3, "fusionRequestDelivery": 3}, False),
+        ({"schemaVersion": 1, "solveCommandDelivery": 4, "fusionRequestDelivery": 3}, False),
         ({"schemaVersion": 1, "sourceIdentity": True}, False),
         ({"schemaVersion": 1, "sourceIdentity": 1}, True),
     ],
@@ -415,7 +433,7 @@ def test_every_source_path_declares_identity_only_when_wg_advertises_it(
         _UI(_Panels(), _Definitions(reserve_ids=False)),
     )
     capabilities = {"schemaVersion": 1, **dict(capabilities or {})}
-    capabilities.update({"automaticDomain": 1, "documentUp": 1})
+    capabilities.update({"solveCommandDelivery": 4, "fusionRequestDelivery": 3, "automaticDomain": 1, "documentUp": 1})
     (tmp_path / "wg-capabilities.json").write_text(
         json.dumps(capabilities), encoding="utf-8"
     )
@@ -891,6 +909,7 @@ def test_send_shows_and_closes_progress_around_the_slow_export(
 ) -> None:
     ui = _UI(_Panels(), _Definitions(reserve_ids=False))
     module = _load_instance(monkeypatch, "WGLink_send_progress", ui)
+    _compatible_wg(monkeypatch, module)
     monkeypatch.setattr(module, "_send_options", lambda _inputs: {"selection": "root"})
     observed: list[tuple[int, str]] = []
 
@@ -951,6 +970,7 @@ def test_solve_confirms_the_handoff_and_shows_only_one_progress_dialog(
 
     ui = _UI(_Panels(), _Definitions(reserve_ids=False))
     module = _load_instance(monkeypatch, "WGLink_solve_progress", ui)
+    _compatible_wg(monkeypatch, module)
     monkeypatch.setattr(module, "_send_options", lambda _inputs: {"selection": "root"})
 
     def send(_app: object, _options: dict[str, object], **_kwargs: object) -> dict[str, object]:
@@ -1495,7 +1515,9 @@ def test_every_helper_loads_under_a_registration_unique_package(
         "wglink_core",
         "wglink_return",
         "wglink_send",
-        "wglink_watch",
+        "wglink_inbox",
+        "wglink_handoff",
+        "wglink_status",
     ):
         first_helper = first._registration_modules[name]
         second_helper = second._registration_modules[name]
@@ -1644,7 +1666,7 @@ def test_owner_first_stop_promotes_the_surviving_registration(
     candidate = second._candidate_handler
     old_panel = panels.itemById(first.PANEL_ID)
     assert candidate is not None and old_panel is not None
-    status = tmp_path / first.wglink_watch.FUSION_STATUS_FILENAME
+    status = tmp_path / first.wglink_status.FUSION_STATUS_FILENAME
     assert json.loads(status.read_text())["sessionId"] == first._watch_session_id
 
     first.stop(None)
@@ -1977,6 +1999,7 @@ def _unmoved_live_state(monkeypatch, module, signature_hash: str) -> None:
     against ``_linked_document`` and measure for real.
     """
 
+    _compatible_wg(monkeypatch, module)
     monkeypatch.setattr(
         module,
         "_fresh_geometry_state",
@@ -2189,16 +2212,17 @@ def _claim_in_place(monkeypatch, module) -> None:
     stands a namespace in for one has nothing to rename.
     """
 
-    watch = module.wglink_watch
+    _compatible_wg(monkeypatch, module)
+    handoff_files = module.wglink_handoff
     for name in ("claim_request", "acknowledge_handoff", "acknowledge_return_request"):
-        real = getattr(watch, name)
+        real = getattr(handoff_files, name)
 
         def in_place(pending, *args, _real=real, _name=name, **kwargs):
             if hasattr(pending, "marker_path"):
                 return _real(pending, *args, **kwargs)
             return pending if _name == "claim_request" else True
 
-        monkeypatch.setattr(watch, name, in_place)
+        monkeypatch.setattr(handoff_files, name, in_place)
 
 
 def _recording(record: list) -> object:
@@ -2228,6 +2252,11 @@ def _handoff_path(bundle_root: Path, request_id: str = "req-1") -> Path:
 def _write_version_3(marker: Path, payload: dict[str, object], sequence: int = 1) -> None:
     """Write one request file as WG does (delivery version 3)."""
 
+    capabilities = marker.parent.parent / "wg-capabilities.json"
+    if not capabilities.exists():
+        capabilities.write_text(json.dumps({
+            "schemaVersion": 1, "solveCommandDelivery": 4, "fusionRequestDelivery": 3,
+        }))
     marker.write_text(json.dumps({
         **payload,
         "schemaVersion": 3,
@@ -2251,6 +2280,7 @@ def _guarded_document(monkeypatch, name: str):
     ui = _UI(panels, _Definitions(reserve_ids=False))
     app = _Application(ui)
     module = _load_instance(monkeypatch, name, ui, app)
+    _compatible_wg(monkeypatch, module)
     design, body = _linked_document(module)
     app.activeProduct = design
     body.revisionId = "revision-1"
@@ -2311,7 +2341,7 @@ def _pending_return(fixture, monkeypatch, tmp_path, **overrides):
         module.wglink_send, "send", lambda _app, options, **_k: sent.append(options)
     )
     monkeypatch.setattr(
-        module.wglink_watch, "acknowledge_return_request", lambda _request: True
+        module.wglink_handoff, "acknowledge_return_request", lambda _request: True
     )
     return sent
 
@@ -2349,8 +2379,7 @@ def _pending_update(fixture, monkeypatch, tmp_path, **overrides):
         lambda *_args, **_kwargs: mutations.append({"insert": True}),
     )
     monkeypatch.setattr(
-        module.wglink_watch,
-        "acknowledge_handoff",
+        module.wglink_handoff, "acknowledge_handoff",
         lambda _handoff, **_kwargs: True,
     )
     return mutations
@@ -2675,6 +2704,7 @@ def test_a_guard_that_cannot_measure_refuses_the_operation(
     fixture = _guarded_document(monkeypatch, f"WGLink_guard_unmeasurable_{channel}")
     module = fixture.module
     snapshot = _heartbeat_snapshot(fixture)
+    _compatible_wg(monkeypatch, module)
     monkeypatch.setattr(
         module,
         "_fresh_geometry_state",
@@ -3689,6 +3719,7 @@ def test_a_finished_command_is_an_explicit_cause_of_one_refresh(monkeypatch) -> 
     fixture = _guarded_document(monkeypatch, "WGLink_command_refresh")
     module = fixture.module
     module._geometry_refresh_pending = None
+    _compatible_wg(monkeypatch, module)
     monkeypatch.setattr(module, "_command_options", lambda _inputs: {})
     monkeypatch.setattr(module, "_summary", lambda _operation, _report: "done")
     monkeypatch.setattr(module.wglink_core, "update", lambda *_a, **_k: {"ok": True})
@@ -3753,7 +3784,7 @@ def test_a_blocked_delivery_does_not_starve_heartbeat_scheduling(
         entered.set()
         release.wait(5.0)
 
-    monkeypatch.setattr(module.wglink_watch, "write_fusion_status_payload", blocked_write)
+    monkeypatch.setattr(module.wglink_status, "write_fusion_status_payload", blocked_write)
     stop = threading.Event()
     publisher = threading.Thread(target=module._publish_fusion_status, daemon=True)
     carrier = threading.Thread(
@@ -3856,44 +3887,6 @@ def test_document_links_attach_exact_live_return_identities(monkeypatch) -> None
     assert link["source_state_hash"] == state["source_hash"]
 
 
-def test_a_failed_announced_update_is_offered_again_on_the_next_tick(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """The retry the failure branch promises, on the disk it actually has.
-
-    Nothing touches the bundle between the two surveys, because in production
-    nothing does: a refused Update leaves the export exactly where it was.
-    """
-
-    panels = _Panels()
-    definitions = _Definitions(reserve_ids=False)
-    ui = _UI(panels, definitions)
-    app = _Application(ui)
-    module = _load_instance(monkeypatch, "WGLink_failed_update_retry", ui, app)
-    bundle = tmp_path / "horn.wglink"
-    bundle.mkdir()
-    (bundle / "wglink.json").write_text(
-        json.dumps({"export": {"id": "wge_2", "sequence": 2}}), encoding="utf-8"
-    )
-    links = [{
-        "instance_id": "instance-a",
-        "bundle_path": str(bundle),
-        "export_id": "wge_1",
-    }]
-
-    def _refuse(_app, _path, _options):
-        raise module.wglink_core.WgLinkError("the managed body is in an edit")
-
-    monkeypatch.setattr(module.wglink_core, "update", _refuse)
-    announced = module._watcher.survey(links)
-    assert [item.instance_id for item in announced] == ["instance-a"]
-
-    module._apply_announced_updates(announced)
-
-    assert any("Not updated" in text for _title, text in ui.messages)
-    assert [item.instance_id for item in module._watcher.survey(links)] == [
-        "instance-a"
-    ]
 
 
 def test_heartbeat_loops_use_the_main_thread_application_reference(monkeypatch) -> None:
@@ -3924,33 +3917,6 @@ def test_heartbeat_loops_use_the_main_thread_application_reference(monkeypatch) 
     assert app.fired == [module.WATCH_EVENT_ID, module._candidate_event_id]
 
 
-def test_the_watcher_prompt_is_held_off_while_a_command_runs(monkeypatch) -> None:
-    panels = _Panels()
-    definitions = _Definitions(reserve_ids=False)
-    ui = _UI(panels, definitions)
-    app = _Application(ui)
-    app.activeProduct = types.SimpleNamespace(objectType="adsk::fusion::Design")
-    module = _load_instance(monkeypatch, "WGLink_busy", ui, app)
-
-    surveyed: list[object] = []
-    snapshots: list[list[dict[str, str]]] = []
-    links = [{"instance_id": "instance-a"}]
-    monkeypatch.setattr(
-        module,
-        "_document_links",
-        lambda *_a, **_k: snapshots.append(links) or links,
-    )
-    monkeypatch.setattr(
-        module._watcher, "survey", lambda links: surveyed.append(links) or []
-    )
-    module._command_busy = True
-    module._on_watch_tick()
-    assert surveyed == []
-
-    module._command_busy = False
-    module._on_watch_tick()
-    assert surveyed == [links]
-    assert snapshots == [links]
 
 
 def test_a_pending_new_bundle_is_inserted_once_and_acknowledged(
@@ -4416,7 +4382,7 @@ def test_a_targeted_return_exports_only_the_exact_live_link(
     sent: list[dict[str, object]] = []
     monkeypatch.setattr(module.wglink_send, "send", lambda _app, options, **_k: sent.append(options))
     acknowledged: list[object] = []
-    monkeypatch.setattr(module.wglink_watch, "acknowledge_return_request", acknowledged.append)
+    monkeypatch.setattr(module.wglink_handoff, "acknowledge_return_request", acknowledged.append)
 
     assert module._apply_pending_return_request() == module.HANDLED
 
@@ -4505,7 +4471,7 @@ def _refusing_handoff(monkeypatch, module, tmp_path: Path) -> Path:
         module.wglink_workspace, "ipc_folder", lambda **_kwargs: bundle_root
     )
     (bundle_root / "wg-capabilities.json").write_text(
-        json.dumps({"schemaVersion": 1, "solveCommandDelivery": 3, "fusionRequestDelivery": 3, "automaticDomain": 1, "documentUp": 1}), encoding="utf-8"
+        json.dumps({"schemaVersion": 1, "solveCommandDelivery": 4, "fusionRequestDelivery": 3, "automaticDomain": 1, "documentUp": 1}), encoding="utf-8"
     )
 
     def refuse(*_args: object, **_kwargs: object) -> None:
@@ -4566,7 +4532,7 @@ def test_a_refused_handoff_does_not_starve_a_pending_return_request(
     )
     acknowledged: list[object] = []
     monkeypatch.setattr(
-        module.wglink_watch, "acknowledge_return_request", acknowledged.append
+        module.wglink_handoff, "acknowledge_return_request", acknowledged.append
     )
 
     module._on_watch_tick()
@@ -4585,92 +4551,8 @@ def test_a_refused_handoff_does_not_starve_a_pending_return_request(
     ]
 
 
-def test_a_refused_handoff_does_not_starve_a_newer_export_offer(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """The survey sits behind both IPC channels, so it starved the same way."""
-
-    panels = _Panels()
-    ui = _UI(panels, _Definitions(reserve_ids=False), dialog_result="no")
-    app = _Application(ui)
-    app.activeProduct = types.SimpleNamespace(objectType="adsk::fusion::Design")
-    app.activeDocument = types.SimpleNamespace(name="Tritonia V")
-    module = _load_instance(monkeypatch, "WGLink_refusal_starves_survey", ui, app)
-    _refusing_handoff(monkeypatch, module, tmp_path)
-
-    linked_bundle = tmp_path / "elsewhere" / "other.wglink"
-    linked_bundle.mkdir(parents=True)
-    (linked_bundle / "wglink.json").write_text(
-        json.dumps({"export": {"id": "wge_9", "sequence": 9}})
-    )
-    monkeypatch.setattr(module, "_pending_return_request", lambda: None)
-    monkeypatch.setattr(module, "_active_document_id", lambda: "fusion:doc-a")
-    monkeypatch.setattr(module, "_document_links", lambda *_a, **_k: [{
-        "instance_id": "instance-a",
-        "design_id": "wgd-a",
-        "bundle_path": str(linked_bundle),
-        "export_id": "wge_8",
-    }])
-
-    module._on_watch_tick()
-    module._on_watch_tick()
-
-    assert [title for title, _text in ui.messages] == [
-        "WGLink automatic insert refused",
-        f"{module.PANEL_NAME} — newer export available",
-    ]
 
 
-def test_a_refused_return_request_does_not_starve_a_newer_export_offer(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """The return channel carries the same attempted-id early return."""
-
-    panels = _Panels()
-    ui = _UI(panels, _Definitions(reserve_ids=False), dialog_result="no")
-    app = _Application(ui)
-    app.activeProduct = types.SimpleNamespace(objectType="adsk::fusion::Design")
-    app.activeDocument = types.SimpleNamespace(name="Tritonia V")
-    module = _load_instance(monkeypatch, "WGLink_return_refusal_starves", ui, app)
-    _claim_in_place(monkeypatch, module)
-
-    linked_bundle = tmp_path / "elsewhere" / "other.wglink"
-    linked_bundle.mkdir(parents=True)
-    (linked_bundle / "wglink.json").write_text(
-        json.dumps({"export": {"id": "wge_9", "sequence": 9}})
-    )
-    request = types.SimpleNamespace(
-        design_id="wgd-a",
-        document_id="fusion:expected",
-        instance_id="instance-a",
-        expected_return_state_hash="sha256:state-a",
-        request_id="request-a",
-        operation_id="request-a",
-        delivery_sequence=1,
-    )
-    monkeypatch.setattr(module, "_pending_handoff", lambda: None)
-    monkeypatch.setattr(module, "_pending_return_request", lambda: request)
-    monkeypatch.setattr(module, "_active_document_id", lambda: "fusion:other")
-    monkeypatch.setattr(module, "_document_links", lambda *_a, **_k: [{
-        "instance_id": "instance-a",
-        "design_id": "wgd-a",
-        "bundle_path": str(linked_bundle),
-        "export_id": "wge_8",
-    }])
-    sent: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        module.wglink_send, "send", lambda _app, options, **_k: sent.append(options)
-    )
-
-    module._on_watch_tick()
-    module._on_watch_tick()
-
-    assert sent == []
-    assert [title for title, _text in ui.messages] == [
-        "WGLink return to WG refused",
-        f"{module.PANEL_NAME} — newer export available",
-    ]
-    assert module._RETURN_RETRY_HINT in ui.messages[0][1]
 
 
 def test_a_start_that_fails_partway_rolls_back_panel_and_lease(
@@ -4814,7 +4696,7 @@ def _per_request_folders(monkeypatch, module, tmp_path: Path) -> tuple[Path, Pat
     # WG advertises version 3, and the model has not moved since WG measured
     # it: these tests are about delivery, not the state guard.
     (ipc / "wg-capabilities.json").write_text(json.dumps({
-        "schemaVersion": 1, "solveCommandDelivery": 3, "fusionRequestDelivery": 3,
+        "schemaVersion": 1, "solveCommandDelivery": 4, "fusionRequestDelivery": 3,
         "automaticDomain": 1, "documentUp": 1,
     }))
     _unmoved_live_state(monkeypatch, module, "sha256:state-b")
@@ -5064,7 +4946,7 @@ def test_a_failed_claim_never_creates_the_new_destination_document(
         destination={"kind": "new_document", "value": "req-1"},
     )
     monkeypatch.setattr(module, "_active_document_id", lambda: None)
-    monkeypatch.setattr(module.wglink_watch, "claim_request", lambda _handoff: None)
+    monkeypatch.setattr(module.wglink_handoff, "claim_request", lambda _handoff: None)
     created: list[str] = []
     monkeypatch.setattr(
         module, "_ensure_design_ready", lambda: created.append("document") or True
@@ -5196,7 +5078,7 @@ def test_a_return_request_from_an_old_wg_is_refused_before_export(
     (ipc / "wg-capabilities.json").write_text(
         json.dumps({
             "schemaVersion": 1,
-            "solveCommandDelivery": 3,
+            "solveCommandDelivery": 4,
             "fusionRequestDelivery": 3,
         }),
         encoding="utf-8",
@@ -5237,7 +5119,7 @@ def test_a_return_wg_asked_for_declares_source_identity_when_wg_reads_it(
     module, _ui = _design_module(monkeypatch, "WGLink_identity_return")
     ipc, _bundles = _per_request_folders(monkeypatch, module, tmp_path)
     (ipc / "wg-capabilities.json").write_text(json.dumps({
-        "schemaVersion": 1, "solveCommandDelivery": 3, "fusionRequestDelivery": 3,
+        "schemaVersion": 1, "solveCommandDelivery": 4, "fusionRequestDelivery": 3,
         "sourceIdentity": 1,
         "automaticDomain": 1, "documentUp": 1,
     }))
@@ -5292,8 +5174,7 @@ def test_a_redelivered_update_already_applied_is_reconciled_before_the_baseline_
     effects = _pending_update(fixture, monkeypatch, tmp_path, export_id=applied)
     acknowledged: list[str] = []
     monkeypatch.setattr(
-        module.wglink_watch,
-        "acknowledge_handoff",
+        module.wglink_handoff, "acknowledge_handoff",
         lambda handoff, **_kwargs: acknowledged.append(handoff.export_id) or True,
     )
 
@@ -5345,7 +5226,7 @@ def test_a_solve_command_is_written_per_command_and_correlated_by_its_id(
     module, _ui = _design_module(monkeypatch, "WGLink_solve_correlation")
     ipc, _bundles = _per_request_folders(monkeypatch, module, tmp_path)
     (ipc / "wg-capabilities.json").write_text(json.dumps(
-        {"schemaVersion": 1, "solveCommandDelivery": 3, "fusionRequestDelivery": 3}
+        {"schemaVersion": 1, "solveCommandDelivery": 4, "fusionRequestDelivery": 3}
     ))
     bundle = tmp_path / "workspace" / "wgreturn" / "speaker.wgreturn"
     bundle.mkdir(parents=True)
@@ -5354,7 +5235,7 @@ def test_a_solve_command_is_written_per_command_and_correlated_by_its_id(
 
     assert module._submit_to_wg(
         {"return_id": "wgr_1", "bundle_path": str(bundle)},
-        module.wglink_watch.KIND_PREPARE_AND_SOLVE,
+        module.wglink_inbox.KIND_PREPARE_AND_SOLVE,
     )
 
     written = [
@@ -5513,7 +5394,7 @@ def test_an_interrupted_operation_is_recovery_required_and_never_repeated(
     assert "recovery required" in ui.messages[0][1]
     status = json.loads((ipc / ".fusion-status.json").read_text())
     assert status["diagnostics"]["lastRequest"]["outcome"] == "recoveryRequired"
-    assert status["deliveryVersion"] == module.wglink_watch.DELIVERY_VERSION
+    assert status["deliveryVersion"] == module.wglink_status.DELIVERY_VERSION
     assert status["document"]["applyingOperation"]["operationId"] == "req-1"
 
 
@@ -5539,8 +5420,8 @@ def test_a_claim_an_interrupted_session_left_is_settled_once_and_never_run(
     module, ui = _design_module(monkeypatch, f"WGLink_leftover_{outcome}")
     ipc, bundles = _per_request_folders(monkeypatch, module, tmp_path)
     _per_request_handoff(ipc, bundles, export_id="wge_5")
-    left = module.wglink_watch.claim_request(
-        module.wglink_watch.next_pending_handoff(ipc, bundle_root=bundles)
+    left = module.wglink_handoff.claim_request(
+        module.wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles)
     )
     assert left is not None and left.marker_path.exists()
     snapshot = _shared_snapshot()
@@ -5621,7 +5502,7 @@ def test_solve_in_wg_refuses_a_wg_that_does_not_read_version_3(
     with pytest.raises(module.wglink_core.WgLinkError, match="Update Waveguide Generator"):
         module._submit_to_wg(
             {"return_id": "wgr_1", "bundle_path": str(bundle)},
-            module.wglink_watch.KIND_PREPARE_AND_SOLVE,
+            module.wglink_inbox.KIND_PREPARE_AND_SOLVE,
         )
 
     assert not (ipc / ".wg-solve-request.json").exists()
@@ -5693,8 +5574,8 @@ def test_leftover_claims_wait_for_an_active_document(monkeypatch, tmp_path: Path
     module, _ui = _design_module(monkeypatch, "WGLink_leftover_waits")
     ipc, bundles = _per_request_folders(monkeypatch, module, tmp_path)
     _per_request_handoff(ipc, bundles, export_id="wge_5")
-    left = module.wglink_watch.claim_request(
-        module.wglink_watch.next_pending_handoff(ipc, bundle_root=bundles)
+    left = module.wglink_handoff.claim_request(
+        module.wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles)
     )
     opening = {**_shared_snapshot(), "document_id": None, "links": [], "applying_operation": None}
 
@@ -5724,8 +5605,8 @@ def test_a_file_claim_for_another_document_is_retained_not_discarded(
     module, _ui, ipc, _bundle = _file_module(monkeypatch, tmp_path, "WGLink_file_other_doc")
     bundles = tmp_path / "workspace" / "wglink"
     _per_request_handoff(ipc, bundles, export_id="wge_5")
-    left = module.wglink_watch.claim_request(
-        module.wglink_watch.next_pending_handoff(ipc, bundle_root=bundles)
+    left = module.wglink_handoff.claim_request(
+        module.wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles)
     )
     assert left is not None
     monkeypatch.setattr(module, "_claims_swept", False)
