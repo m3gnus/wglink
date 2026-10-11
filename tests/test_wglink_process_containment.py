@@ -285,12 +285,13 @@ _PROCESS_KILLERS = frozenset({
 _LAUNCHERS = frozenset({"system", "popen", "Popen", "run", "call", "check_call", "check_output"})
 _KILL_COMMANDS = ("taskkill", "pkill", "killall", "kill ")
 
-#: Every place the add-in may do any of the above: the containment of the one
-#: tree ``_run_contained`` starts. (module file, enclosing function)
+#: Every place the add-in may signal a process: the contained resampler tree
+#: and the public installed launcher it started. (module, enclosing function)
 _ALLOWED = {
     ("wglink_core.py", "_kill_started_tree"),
     ("wglink_core.py", "terminate"),  # _WindowsJob.terminate: the job it created
     ("wglink_core.py", "_confine_to_windows_job"),  # OpenProcess on the child it started
+    ("wglink_launcher.py", "ensure_backend"),  # only its Popen; WG owns backend cancellation
 }
 
 
@@ -361,6 +362,23 @@ def test_the_add_in_kills_nothing_but_the_tree_it_started() -> None:
     }
 
     assert found == _ALLOWED
+
+
+def test_launcher_cancellation_signals_only_its_own_popen() -> None:
+    path = ADDINS / "WGLink" / "wglink_launcher.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                    and node.name == "ensure_backend")
+    created = [node for node in ast.walk(function) if isinstance(node, ast.Assign)
+               and isinstance(node.value, ast.Call) and _called_name(node.value) == "Popen"]
+    assert len(created) == 1
+    assert [ast.unparse(target) for target in created[0].targets] == ["process"]
+    killers = [node for node in ast.walk(function) if isinstance(node, ast.Call)
+               and _called_name(node) in _PROCESS_KILLERS]
+    assert {_called_name(node) for node in killers} == {"terminate", "kill"}
+    assert all(isinstance(node.func, ast.Attribute)
+               and ast.unparse(node.func.value) == "process" and not node.args
+               for node in killers)
 
 
 def test_the_tree_kill_is_reached_only_with_the_child_the_add_in_just_started() -> None:

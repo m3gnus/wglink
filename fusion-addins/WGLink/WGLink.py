@@ -51,6 +51,7 @@ def _load_registration_package() -> dict[str, types.ModuleType]:
         "wglink_inbox",
         "wglink_handoff",
         "wglink_status",
+        "wglink_launcher",
         "wglink_legacy_queue",
     ):
         loaded[name] = importlib.import_module(f"{_registration_package_name}.{name}")
@@ -66,6 +67,7 @@ wglink_send = _registration_modules["wglink_send"]
 wglink_inbox = _registration_modules["wglink_inbox"]
 wglink_handoff = _registration_modules["wglink_handoff"]
 wglink_status = _registration_modules["wglink_status"]
+wglink_launcher = _registration_modules["wglink_launcher"]
 wglink_legacy_queue = _registration_modules["wglink_legacy_queue"]
 format_measurement_mm = _registration_modules["wglink_bundle"].format_measurement_mm
 
@@ -256,6 +258,7 @@ _followups: list[object] = []
 # The pickup check's one-shot timer adds its job from its own thread.
 _followups_lock = threading.Lock()
 _timers: list[threading.Timer] = []
+_backend_admission = wglink_launcher.BackendAdmission()
 
 
 def _note_outcome(channel: str, request_id: str, outcome: str) -> None:
@@ -1625,7 +1628,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         with wglink_activity.because(wglink_activity.command_cause(self.operation)):
             self._execute(args)
 
-    def _execute(self, args: object) -> None:
+    def _execute(self, args: object, *, send_options: dict[str, object] | None = None) -> None:
         global _command_busy
         progress = None
         # Whether this command got as far as producing a report. A user who
@@ -1637,10 +1640,13 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         _command_busy = True
         try:
             adsk.doEvents()
+            if self.operation in {"send", "solve"} and send_options is None:
+                if self._admit_backend(args):
+                    return
             if self.operation in {"send", "solve", "insert", "update"}:
                 _require_compatible_wg(wg_inbox=self.operation in {"send", "solve"})
-            inputs = args.command.commandInputs
-            options = _command_options(inputs)
+            inputs = args.command.commandInputs if args is not None else None
+            options = _command_options(inputs) if inputs is not None else {}
             if self.operation == "insert":
                 kind, chosen = _resolve_source(
                     _selected_name(inputs, "bundle_source", BROWSE_FOLDER)
@@ -1660,7 +1666,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 )
                 report = wglink_send.send(
                     _app(),
-                    _send_options(inputs),
+                    send_options if send_options is not None else _send_options(inputs),
                     confirm_adoption=_confirm_source_adoption,
                 )
                 exported = True
@@ -1730,6 +1736,68 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                     # result, so this command schedules both itself.
                     _schedule_followup(_after_command)
             _command_finished()
+
+    def _admit_backend(self, args: object) -> bool:
+        """Snapshot dialog choices on main; defer installed admission and resume here.
+
+        CommandInputs cease to be valid when execute returns. Only the copied
+        choices survive; their Fusion entity references are accessed on main.
+        """
+
+        ipc = wglink_workspace.ipc_folder()
+        argv = wglink_launcher.launcher_argv(ipc) if ipc is not None else None
+        if argv is None:
+            return False
+        try:
+            wglink_inbox.require_wg_delivery(ipc)
+        except wglink_inbox.WgNotCollectingError:
+            pass  # An installed launcher can start or adopt this same folder.
+        except wglink_inbox.WgOutdatedError as exc:
+            raise wglink_core.WgLinkError(str(exc)) from exc
+        if _followup_event is None:
+            raise wglink_core.WgLinkError("WGLink's main-thread event is unavailable. Start WG manually, then try again.")
+        app = _app()
+        document_id = _active_document_id()
+        document = app.activeDocument
+        options = _send_options(args.command.commandInputs)
+        # IPC comes exclusively from workspace.data_dir(), not the CAD workspace.
+        data_dir = ipc.parent.parent
+        override = wglink_workspace.launcher_data_dir()
+
+        def resume(error: str | None) -> None:
+            if error is not None:
+                _modal(f"Could not start Waveguide Generator. Start WG manually, then try again.\n\n{error}", "WGLink refused")
+                return
+            if (_active_document_id() != document_id
+                    or (document_id is None and app.activeDocument != document)):
+                _modal("The active Fusion document changed while WG was starting. Send or Solve again from the intended document.", "WGLink refused")
+                return
+            # Negotiate the freshly advertised manifest features before export.
+            try:
+                options.update(_required_manifest_features())
+                options["source_identity"] = _source_identity_enabled()
+            except wglink_core.WgLinkError as exc:
+                _modal(str(exc), "WGLink refused")
+                return
+            self._execute(None, send_options=options)
+
+        resume = wglink_activity.carrying(resume)
+        event = _followup_event
+
+        def dispatch(job: object) -> None:
+            # fireCustomEvent is Fusion's thread-safe bridge. Do not acquire an
+            # Application, inspect a document, or use UI from this worker.
+            with _followups_lock:
+                if _followup_event is not event:
+                    return
+                _followups.append(job)
+            app.fireCustomEvent(FOLLOWUP_EVENT_ID)
+
+        try:
+            _backend_admission.request(ipc, data_dir, argv, override, resume, dispatch)
+        except wglink_launcher.LauncherError as exc:
+            raise wglink_core.WgLinkError(str(exc)) from exc
+        return True
 
 
 class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
@@ -3881,7 +3949,8 @@ def _start_followups(app: object) -> bool:
     for a request it found still waiting (:func:`_recheck_requests_at_startup`).
     """
 
-    global _followup_event, _followup_handler
+    global _followup_event, _followup_handler, _backend_admission
+    _backend_admission = wglink_launcher.BackendAdmission()
     _followup_event = app.registerCustomEvent(FOLLOWUP_EVENT_ID)
     if _followup_event is None:
         return False
@@ -3892,6 +3961,7 @@ def _start_followups(app: object) -> bool:
 
 def _stop_followups(app: object) -> None:
     global _followup_event, _followup_handler
+    _backend_admission.close()
     if _followup_event is not None and _followup_handler is not None:
         try:
             _followup_event.remove(_followup_handler)

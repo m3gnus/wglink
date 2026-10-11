@@ -86,7 +86,7 @@ contains only **Declare Body…**, **Insert**, **Update**, and **Detach**.
 | Command | What it does |
 |---|---|
 | **Set WG Source…** | Mark the selected faces as the `LF`, `MF`, `HF`, or `PASSIVE_CARDIOID` drive source (applies an appearance with that exact name and stamps the source's identity; Clear removes both). A face already painted `PORT_EXIT`, the role's old name, is still recognised. |
-| **Solve in WG** | Export the assembly and ask WG to prepare and solve it, so WG is already solving when you switch windows. |
+| **Solve in WG** | Start WG's backend when needed, export the assembly and ask WG to prepare and solve it. |
 | **Send to WG** | Export the assembly as a validated `.wgreturn` bundle without asking for a solve. |
 | Declare Body… | Classify a body for the return: `exterior-shell` includes an open surface body, `exclude` leaves a body out, Clear restores automatic scoping. |
 | Insert | Insert a WG `.wglink` bundle as a managed link. Optionally give the link a **Link name** of your own; leave it empty to use WG's design name. Ordinarily unneeded: WG's Send to CAD offers the insert automatically. |
@@ -109,6 +109,22 @@ writing one request to `ipc/wglink/.wg-solve-requests/<operationId>.json`.
 Send imports and displays the snapshot; Solve also asks WG to prepare and solve.
 A request keeps the same id across a delivery retry, so WG can recover it as
 one operation. Pressing Send or Solve again creates a new request.
+
+With a current installed WG, **Solve in WG** and **Send to WG** start its
+backend when needed through the launcher WG last advertised. Startup runs in
+the background; Fusion remains responsive. Presses during startup share one
+startup attempt, then each command exports and submits on Fusion's main thread.
+An already collecting backend receives the command without another launch.
+The backend uses the same WG data folder, saved settings and history; opening
+WG later shows the same jobs and results. A configured non-default
+`WG2_DATA_DIR` is passed explicitly to the launcher.
+
+Startup is bounded to at most 75 seconds of waiting. If startup fails, WGLink
+shows the reason and asks you to start WG manually; it exports and writes no
+request. If you switch documents while WG is starting, run the command again
+from the intended document. Older WG installations and development checkouts
+that advertise no supported launcher still need WG started manually.
+Insert, Update and WG-initiated handoffs do not start the backend.
 
 The add-in exchanges requests, acknowledgements, Insert/Update handoffs and
 status with WG through files. With acknowledgement support, WG's durable
@@ -349,9 +365,10 @@ occurrence where it already is and never moves it back to the origin.)
   Update already searched the selected WG workspace by design identity. Put the
   bundle back under that workspace and run Update again. If it was deliberately
   moved elsewhere, re-point it with the headless `wglink_core.relink` API.
-- **Nothing arrives in WG after Solve in WG** — WG must be running; the
-  request survives until it next runs, and the WG window still has to be
-  brought forward by hand.
+- **Nothing arrives in WG after Solve in WG** — current installed WG can start
+  its backend automatically. A startup refusal shows the reason; start WG
+  manually and try again. A request already written survives until WG takes it.
+  Open the WG window to see progress and results.
 - **WG shows an update as still running after Fusion restarted** — WGLink
   settles what it can against the open document, read-only, and never runs an
   interrupted update again. If the update was for a document you do not have

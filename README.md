@@ -8,6 +8,8 @@ File delivery is split into `wglink_inbox.py` (capabilities, requests and acknow
 
 The former WG Metal pipeline is maintained separately as a frozen fallback. It is not part of this repository or WGLink's updater.
 
+Send and Solve can start an installed WG backend through its advertised launcher when needed. Concurrent commands share startup; export and submission resume through Fusion's main-thread custom event. Startup errors show WG's reason before any export or request is written. See the implementation guide's packaged-pair references for the launcher and backend-owner contracts.
+
 ## Docs
 
 - [WGLink user guide](docs/WGLINK-GUIDE.md)

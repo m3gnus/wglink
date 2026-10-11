@@ -448,6 +448,26 @@ Explicit Insert/Update commands and WG handoffs remain.
 
 ## WG packaged-pair references and R-2 re-pin
 
+Installed backend admission lives in `wglink_launcher.py`. It reads the
+additive `launcher.argv` / `launcher.ensureBackend` advertisement from WG's
+`server/cadlink/fusion_delivery.py` and calls that entry with `--ensure-backend`.
+The contract is in WG's `launchers/ensure_backend.py`,
+`launchers/backend_start.py`, `docs/INSTALL.md` and
+`docs/architecture/CAD-OPERATIONS.md` (Backend ownership / Stage 6).
+Read-only collection detection mirrors `server/platform/backend_owner.py`:
+`<data>/locks/server.pid` supplies pid/port, and `/health` must confirm the same
+pid and filesystem data folder, alongside the existing inbox capabilities.
+Capabilities are written at backend startup, so their file age alone cannot
+identify a stopped backend. No owner lock is acquired by the add-in.
+Only `WG2_DATA_DIR` choosing a non-default data folder adds `--data-dir`;
+the CAD workspace never supplies a data-folder override. A single admission
+worker joins concurrent commands and returns through the existing custom event.
+The worker uses only file/process/HTTP operations and the thread-safe
+`fireCustomEvent` bridge; Fusion geometry, dialogs and command continuation
+stay on the main thread. Stop cancels the public launcher, whose contract owns
+cleanup of any unconfirmed backend child. Successful backends stay detached.
+Admission never retries another launcher or data folder.
+
 The WG `dev` files `server/tests/test_wglink_packaged_pair.py`,
 `server/tests/test_wglink_shared_protocol.py` and
 `scripts/build_wglink_package.py` reference these add-in paths/symbols:

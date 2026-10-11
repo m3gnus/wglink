@@ -79,6 +79,18 @@ def data_dir(
     return (root / APP_DIRECTORY).expanduser().absolute()
 
 
+def launcher_data_dir() -> Path | None:
+    """Only a configured non-default data folder is a launcher override."""
+
+    if not os.environ.get(DATA_DIR_ENV):
+        return None
+    configured = data_dir()
+    default = data_dir(environ={key: value for key, value in os.environ.items() if key != DATA_DIR_ENV})
+    if configured is not None and default is not None and configured.resolve() == default.resolve():
+        return None
+    return configured
+
+
 def workspace_root(**kwargs: Any) -> Path | None:
     """The folder WG is writing bundles into, or None if it cannot be read.
 
