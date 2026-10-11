@@ -73,7 +73,7 @@ def test_between_commands_excludes_command_work_and_keeps_everything_else(log):
         log.record("measure_geometry")
     with wglink_activity.because(wglink_activity.CAUSE_TICK):
         log.record("resolve_links")
-    with wglink_activity.because(wglink_activity.CAUSE_LIVE):
+    with wglink_activity.because("file-request"):
         log.record("publish_status")
 
     assert log.between_commands() == {"resolve_links": 1, "publish_status": 1}
@@ -97,18 +97,18 @@ def test_the_cause_is_restored_after_the_block_including_on_an_exception(log):
 
 def test_nesting_restores_the_outer_cause(log):
     with wglink_activity.because(wglink_activity.CAUSE_TICK):
-        with wglink_activity.because(wglink_activity.CAUSE_LIVE):
+        with wglink_activity.because("file-request"):
             log.record("publish_status")
         log.record("resolve_links")
 
     assert log.counts() == {
-        "publish_status": {wglink_activity.CAUSE_LIVE: 1},
+        "publish_status": {"file-request": 1},
         "resolve_links": {wglink_activity.CAUSE_TICK: 1},
     }
 
 
 def test_a_cause_on_one_thread_does_not_attribute_another_thread_s_work(log):
-    """The live client's threads run beside the main thread and touch no adsk.
+    """The watch scheduler runs beside the main thread and touches no adsk.
 
     A process-wide cause would let a command on the main thread launder a
     worker thread's inspection into ``command``.

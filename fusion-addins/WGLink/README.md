@@ -236,8 +236,7 @@ Commands and requests cross through WG's machine-local IPC folder,
   session that WG needs updating. WG installs and updates its own managed
   WGLink, so the two are always the pair that shipped together.
 - **Send and Solve: one request file each (the WG request inbox).** Both write
-  `.wg-solve-requests/<operationId>.json` and nothing else — never a live
-  outbox item, whatever the activation gate says — and differ only in `kind`
+  `.wg-solve-requests/<operationId>.json` and nothing else, whatever the activation gate says — and differ only in `kind`
   (`receive_snapshot` or `prepare_and_solve`). For a WG that advertises
   `solveCommandDelivery` 4 the file is schema 4; for one that advertises 3,
   Solve writes the schema-3 file as before and **Send is refused**, because a
@@ -280,13 +279,14 @@ Commands and requests cross through WG's machine-local IPC folder,
   that a waiting request can be missed, and a later start-up is not
   guaranteed to reach it either.
 - **Items an earlier session queued** in `.wglink-outbox` are converted at
-  start-up, before any live thread starts, against what WG advertises then:
-  into request files at schema 4; at 3, solves convert and snapshots are left
-  for the live worker when one will run (otherwise dropped, with one notice);
+  start-up, against what WG advertises then:
+  into request files at schema 4; at 3, solves convert and snapshots are
+  reported as not delivered and removed with one notice;
   with nothing advertised, nothing moves until a later start-up. An item whose
   write fails, or whose outbox file is held, is kept and reported once; the next
   start-up writes it again under the same id, which WG recovers as the same
-  operation. A failure of the conversion as a whole is reported the same way
+  operation. A final answer stored by an earlier session is never resent; an
+  outstanding refusal is shown before removing its item. A failure of the conversion as a whole is reported the same way
   and never stops start-up.
 - **Two Fusion processes on one WG data folder.** Requests stay apart: each
   has a fresh `uuid4` id and its own file. Return bundle names are reserved
@@ -297,9 +297,8 @@ Commands and requests cross through WG's machine-local IPC folder,
   row refuses visibly. On macOS and Linux a permission error is the folder's
   and is refused at once.
   **Known limit:** `.fusion-status.json` is one file, and the last writer wins,
-  so two Fusion processes overwrite each other's status for WG. The live
-  lease is per process; a cross-process lease waits for the activation-boundary
-  decision.
+  so two Fusion processes overwrite each other's status for WG. Panel ownership
+  is elected within each Fusion process.
 - **WG's requests.** Return requests and handoffs arrive as
   `.fusion-return-requests/<id>.json` and `.fusion-handoffs/<id>.json`. WGLink
   takes them in `deliverySequence` order, claims each by renaming it to a
@@ -350,96 +349,12 @@ Commands and requests cross through WG's machine-local IPC folder,
   open none of them can be established, and reporting "never started" would
   cancel an operation that may have applied or may need recovery. Such a claim
   waits — in this session or a later one — until its document is active, and
-  the heartbeat names it under `diagnostics.liveDispatch.targetDocumentUnavailable`.
+  WGLink logs that the target document must be opened.
   *Target document unavailable* and *operation never started* stay different
   things.
 - **Correlation.** The heartbeat's `diagnostics.lastRequest` names the last
   round trip (`channel`, `correlationId`, `attemptId`, `delivery`, `outcome`),
   and each link publishes the `operationId` stamped on it.
-
-### Taking WG's requests over the live session
-
-When the live session is healthy, WG hands its Fusion-bound requests over HTTP
-instead of leaving WGLink to find their files (WG's
-`docs/reference/CADLINK-LIVE-PROTOCOL.md`, section 7). What a request means, and
-every check made before it runs, are the file transport's, unchanged: one
-parser, one run, one set of rules.
-
-- **Two workflows, never a negotiation.** While the session is healthy WGLink
-  claims no request files at all, so a request cannot be taken twice; while it
-  is not, the file path runs exactly as it always has. WGLink never negotiates
-  a protocol with an incompatible WG — any refusal simply leaves it on the
-  files.
-- **A long poll, not a spin.** A separate worker thread holds one
-  `GET /requests` open for WG's advertised window (25 s), so an idle add-in
-  waits in the kernel. It has a thread of its own because a 25 s wait on the
-  sender would push the four-second heartbeat past WG's 20 s freshness window.
-  A poll that answers instantly is not a wait, and the next one is delayed.
-  The same holds for a request WGLink may not take yet — a **WGLink** command
-  is running, no design is ready, no WG workspace is selected. WG answers a
-  long poll the instant an offerable request exists, so only a *change* in what
-  WG is offering shortens the next wait or raises the custom event; a standing
-  offer is re-examined by the four-second tick instead. The request waits
-  quietly with its reason in the heartbeat — except while a WGLink command is
-  running, where the reason is recorded but not published until the command
-  ends, because the tick that publishes returns before it gets there.
-- **What this does *not* do.** Nothing here observes the *user's* active Fusion
-  command: there is no `commandStarting` or `commandTerminated` hook in the
-  add-in, and `_command_busy` is set only by WGLink's own commands. WGLink does
-  not terminate anything, so it cannot interrupt a user command — but neither
-  does it deliberately wait behind one. That behaviour, and the timing of live
-  dispatch while a modal or a user command is open, is owed to the real-Fusion
-  responsiveness pass and is not claimed here.
-- **The durable claim comes first.** Before WGLink asks WG for a request it
-  writes `ipc/wglink/.wglink-live-claims/<operationId>.json` with a fresh claim
-  id. Nothing is acknowledged to WG before that file exists, and nothing
-  reaches Fusion's main thread before the claim is answered and the file says
-  `claimed`. A lost answer is replayed with the same claim id, which WG answers
-  from its own store; a lost completion is resent from the same file. Each
-  operation has exactly one such file, and it is the add-in's authoritative
-  record of that operation. A settled file that will not delete — a reader
-  holding it open — is reported and held back, doubling, rather than found by
-  every scan and sent again; WG would answer `alreadyRecorded` each time, so
-  nothing but the request count would show it.
-- **Fusion's main thread does the Fusion work.** The worker raises a second
-  custom event; every `adsk` call for a live request happens in its handler, or
-  in the four-second tick, which services the same queue so a missed event
-  costs one tick rather than an operation. The workers never call into the
-  add-in and never touch a document.
-- **Progress.** `queuedForFusion` is recorded when the claim is answered, and
-  `executing` immediately before the first Fusion write — so a request refused
-  during its checks never makes WG believe the model was being changed.
-- **After an interruption, nothing is re-run.** A `claiming` entry proves its
-  work never reached the main thread, so it replays and runs normally. A
-  `claimed` entry is reconciled against its exact document, read-only, exactly
-  as a leftover file claim is — including the rule above that a claim whose
-  document is not open is kept rather than settled.
-- **Shutdown is bounded.** Stopping the add-in stops the live workers first,
-  with a deadline, then removes both custom events. A request still in flight
-  may finish afterwards on its daemon thread; it starts nothing new, touches no
-  document, and its outcome is already in the claim journal.
-- **Work from a previous owner is refused.** Losing the IPC lease, or stopping,
-  moves the client to a new ownership generation. A dispatch or a report from
-  the old one is dropped rather than reaching the document or WG. A token
-  refresh does **not** do this: an operation belongs to the installation and
-  its attempt generation, never to a session.
-
-### Cancelling a live request
-
-WG has no route that tells a claimed add-in to stop; a dismissal becomes
-visible in the operation WG returns with a progress report. Fusion API calls
-cannot be interrupted, so each step is classified and the classification is
-what WGLink does — it never implies that an arbitrary Fusion call can be
-stopped, and it never terminates a command the user is running.
-
-| Step | Class | Where it stops | What is reported |
-| --- | --- | --- | --- |
-| Waiting to be claimed | interruptible | any tick | WG deletes a dismissed request's file, so the claim is refused and nothing runs |
-| Claim answered, before hand-over | interruptible | the worker | `discarded`; the request never reaches Fusion |
-| Reads (links, applying mark, the live state measurement) | cooperatively cancellable | before each | `discarded`; the model is untouched |
-| `Update` / `Insert` | cooperatively cancellable at the precondition, then deferred | the precondition, after the last read and before the first write | `discarded` there; afterwards the call finishes and the outcome reported is what actually happened |
-| The return export | deferred to the next safe boundary | before the export | it writes no CAD model, so a dismissal during it needs no recovery |
-| A call interrupted by process death | not cancellable | — | the applying mark without evidence is **recovery required**, never a clean cancellation, and never re-applied |
 
 ### The heartbeat reads cached state only
 
@@ -511,9 +426,8 @@ nothing and reports "cannot tell".
 
 ## Automatic coordination, and switching it on
 
-WGLink runs five engines that act without a user command: the four-second
-watch tick, owner-candidate promotion, the live session's send and poll
-workers, and the live custom event. Together they resolve every managed link
+WGLink runs two engines that act without a user command: the four-second
+watch tick and owner-candidate promotion. Together they resolve every managed link
 on a timer, publish status every tick, apply WG's handoffs and return requests,
 and offer newer exports. That is **automatic coordination**, and it is off by
 default.
@@ -530,8 +444,7 @@ The value is read once when the add-in starts; restart Fusion or the add-in to
 change it. A missing or invalid value leaves coordination off; only a JSON
 `true` enables it. An invalid value is reported as `invalid`. With it off:
 
-- none of the five engines starts or registers. The live layer stays in the
-  tree, dormant: its threads are not started and its event is not registered;
+- neither engine starts or registers;
 - WG's handoffs and return requests, and the newer-export prompt, are not
   consumed. Insert and Update remain as commands;
 - status is published once at start-up, after each command, and removed at
@@ -550,7 +463,7 @@ The heartbeat's `diagnostics.activation` states the setting, and
 geometry measurement, source inventory, document signature, status
 publication, mutation and export, by the cause that reached it
 (`command:<name>`, `startup`, `claim-settlement`, `shutdown`, `tick`,
-`live-dispatch`, `promotion`, or `unattributed`). `betweenCommands` is
+`promotion`, or `unattributed`). `betweenCommands` is
 everything no command asked for; start-up, claim settlement and shutdown are
 bounded and excluded, and a standby's timer-started `promotion` is not.
 

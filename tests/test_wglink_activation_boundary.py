@@ -52,8 +52,6 @@ def _load_instance(monkeypatch, name: str, ui, app=None):
 ENGINE_THREADS = {
     "WGLinkExportWatch",
     "WGLinkOwnerCandidate",
-    "WGLinkLiveSend",
-    "WGLinkLivePoll",
 }
 
 
@@ -193,9 +191,7 @@ def _engines(module, app) -> dict[str, object]:
     return {
         "watch_thread": module._watch_thread is not None,
         "candidate_thread": module._candidate_thread is not None,
-        "live_client": module._live_client is not None,
         "watch_event": module.WATCH_EVENT_ID in app.events,
-        "live_event": module.LIVE_EVENT_ID in app.events,
         "followup_event": module.FOLLOWUP_EVENT_ID in app.events,
     }
 
@@ -203,7 +199,7 @@ def _engines(module, app) -> dict[str, object]:
 def test_with_coordination_off_no_engine_starts_or_registers(
     monkeypatch, tmp_path: Path
 ) -> None:
-    """A, C, D not started; E not registered. The live layer is dormant, not ignored."""
+    """The watch thread and event stay dormant with coordination off."""
 
     fixture = _boundary(monkeypatch, tmp_path, "WGLink_engines_off", coordination=False)
     before = set(threading.enumerate())
@@ -212,9 +208,7 @@ def test_with_coordination_off_no_engine_starts_or_registers(
         assert _engines(fixture.module, fixture.app) == {
             "watch_thread": False,
             "candidate_thread": False,
-            "live_client": False,
             "watch_event": False,
-            "live_event": False,
             "followup_event": True,
         }
         assert _started_threads(before) == set()
@@ -243,12 +237,10 @@ def test_with_coordination_on_every_engine_starts_as_before(
         assert _engines(fixture.module, fixture.app) == {
             "watch_thread": True,
             "candidate_thread": False,
-            "live_client": True,
             "watch_event": True,
-            "live_event": True,
             "followup_event": True,
         }
-        assert {"WGLinkExportWatch", "WGLinkLiveSend", "WGLinkLivePoll"} <= _started_threads(before)
+        assert _started_threads(before) == {"WGLinkExportWatch"}
     finally:
         fixture.module.stop(None)
 
@@ -300,11 +292,9 @@ def test_with_coordination_off_an_idle_owner_keeps_its_lease(monkeypatch, tmp_pa
 
 _TIMER_ONLY = (
     "_on_watch_tick",
-    "_on_live_dispatch",
     "_apply_pending_handoff",
     "_apply_pending_return_request",
     "_apply_announced_updates",
-    "_notice_deliveries",
     "_notice_outdated_wg",
 )
 
@@ -328,7 +318,7 @@ def _spy_timer_only(monkeypatch, module) -> list[str]:
     return reached
 
 
-def _live_scenario(fixture) -> None:
+def _document_scenario(fixture) -> None:
     """Commands, then everything a user does between them, then every callback."""
 
     module, app = fixture.module, fixture.app
@@ -348,7 +338,7 @@ def test_with_coordination_off_the_consumers_and_prompts_are_unreachable(
     reached = _spy_timer_only(monkeypatch, fixture.module)
     fixture.module.run(None)
     try:
-        _live_scenario(fixture)
+        _document_scenario(fixture)
         assert reached == []
         # The command itself did run, and its follow-up did publish.
         assert _count(fixture.module, "mutation_body_declaration", "command:declare") == 1
@@ -366,14 +356,12 @@ def test_with_coordination_on_the_same_scenario_reaches_them(
     reached = _spy_timer_only(monkeypatch, fixture.module)
     fixture.module.run(None)
     try:
-        _live_scenario(fixture)
+        _document_scenario(fixture)
         assert {
             "_on_watch_tick",
-            "_on_live_dispatch",
-            "_apply_pending_handoff",
+                    "_apply_pending_handoff",
             "_apply_pending_return_request",
-            "_notice_deliveries",
-            "_notice_outdated_wg",
+                    "_notice_outdated_wg",
             "survey",
         } <= set(reached)
     finally:
@@ -1014,9 +1002,6 @@ def _busy_newer_export_prompt(module) -> None:
     module._fusion_snapshot = lambda: snapshot
     module._settle_claims = lambda _snapshot: None
     module._notice_outdated_wg = lambda: None
-    module._notice_deliveries = lambda: None
-    module._on_live_dispatch = lambda _snapshot=None: False
-    module._live_transport_healthy = lambda: True
     module._publish_fusion_status = lambda _snapshot=None: None
     module._watcher.survey = lambda _links: [announcement]
     module.wglink_watch.prompt_text = lambda _items: "newer export"
@@ -1040,8 +1025,7 @@ def test_a_pickup_check_held_behind_any_busy_holder_is_re_driven_when_it_ends(
     fixture = _boundary(monkeypatch, tmp_path, f"WGLink_m2_{holder.__name__}", coordination=True)
     module = fixture.module
     fixture.ui.dialog_result = "no"
-    for name in ("_fusion_snapshot", "_settle_claims", "_notice_outdated_wg", "_notice_deliveries",
-                 "_on_live_dispatch", "_live_transport_healthy", "_publish_fusion_status"):
+    for name in ("_fusion_snapshot", "_settle_claims", "_notice_outdated_wg", "_publish_fusion_status"):
         monkeypatch.setattr(module, name, getattr(module, name))
     monkeypatch.setattr(module._watcher, "survey", module._watcher.survey)
     monkeypatch.setattr(module.wglink_watch, "prompt_text", module.wglink_watch.prompt_text)
@@ -1082,39 +1066,6 @@ def test_candidate_promotion_is_counted_between_commands(monkeypatch) -> None:
         assert second.wglink_activity.LOG.between_commands().get("status_publication") == 1
     finally:
         second.stop(None)
-
-
-@pytest.mark.parametrize("inspected", [False, True], ids=["not-inspected", "control"])
-def test_an_adopted_live_claim_is_never_judged_against_unread_links(
-    monkeypatch, tmp_path: Path, inspected: bool
-) -> None:
-    """Review R02: the live-path half of the trap."""
-
-    fixture = _boundary(monkeypatch, tmp_path, f"WGLink_r02_{inspected}", coordination=True)
-    module = fixture.module
-    reports: list[tuple] = []
-    client = types.SimpleNamespace(
-        report_outcome=lambda operation_id, generation, wire, **kw: reports.append((operation_id, wire))
-    )
-    module._live_adopted["op-9"] = {
-        "operationId": "op-9", "kind": module.wglink_live.KIND_UPDATE_LINK, "attemptGeneration": 1,
-        "request": {"exportId": "wge_9", "expectedDocumentId": "fusion:doc-a"},
-    }
-    links = [{"instance_id": "i", "export_id": "wge_9", "operation_id": "op-9"}]
-
-    module._settle_adopted_claims(client, {
-        "document_id": "fusion:doc-a",
-        "links": links if inspected else [],
-        "links_inspected": inspected,
-        "applying_operation": None,
-    })
-
-    if inspected:
-        assert reports == [("op-9", "reconciled")]
-        assert "op-9" not in module._live_adopted
-    else:
-        assert reports == []
-        assert "op-9" in module._live_adopted
 
 
 @pytest.mark.parametrize("owner", [False, True], ids=["non-owner", "owner"])

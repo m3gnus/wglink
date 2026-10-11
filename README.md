@@ -2,6 +2,8 @@
 
 WGLink is the maintained Fusion add-in for sending Fusion geometry to Waveguide Generator (WG), solving it there, and inserting or updating native WG geometry in Fusion. The add-in lives in `fusion-addins/WGLink/`. WG's platform installers package WGLink for macOS and Windows.
 
+Send, Solve, Insert/Update handoffs, acknowledgements and status exchange use files in WG's IPC folder. Send imports a snapshot; Solve also requests a solve. Each explicit command has its own request id.
+
 The former WG Metal pipeline is maintained separately as a frozen fallback. It is not part of this repository or WGLink's updater.
 
 ## Docs
@@ -10,6 +12,7 @@ The former WG Metal pipeline is maintained separately as a frozen fallback. It i
 - [WGLink implementation and development guide](fusion-addins/WGLink/README.md)
 - [Naming a WGLink link](docs/WGLINK-LINK-NAMING.md)
 - [Validating a WGLink change without a release](docs/WGLINK-DEV-LOOP.md)
+- [A5-1 deleted-test coverage map](docs/WGLINK-A5-1-COVERAGE.md)
 - [Headless workflow status](docs/HEADLESS.md)
 - [Retired pipeline guide](docs/WGMETAL-PIPELINE-GUIDE.md)
 

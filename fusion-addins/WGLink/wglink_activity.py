@@ -21,7 +21,7 @@ uninstrumented path must show up as a problem, never disappear because nobody
 labelled it -- otherwise the measurement comes out clean exactly where the code
 is least understood.
 
-**Causes are per-thread.** The live client runs worker threads beside Fusion's
+**Causes are per-thread.** The watch scheduler runs beside Fusion's
 main thread. A process-wide cause would let a command on the main thread
 launder a worker's inspection into ``command``.
 
@@ -44,8 +44,6 @@ from typing import TypeVar
 CAUSE_COMMAND = "command"
 #: The periodic watcher tick.
 CAUSE_TICK = "tick"
-#: WG asked for something over the live channel.
-CAUSE_LIVE = "live-dispatch"
 #: Add-in start-up and shutdown, which are bounded and happen once.
 CAUSE_STARTUP = "startup"
 CAUSE_SHUTDOWN = "shutdown"
@@ -159,7 +157,7 @@ class ActivityLog:
 
         This is the acceptance criterion in one call: it must be empty between
         commands. Start-up and shutdown are bounded and happen once, so they
-        are excluded; a tick, a live dispatch or an unattributed path is not.
+        are excluded; a tick, a file request or an unattributed path is not.
         """
 
         found: dict[str, int] = {}
@@ -242,7 +240,6 @@ __all__ = [
     "CAUSE_CLAIM_SETTLEMENT",
     "CAUSE_PROMOTION",
     "CAUSE_COMMAND",
-    "CAUSE_LIVE",
     "CAUSE_SHUTDOWN",
     "CAUSE_STARTUP",
     "CAUSE_TICK",

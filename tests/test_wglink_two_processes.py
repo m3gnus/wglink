@@ -12,7 +12,7 @@ request inbox, at the same time. What must hold:
 
 Known limit, documented rather than fixed here: ``.fusion-status.json`` is one
 file, last writer wins. Two Fusion processes on one folder overwrite each
-other's heartbeat. The cross-process live lease waits for the step-6 decision.
+other's heartbeat. Panel ownership is elected within each Fusion process.
 """
 
 from __future__ import annotations
@@ -350,3 +350,170 @@ def test_a_permission_error_on_posix_is_refused_at_once_never_retried(
         send_module._reserve_target(tmp_path / "speaker.wgreturn", overwrite=False)
 
     assert opens == [".speaker.wgreturn.reserve"] and sleeps == []
+
+
+# The command shell and a file-only WG peer have separate interpreters. CAD is
+# stubbed at the Fusion API boundary; request parsing, claims, publication,
+# acknowledgement reading and command dispatch use production code.
+_FILE_COMMAND_WORKER = textwrap.dedent(
+    """
+    import json, sys, time, threading
+    from pathlib import Path
+    import pytest
+
+    tests, addin, folder, role, operation = sys.argv[1:6]
+    sys.path[:0] = [tests, addin]
+    from test_wglink_transfer import _real_export, _run
+    from test_wglink_addin_lifecycle import (
+        _design_module, _per_request_folders, _shared_snapshot,
+    )
+    from test_wglink_acknowledgement import _ack_payload, _write_ack
+
+    folder = Path(folder)
+    ipc, bundles = folder / 'ipc', folder / 'workspace' / 'wglink'
+    deadline = time.monotonic() + 20
+    def wait_for(check):
+        while not check():
+            if time.monotonic() > deadline:
+                raise RuntimeError('file peer did not finish')
+            time.sleep(0.005)
+
+    if role == 'fusion':
+        with pytest.MonkeyPatch.context() as patch:
+            if operation in ('send', 'solve'):
+                fixture = _real_export(patch, folder, 'WGLink_file_export')
+                module = fixture.module
+                # Send/Solve must complete without any network access, including
+                # when a previous WG left an endpoint advertisement behind.
+                import socket
+                patch.setattr(socket, 'socket', lambda *a, **k: (_ for _ in ()).throw(AssertionError('network access')))
+                capabilities = json.loads((ipc / 'wg-capabilities.json').read_text())
+                capabilities.update(liveProtocol=1, solveAcknowledgement=1)
+                (ipc / 'wg-capabilities.json').write_text(json.dumps(capabilities))
+                (ipc / 'wg-endpoint.json').write_text('{"baseUrl":"http://127.0.0.1:1"}')
+                (folder / 'ready').write_text('ready')
+                ids = []
+                for index in range(2):
+                    _run(module, operation)
+                    rid = module._request_trace['correlationId']
+                    ids.append(rid)
+                    wait_for(lambda: (ipc / module.wglink_watch.ACK_DIRECTORY / (rid + '.json')).exists())
+                    ack = module.wglink_watch.read_acknowledgement(ipc, rid)
+                    assert ack == ('accepted', None), ack
+                assert len(set(ids)) == 2
+                assert not (ipc / '.wglink-outbox').exists()
+                print(json.dumps({'ids': ids, 'outcome': 'accepted'}))
+            else:
+                module, ui = _design_module(patch, 'WGLink_file_handoff')
+                ipc, bundles = _per_request_folders(patch, module, folder)
+                patch.setattr(module, '_owns_active_ipc_lease', lambda: True)
+                patch.setattr(module, '_active_document_id', lambda: 'fusion:doc-a')
+                snapshot = _shared_snapshot()
+                if operation == 'insert':
+                    snapshot['links'] = []
+                patch.setattr(module, '_document_links', lambda: snapshot['links'])
+                calls = []
+                main_thread = threading.get_ident()
+                def mutate(app, bundle, options):
+                    assert threading.get_ident() == main_thread
+                    options['precondition']()
+                    calls.append(options['operation_id'])
+                    snapshot['links'] = [{
+                        'instance_id': 'instance-b', 'design_id': 'wgd-shared',
+                        'export_id': 'wge_5', 'operation_id': options['operation_id'],
+                    }]
+                    return {}
+                patch.setattr(module.wglink_core, operation, mutate)
+                (folder / 'ready').write_text('ready')
+                request = ipc / '.fusion-handoffs' / 'req-1.json'
+                for index in range(2):
+                    wait_for(request.exists)
+                    # A new registration would not remember the previous id.
+                    module._handoff_attempted_id = None
+                    assert module._apply_pending_handoff(snapshot) == module.HANDLED
+                    assert module._apply_pending_handoff(snapshot) == module.IDLE
+                    assert not request.exists()
+                    (folder / ('consumed-' + str(index))).write_text('consumed')
+                assert calls == ['req-1'], calls
+                assert module._request_trace['outcome'] == 'reconciled'
+                assert list((ipc / '.fusion-handoffs').iterdir()) == []
+                assert ui.messages == []
+                print(json.dumps({'writes': calls, 'outcome': 'reconciled'}))
+    else:
+        wait_for(lambda: (folder / 'ready').exists())
+        import wglink_watch
+        if operation in ('send', 'solve'):
+            inbox = ipc / '.wg-solve-requests'
+            accepted = []
+            for index in range(2):
+                wait_for(lambda: inbox.exists() and any(inbox.glob('*.json')))
+                request = next(inbox.glob('*.json'))
+                payload = json.loads(request.read_text())
+                expected = 'receive_snapshot' if operation == 'send' else 'prepare_and_solve'
+                assert payload['kind'] == expected
+                bundle = folder / 'workspace' / payload['bundlePath']
+                relative, digest = wglink_watch.return_reference(bundle, folder / 'workspace')
+                assert payload['manifestSha256'] == digest
+                assert (bundle / 'assembly.step').is_file()
+                rid = payload['operationId']
+                # Durable acceptance precedes removing the request.
+                _write_ack(ipc, rid, _ack_payload(rid, 'accepted',
+                    kind=expected, manifestSha256=digest))
+                accepted.append(rid)
+                request.unlink()
+            print(json.dumps({'ids': accepted, 'outcome': 'accepted'}))
+        else:
+            for index in range(2):
+                bundle = bundles / 'horn.wglink'
+                bundle.mkdir(exist_ok=True)
+                (bundle / 'wglink.json').write_text('{}')
+                payload = {
+                    'schemaVersion': 3, 'target': 'fusion360', 'requestId': 'req-1',
+                    'operationId': 'req-1', 'deliverySequence': 1, 'bundlePath': str(bundle),
+                    'bundleId': 'wgb_5', 'exportId': 'wge_5', 'sequence': 5,
+                    'designId': 'wgd-shared', 'requestedAt': '2099-01-01T00:00:00Z',
+                }
+                if operation == 'insert':
+                    payload['destination'] = {'kind': 'document', 'value': 'fusion:doc-a'}
+                else:
+                    payload.update(expectedDocumentId='fusion:doc-a', expectedInstanceId='instance-b',
+                                   expectedReturnStateHash='sha256:state-b')
+                inbox = ipc / '.fusion-handoffs'
+                inbox.mkdir(exist_ok=True)
+                wglink_watch._write_json_atomically(inbox / 'req-1.json', payload)
+                wait_for(lambda: (folder / ('consumed-' + str(index))).exists())
+            print(json.dumps({'published': 2}))
+    """
+)
+
+
+@pytest.mark.parametrize("operation", ["send", "solve", "insert", "update"])
+def test_explicit_commands_exchange_files_between_processes(tmp_path: Path, operation: str) -> None:
+    """Two deliberate exports get new ids; a redelivered handoff mutates once."""
+
+    script = tmp_path / "file_peer.py"
+    script.write_text(_FILE_COMMAND_WORKER)
+    workers = [
+        subprocess.Popen(
+            [sys.executable, str(script), str(ROOT / "tests"), str(ADDIN),
+             str(tmp_path), role, operation],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        for role in ("fusion", "wg")
+    ]
+    results = []
+    try:
+        for process in workers:
+            stdout, stderr = process.communicate(timeout=30)
+            assert process.returncode == 0, stderr
+            results.append(json.loads(stdout))
+    finally:
+        for process in workers:
+            if process.poll() is None:
+                process.terminate()
+                process.communicate(timeout=10)
+    if operation in ("send", "solve"):
+        assert results[0] == results[1]
+        assert len(set(results[0]["ids"])) == 2
+    else:
+        assert results == [{"writes": ["req-1"], "outcome": "reconciled"}, {"published": 2}]

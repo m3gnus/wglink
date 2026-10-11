@@ -31,7 +31,7 @@ from test_wglink_addin_lifecycle import (
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "fusion-addins" / "WGLink"))
-import wglink_live  # noqa: E402
+import wglink_legacy_queue  # noqa: E402
 import wglink_watch  # noqa: E402
 
 
@@ -70,7 +70,7 @@ def _inbox(ipc: Path) -> list[dict]:
 
 
 def _outbox(ipc: Path) -> list[dict]:
-    items, _foreign = wglink_live.Outbox(ipc).scan()
+    items, _foreign = wglink_legacy_queue.LegacyQueue(ipc).scan()
     return items
 
 
@@ -266,25 +266,16 @@ def test_send_and_solve_write_one_request_differing_only_in_kind(
 
 
 @pytest.mark.parametrize("operation", ["send", "solve"])
-def test_a_healthy_live_session_does_not_make_a_second_path(
+def test_obsolete_endpoint_advertisements_do_not_change_the_file_path(
     monkeypatch, tmp_path: Path, operation: str
 ) -> None:
     """C1: whatever the gate says, new work is a file and never an outbox item."""
 
     fixture = _transfer(monkeypatch, tmp_path, f"WGLink_live_one_path_{operation}", live=True)
-    enqueued: list[int] = []
-    client = types.SimpleNamespace(
-        healthy=lambda: True,
-        enqueue_delivery=lambda: enqueued.append(1),
-        take_log_lines=lambda: [],
-    )
-    monkeypatch.setattr(fixture.module, "_live_client", client)
-
     _run(fixture.module, operation)
 
     assert len(_inbox(fixture.ipc)) == 1
     assert _outbox(fixture.ipc) == []
-    assert enqueued == []
 
 
 def test_a_send_to_a_wg_that_reads_only_schema_3_is_refused_visibly(
@@ -518,32 +509,31 @@ def test_the_pickup_check_rides_its_own_event_in_both_gate_states(
 
 
 def _queued(ipc: Path, kind: str, operation_id: str, *, file_written: bool = False, answered: bool = False) -> None:
-    item = wglink_live.delivery_item(
-        kind,
-        operation_id=operation_id,
-        bundle_path="wgreturn/speaker.wgreturn",
-        manifest_sha256="sha256:" + "b" * 64,
-        requested_at="2026-09-20T12:00:00Z",
-        created_at=wglink_live._utc_millis(time.time()),
-        return_id="wgr_9" if kind == wglink_live.KIND_SOLVE else None,
-        file_written=file_written,
-    )
-    if answered:
-        item["answer"] = {"outcome": "delivered"}
-    wglink_live.Outbox(ipc).add(item)
+    # A fixture from the former queue format; production only reads it.
+    item = {
+        "schemaVersion": 1, "operationId": operation_id, "kind": kind,
+        "bundlePath": "wgreturn/speaker.wgreturn", "manifestSha256": "sha256:" + "b" * 64,
+        "requestedAt": "2026-09-20T12:00:00Z", "createdAt": "2026-09-20T12:00:00Z",
+        "answer": {"outcome": "delivered"} if answered else None,
+    }
+    if kind == SOLVE:
+        item.update(returnId="wgr_9", fileWritten=file_written)
+    folder = ipc / ".wglink-outbox"
+    folder.mkdir(exist_ok=True)
+    (folder / f"{operation_id}.json").write_text(json.dumps(item))
 
 
 def _queue_both(ipc: Path) -> None:
-    _queued(ipc, wglink_live.KIND_SNAPSHOT, "snap-1")
-    _queued(ipc, wglink_live.KIND_SOLVE, "solve-1")
+    _queued(ipc, wglink_legacy_queue.KIND_SNAPSHOT, "snap-1")
+    _queued(ipc, wglink_legacy_queue.KIND_SOLVE, "solve-1")
 
 
 def test_at_schema_4_every_unanswered_item_becomes_its_request_file(tmp_path: Path) -> None:
     _advertise(tmp_path, 4)
     _queue_both(tmp_path)
-    _queued(tmp_path, wglink_live.KIND_SNAPSHOT, "done-1", answered=True)
+    _queued(tmp_path, wglink_legacy_queue.KIND_SNAPSHOT, "done-1", answered=True)
 
-    result = wglink_live.convert_outbox(tmp_path, solve_files=wglink_watch, live_will_run=True)
+    result = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_watch)
 
     assert sorted(result["converted"]) == ["snap-1", "solve-1"]
     by_id = {payload["operationId"]: payload for payload in _inbox(tmp_path)}
@@ -553,22 +543,13 @@ def test_at_schema_4_every_unanswered_item_becomes_its_request_file(tmp_path: Pa
     assert [item["operationId"] for item in _outbox(tmp_path)] == ["done-1"]
 
 
-@pytest.mark.parametrize("live_will_run", [True, False])
-def test_at_schema_3_a_solve_converts_and_a_snapshot_waits_only_for_a_live_worker(
-    tmp_path: Path, live_will_run: bool
-) -> None:
+def test_at_schema_3_a_solve_converts_and_a_snapshot_is_reported_not_delivered(tmp_path: Path) -> None:
     _advertise(tmp_path, 3)
     _queue_both(tmp_path)
-
-    result = wglink_live.convert_outbox(tmp_path, solve_files=wglink_watch, live_will_run=live_will_run)
-
+    result = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_watch)
     [solve] = _inbox(tmp_path)
     assert solve["operationId"] == "solve-1" and solve["schemaVersion"] == 3
-    left = [item["operationId"] for item in _outbox(tmp_path)]
-    if live_will_run:
-        assert left == ["snap-1"] and result["left"] == ["snap-1"]
-    else:
-        assert left == [] and result["abandoned"] == ["snap-1"]
+    assert _outbox(tmp_path) == [] and result["abandoned"] == ["snap-1"]
 
 
 @pytest.mark.parametrize("advertised", ["no-file", None, 2])
@@ -577,7 +558,7 @@ def test_when_wg_advertises_nothing_nothing_moves(tmp_path: Path, advertised: ob
         _advertise(tmp_path, advertised)
     _queue_both(tmp_path)
 
-    result = wglink_live.convert_outbox(tmp_path, solve_files=wglink_watch, live_will_run=False)
+    result = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_watch)
 
     assert _inbox(tmp_path) == []
     assert sorted(item["operationId"] for item in _outbox(tmp_path)) == ["snap-1", "solve-1"]
@@ -586,16 +567,16 @@ def test_when_wg_advertises_nothing_nothing_moves(tmp_path: Path, advertised: ob
 
 def test_a_solve_whose_file_was_written_when_queued_gets_no_second_file(tmp_path: Path) -> None:
     _advertise(tmp_path, 4)
-    _queued(tmp_path, wglink_live.KIND_SOLVE, "solve-2", file_written=True)
+    _queued(tmp_path, wglink_legacy_queue.KIND_SOLVE, "solve-2", file_written=True)
 
-    result = wglink_live.convert_outbox(tmp_path, solve_files=wglink_watch, live_will_run=False)
+    result = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_watch)
 
     assert result["converted"] == ["solve-2"]
     assert _inbox(tmp_path) == [] and _outbox(tmp_path) == []
 
 
 @pytest.mark.parametrize("coordination", [False, None], ids=["off", "on"])
-def test_start_up_converts_before_any_live_thread_starts(
+def test_start_up_migrates_earlier_requests_in_both_gate_states(
     monkeypatch, tmp_path: Path, coordination: bool | None
 ) -> None:
     ui = _UI(_Panels(), _Definitions(reserve_ids=False))
@@ -609,18 +590,15 @@ def test_start_up_converts_before_any_live_thread_starts(
     _advertise(ipc, 4)
     _queue_both(ipc)
     order: list[str] = []
-    real_convert = module.wglink_live.convert_outbox
+    real_convert = module.wglink_legacy_queue.convert_outbox
     monkeypatch.setattr(
-        module.wglink_live,
+        module.wglink_legacy_queue,
         "convert_outbox",
         lambda *a, **k: (order.append("convert"), real_convert(*a, **k))[1],
     )
-    real_start = module._start_live
-    monkeypatch.setattr(module, "_start_live", lambda: (order.append("live"), real_start())[1])
-
     module.run(None)
     try:
-        assert order == (["convert"] if coordination is False else ["convert", "live"])
+        assert order == ["convert"]
         assert sorted(payload["operationId"] for payload in _inbox(ipc)) == ["snap-1", "solve-1"]
         assert _outbox(ipc) == []
     finally:
@@ -814,3 +792,76 @@ def test_a_bundle_that_could_not_be_published_is_never_requested(monkeypatch, tm
     assert _request_files(fixture.ipc) == []
     assert not [p for p in (fixture.workspace / "wgreturn").iterdir() if p.name.endswith(".wgreturn")]
     assert fixture.ui.messages[-1][0] == "WGLink refused"
+
+
+@pytest.mark.parametrize("outcome", ["delivered", "rejected", "conflict", "expired"])
+def test_startup_settles_earlier_answers_without_resending(monkeypatch, tmp_path: Path, outcome: str) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_earlier_answer_" + outcome)
+    _queued(fixture.ipc, SNAPSHOT, "settled-1", answered=True)
+    path = fixture.ipc / ".wglink-outbox" / "settled-1.json"
+    item = json.loads(path.read_text())
+    item["answer"] = {"outcome": outcome, "message": "earlier WG reason"}
+    path.write_text(json.dumps(item))
+    fixture.module._convert_outbox_at_startup()
+    assert _inbox(fixture.ipc) == [] and not path.exists()
+    assert len(fixture.ui.messages) == (0 if outcome == "delivered" else 1)
+    if outcome != "delivered":
+        assert "earlier WG reason" in fixture.ui.messages[0][1]
+        assert "new request" in fixture.ui.messages[0][1]
+
+
+def test_a_held_earlier_answer_is_never_migrated_as_unanswered(monkeypatch, tmp_path: Path) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_held_earlier_answer")
+    _queued(fixture.ipc, SNAPSHOT, "settled-1", answered=True)
+    monkeypatch.setattr(fixture.module.wglink_legacy_queue.LegacyQueue, "delete", lambda *a: False)
+    fixture.module._convert_outbox_at_startup()
+    assert _inbox(fixture.ipc) == []
+    assert len(_outbox(fixture.ipc)) == 1
+
+
+@pytest.mark.parametrize("coordination", [False, True], ids=["off", "on"])
+def test_file_only_startup_never_contacts_an_advertised_endpoint(monkeypatch, tmp_path: Path, coordination: bool) -> None:
+    import socket
+    import threading
+    import urllib.request
+
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_file_startup", live=True)
+    module = fixture.module
+    module.SETTINGS_PATH.write_text(json.dumps({"automatic_coordination": coordination}))
+    (fixture.ipc / "wg-endpoint.json").write_text('{"baseUrl":"http://127.0.0.1:1"}')
+    attempted = []
+    def forbidden(*_args, **_kwargs):
+        attempted.append("network")
+        raise AssertionError("startup must use files")
+    monkeypatch.setattr(socket, "socket", forbidden)
+    monkeypatch.setattr(urllib.request, "build_opener", forbidden)
+    before = set(threading.enumerate())
+    module.run(None)
+    try:
+        if module._watch_handler is not None:
+            module._watch_handler.notify(None)
+        assert module._owned
+        assert set(fixture.app.events) == ({module.FOLLOWUP_EVENT_ID, module.WATCH_EVENT_ID}
+                                          if coordination else {module.FOLLOWUP_EVENT_ID})
+        assert all(thread.name == "WGLinkExportWatch" for thread in set(threading.enumerate()) - before)
+        assert not (fixture.ipc / ".wglink-installation.json").exists()
+    finally:
+        module.stop(None)
+    assert attempted == []
+
+
+def test_earlier_refusal_is_kept_until_its_notice_can_be_shown(monkeypatch, tmp_path: Path) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_earlier_refusal_restart")
+    _queued(fixture.ipc, SNAPSHOT, "settled-1", answered=True)
+    path = fixture.ipc / ".wglink-outbox" / "settled-1.json"
+    item = json.loads(path.read_text())
+    item["answer"] = {"outcome": "rejected", "reason": "snapshot_invalid", "message": "malformed"}
+    path.write_text(json.dumps(item))
+    original = fixture.module._ui
+    monkeypatch.setattr(fixture.module, "_ui", lambda: None)
+    fixture.module._convert_outbox_at_startup()
+    assert path.exists() and _inbox(fixture.ipc) == []
+    monkeypatch.setattr(fixture.module, "_ui", original)
+    fixture.module._convert_outbox_at_startup()
+    assert not path.exists() and _inbox(fixture.ipc) == []
+    assert "malformed" in fixture.ui.messages[-1][1]

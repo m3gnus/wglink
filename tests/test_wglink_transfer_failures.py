@@ -55,7 +55,7 @@ from test_wglink_transfer import (
 ROOT = Path(__file__).resolve().parents[1]
 ADDIN = ROOT / "fusion-addins" / "WGLink"
 sys.path.insert(0, str(ADDIN))
-import wglink_live  # noqa: E402
+import wglink_legacy_queue  # noqa: E402
 import wglink_watch  # noqa: E402
 
 
@@ -837,14 +837,14 @@ def test_a_conversion_whose_write_fails_keeps_the_item_and_the_next_start_rewrit
     _queue_both(tmp_path)
     refusing = _WriterThatFails()
 
-    first = wglink_live.convert_outbox(tmp_path, solve_files=refusing, live_will_run=False)
+    first = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=refusing)
 
     assert sorted(first["failed"]) == ["snap-1", "solve-1"]
     assert first["converted"] == []
     assert _inbox(tmp_path) == []
     assert sorted(item["operationId"] for item in _outbox(tmp_path)) == ["snap-1", "solve-1"]
 
-    second = wglink_live.convert_outbox(tmp_path, solve_files=wglink_watch, live_will_run=False)
+    second = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_watch)
 
     assert sorted(second["converted"]) == ["snap-1", "solve-1"]
     assert sorted(payload["operationId"] for payload in _inbox(tmp_path)) == ["snap-1", "solve-1"]
@@ -858,10 +858,10 @@ def test_a_conversion_whose_outbox_file_is_held_is_kept_and_rewritten_under_the_
     """``outbox.delete`` returns False (Windows: the item file is held open)."""
 
     _advertise(tmp_path, 4)
-    _queued(tmp_path, wglink_live.KIND_SOLVE, "solve-9")
-    monkeypatch.setattr(wglink_live.Outbox, "delete", lambda _self, _operation_id: False)
+    _queued(tmp_path, wglink_legacy_queue.KIND_SOLVE, "solve-9")
+    monkeypatch.setattr(wglink_legacy_queue.LegacyQueue, "delete", lambda _self, _operation_id: False)
 
-    first = wglink_live.convert_outbox(tmp_path, solve_files=wglink_watch, live_will_run=False)
+    first = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_watch)
 
     assert first["failed"] == ["solve-9"] and first["converted"] == []
     [written] = _inbox(tmp_path)
@@ -871,7 +871,7 @@ def test_a_conversion_whose_outbox_file_is_held_is_kept_and_rewritten_under_the_
         (tmp_path / ".wg-solve-requests" / "solve-9.json").unlink()
     monkeypatch.undo()
 
-    second = wglink_live.convert_outbox(tmp_path, solve_files=wglink_watch, live_will_run=False)
+    second = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_watch)
 
     assert second["converted"] == ["solve-9"]
     # One file, the same id and fields: WG recovers a second delivery of it as
@@ -885,13 +885,13 @@ _CRASH_BETWEEN_WRITE_AND_DELETE = textwrap.dedent(
     import os, sys
     from pathlib import Path
     sys.path.insert(0, sys.argv[1])
-    import wglink_live, wglink_watch
+    import wglink_legacy_queue, wglink_watch
 
     def die(_self, _operation_id):
         os._exit(17)  # the process ends here: no cleanup, no finally
 
-    wglink_live.Outbox.delete = die
-    wglink_live.convert_outbox(Path(sys.argv[2]), solve_files=wglink_watch, live_will_run=False)
+    wglink_legacy_queue.LegacyQueue.delete = die
+    wglink_legacy_queue.convert_outbox(Path(sys.argv[2]), solve_files=wglink_watch)
     sys.exit(0)
     """
 )
@@ -901,7 +901,7 @@ def test_a_crash_between_the_conversion_write_and_the_delete_is_finished_by_the_
     tmp_path: Path,
 ) -> None:
     _advertise(tmp_path, 4)
-    _queued(tmp_path, wglink_live.KIND_SNAPSHOT, "snap-7")
+    _queued(tmp_path, wglink_legacy_queue.KIND_SNAPSHOT, "snap-7")
     script = tmp_path / "crash.py"
     script.write_text(_CRASH_BETWEEN_WRITE_AND_DELETE)
 
@@ -918,7 +918,7 @@ def test_a_crash_between_the_conversion_write_and_the_delete_is_finished_by_the_
     assert [item["operationId"] for item in _outbox(tmp_path)] == ["snap-7"]
     assert _staging(tmp_path / ".wg-solve-requests") == []
 
-    result = wglink_live.convert_outbox(tmp_path, solve_files=wglink_watch, live_will_run=False)
+    result = wglink_legacy_queue.convert_outbox(tmp_path, solve_files=wglink_watch)
 
     assert result["converted"] == ["snap-7"]
     assert _inbox(tmp_path) == [written]
@@ -958,22 +958,16 @@ def test_a_conversion_that_raises_is_shown_and_start_up_carries_on(
     def explode(*_args, **_kwargs):
         raise RuntimeError("the outbox index is unreadable")
 
-    monkeypatch.setattr(module.wglink_live, "convert_outbox", explode)
-    started: list[str] = []
-    real_start = module._start_live
-    monkeypatch.setattr(module, "_start_live", lambda: (started.append("live"), real_start())[1])
-
+    monkeypatch.setattr(module.wglink_legacy_queue, "convert_outbox", explode)
     module.run(None)
     try:
         titles = [title for title, _text in fixture.ui.messages]
         assert _EARLIER in titles
         text = dict(fixture.ui.messages)[_EARLIER]
         assert "the outbox index is unreadable" in text and "Nothing was dropped" in text
-        # Start-up went on: the panel is built and owned, and the live session
-        # starts exactly when the gate says it should.
+        # A failed migration never stops the panel from loading.
         assert module._owned is True
         assert "WGLink start error" not in titles
-        assert started == ([] if coordination is False else ["live"])
         assert sorted(item["operationId"] for item in _outbox(fixture.ipc)) == ["snap-1", "solve-1"]
     finally:
         module.stop(None)
@@ -1165,53 +1159,17 @@ def test_nothing_waiting_means_no_check_no_timer_and_no_notice(monkeypatch, tmp_
         fixture.module.stop(None)
 
 
-def test_a_listing_made_while_an_item_is_being_replaced_still_sees_the_item(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """The interleaving behind the windows-latest failure of the raises/on test.
-
-    With no WG to talk to, the live worker writes a queued solve as its v3 file
-    and replaces the item to record it, while another thread lists the outbox. On Windows the open is refused for the
-    moment the replace is in flight; the listing used to file the item as
-    "foreign" and leave it out. Here the replace is held open by an event and
-    reads from the listing thread are refused exactly while it is.
-    """
-
-    _queued(tmp_path, wglink_live.KIND_SOLVE, "solve-1")
-    outbox = wglink_live.Outbox(tmp_path)
-    [item] = outbox.scan()[0]
-    in_flight = threading.Event()
-    let_go = threading.Event()
-    real_replace = os.replace
-    real_read_text = pathlib.Path.read_text
-    listing_thread = threading.current_thread()
-    refused: list[str] = []
-
-    def held_replace(source, destination, *args, **kwargs):
-        in_flight.set()
-        assert let_go.wait(10)
-        try:
-            return real_replace(source, destination, *args, **kwargs)
-        finally:
-            in_flight.clear()
-
-    def read_text(self, *args, **kwargs):
-        if in_flight.is_set() and threading.current_thread() is listing_thread:
-            refused.append(self.name)
-            raise PermissionError(errno.EACCES, "sharing violation", str(self))
-        return real_read_text(self, *args, **kwargs)
-
-    monkeypatch.setattr(wglink_live.os, "replace", held_replace)
-    monkeypatch.setattr(pathlib.Path, "read_text", read_text)
-    writer = threading.Thread(target=outbox.write, args=({**item, "fileWritten": True},))
-    writer.start()
-    try:
-        assert in_flight.wait(10)
-        threading.Timer(0.1, let_go.set).start()
-        items, foreign = outbox.scan()
-    finally:
-        let_go.set()
-        writer.join(10)
-    assert refused, "the listing never met the in-flight replace"
-    assert [entry["operationId"] for entry in items] == ["solve-1"]
-    assert foreign == []
+def test_migration_retries_a_momentarily_held_item(monkeypatch, tmp_path: Path) -> None:
+    _queued(tmp_path, SOLVE, "solve-1")
+    original = pathlib.Path.read_text
+    calls = []
+    def held_once(path, *args, **kwargs):
+        if path.name == "solve-1.json":
+            calls.append(path.name)
+            if len(calls) == 1:
+                raise _sharing_violation()
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(pathlib.Path, "read_text", held_once)
+    items, foreign = wglink_legacy_queue.LegacyQueue(tmp_path).scan()
+    assert calls == ["solve-1.json", "solve-1.json"]
+    assert [item["operationId"] for item in items] == ["solve-1"] and foreign == []

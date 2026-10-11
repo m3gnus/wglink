@@ -410,7 +410,7 @@ def wg_request_payload(
     """One schema-4 WG request (C2). ``kind`` is the only Send/Solve difference.
 
     ``returnId`` is present, as a string that may be empty, on a Solve, and
-    absent on a Send -- the live route's rule.
+    absent on a Send.
     """
 
     if kind not in WG_REQUEST_KINDS:
@@ -628,8 +628,7 @@ def utc_timestamp(moment: datetime | None = None) -> str:
 def return_reference(bundle_path: Path, workspace_root: Path) -> tuple[str, str]:
     """How a delivery names a published return: workspace-relative path, manifest hash.
 
-    One spelling for both carriers -- the v3 solve file and the live delivery
-    -- because WG's operation digest is made of exactly these two strings.
+    WG's operation digest is made of exactly these two strings.
     """
 
     bundle = Path(bundle_path).expanduser().resolve()
@@ -681,11 +680,7 @@ def write_solve_request_fields(
     manifest_sha256: str,
     requested_at: str,
 ) -> Path:
-    """Write the v3 solve file from a return reference already taken.
-
-    The live outbox writes an item's file with this, so the file and the live
-    delivery name the same operation with the same strings.
-    """
+    """Write the v3 solve file from a return reference already taken."""
 
     require_solve_delivery(ipc_folder)
     if not _PLAIN_ID.fullmatch(str(command_id)):
@@ -809,14 +804,7 @@ def read_return_request(
 def return_request_from_document(
     payload: Any, *, session_id: str, marker_path: Path
 ) -> PendingReturnRequest | None:
-    """One return request from its v3 document, whichever transport carried it.
-
-    The file transport reads the document from ``marker_path``; the live
-    transport receives the same document in WG's claim answer and passes the
-    claim journal's path, which is not a request file and is never deleted as
-    one. Both go through this one parser, so a request cannot mean two things
-    depending on how it arrived.
-    """
+    """Parse one return request read from its version 3 file."""
 
     identity = _request_identity(payload)
     if identity is None or payload.get("sessionId") != session_id:
@@ -846,12 +834,7 @@ def read_pending_handoff(
 def handoff_from_document(
     payload: Any, *, bundle_root: Path | None, marker_path: Path
 ) -> PendingHandoff | None:
-    """One handoff from its v3 document, whichever transport carried it.
-
-    The bundle path is validated against ``bundle_root`` here and not by the
-    caller, so a request that arrived over HTTP is trusted exactly as little as
-    one read from a file.
-    """
+    """Parse a version 3 handoff and validate its path against the bundle root."""
 
     identity = _request_identity(payload)
     if identity is None:
@@ -1199,8 +1182,7 @@ def fusion_status_payload(
 ) -> dict[str, Any]:
     """The heartbeat object: the active Fusion document as inert JSON.
 
-    The same object is written to ``.fusion-status.json`` and, while a live
-    session is healthy, posted to WG over HTTP (``wglink_live``).
+    The object is written to ``.fusion-status.json``.
 
     ``deliveryVersion`` tells WG which delivery version this add-in speaks; WG
     refuses an add-in that reports less than its own. ``applying_operation``

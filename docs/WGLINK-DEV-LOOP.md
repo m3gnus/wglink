@@ -36,7 +36,10 @@ first's panel and command definitions, and the symptoms (an empty panel, or
 buttons that vanish on stop) look nothing like the cause. Syncing in place keeps
 exactly one registration at exactly one path.
 
-## Reading the heartbeat
+## Reading file status
+
+WGLink exchanges requests and acknowledgements through files; there is no HTTP
+session to restart or inspect.
 
 With `automatic_coordination` explicitly set to `true`, the add-in republishes
 `.fusion-status.json` in WG's IPC folder on every four-second watch tick on

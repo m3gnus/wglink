@@ -1607,12 +1607,10 @@ def test_adopted_instance_waits_without_publishing_an_unserviceable_session(
     assert second._watch_thread is None
     assert second._candidate_thread is not None and second._candidate_thread.is_alive()
     assert published == []
-    # The owner registers both of its events -- the four-second watch tick and
-    # the live worker's hand-over; the standby registers only its private
-    # promotion event and never the live one.
+    # The owner registers its watch and follow-up events; the standby only
+    # registers its private promotion event.
     assert set(app.events) == {
         first.WATCH_EVENT_ID,
-        first.LIVE_EVENT_ID,
         first.FOLLOWUP_EVENT_ID,
         second._candidate_event_id,
     }
@@ -1626,7 +1624,6 @@ def test_adopted_instance_waits_without_publishing_an_unserviceable_session(
 
     first.stop(None)
     assert first.WATCH_EVENT_ID not in app.events
-    assert first.LIVE_EVENT_ID not in app.events
     assert first._watch_thread is None
 
 
@@ -3738,11 +3735,10 @@ def test_a_cancelled_command_asks_for_no_measurement(monkeypatch) -> None:
 def test_a_blocked_delivery_does_not_starve_heartbeat_scheduling(
     monkeypatch, tmp_path: Path
 ) -> None:
-    """A long poll belongs to the worker; the tick carrier keeps its cadence.
+    """A blocked file write does not delay the tick carrier.
 
     The scheduling thread renews the lease and raises the owner's event without
-    calling the Fusion API or the live client, so a delivery stuck in a long
-    poll cannot delay a tick -- and nothing it does measures geometry.
+    calling the Fusion API, so a blocked status write cannot delay a tick -- and nothing it does measures geometry.
     """
 
     module, _design, _body = _tick_module(monkeypatch, "WGLink_fair_scheduling")
@@ -3753,14 +3749,11 @@ def test_a_blocked_delivery_does_not_starve_heartbeat_scheduling(
     assert module._claim_ipc_lease() and module._activate_ipc_lease()
     entered, release = threading.Event(), threading.Event()
 
-    class _StuckDelivery(_IdleDispatch):
-        """A live client whose worker is inside a long poll."""
+    def blocked_write(*_args):
+        entered.set()
+        release.wait(5.0)
 
-        def offer_heartbeat(self, _payload: object) -> None:
-            entered.set()
-            release.wait(5.0)
-
-    module._live_client = _StuckDelivery()
+    monkeypatch.setattr(module.wglink_watch, "write_fusion_status_payload", blocked_write)
     stop = threading.Event()
     publisher = threading.Thread(target=module._publish_fusion_status, daemon=True)
     carrier = threading.Thread(
@@ -3782,7 +3775,6 @@ def test_a_blocked_delivery_does_not_starve_heartbeat_scheduling(
         release.set()
         carrier.join(timeout=5)
         publisher.join(timeout=5)
-        module._live_client = None
         module._release_ipc_lease()
 
 
@@ -4513,7 +4505,7 @@ def _refusing_handoff(monkeypatch, module, tmp_path: Path) -> Path:
         module.wglink_workspace, "ipc_folder", lambda **_kwargs: bundle_root
     )
     (bundle_root / "wg-capabilities.json").write_text(
-        json.dumps(_LIVE_CAPABILITIES), encoding="utf-8"
+        json.dumps({"schemaVersion": 1, "solveCommandDelivery": 3, "fusionRequestDelivery": 3, "automaticDomain": 1, "documentUp": 1}), encoding="utf-8"
     )
 
     def refuse(*_args: object, **_kwargs: object) -> None:
@@ -5713,381 +5705,7 @@ def test_leftover_claims_wait_for_an_active_document(monkeypatch, tmp_path: Path
     assert not left.marker_path.exists() and module._claims_swept is True
 
 
-# -- the live CAD Link session (wglink_live) -----------------------------------
-
-
-class _IdleDispatch:
-    """The live client's Fusion-bound request half, with nothing to dispatch.
-
-    A stand-in that left these out would make the main thread's dispatch code
-    look absent rather than idle, so every fake carries the whole surface.
-    """
-
-    epoch = 1
-
-    def offers(self) -> list:
-        return []
-
-    def take_dispatch(self):
-        return None
-
-    def take_adoption(self):
-        return None
-
-    def cancel_pending(self, _operation_id: str) -> bool:
-        return False
-
-    def claim(self, _offer: object) -> None:
-        raise AssertionError("nothing was offered")
-
-    def report_progress(self, *_args: object, **_kwargs: object) -> None:
-        raise AssertionError("nothing was dispatched")
-
-    def report_outcome(self, *_args: object, **_kwargs: object) -> None:
-        raise AssertionError("nothing was dispatched")
-
-
-class _LiveRecorder(_IdleDispatch):
-    """Stands in for ``wglink_live.LiveClient`` where only the hand-over matters."""
-
-    def __init__(self, lines: list[str] | None = None) -> None:
-        self.offered: list[dict] = []
-        self.lines = list(lines or [])
-
-    def offer_heartbeat(self, payload: dict) -> None:
-        self.offered.append(json.loads(json.dumps(payload)))
-
-    def take_log_lines(self) -> list[str]:
-        lines, self.lines = self.lines, []
-        return lines
-
-    def take_delivery_notices(self) -> list[dict]:
-        return []
-
-
-def test_the_heartbeat_file_and_the_live_offer_are_the_same_object(monkeypatch, tmp_path: Path) -> None:
-    module = _load_instance(monkeypatch, "WGLink_live_offer", _UI(_Panels(), _Definitions(reserve_ids=False)))
-    monkeypatch.setattr(module.wglink_workspace, "ipc_folder", lambda **_kwargs: tmp_path)
-    monkeypatch.setattr(module, "_owns_active_ipc_lease", lambda: True)
-    recorder = _LiveRecorder()
-    monkeypatch.setattr(module, "_live_client", recorder)
-
-    module._publish_fusion_status({
-        "document_name": "Speaker", "document_id": "fusion:doc", "links": [],
-        "diagnostics": {"watchIntervalSeconds": 4.0},
-    })
-
-    written = json.loads((tmp_path / module.wglink_watch.FUSION_STATUS_FILENAME).read_text())
-    assert recorder.offered == [written]
-    assert written["sessionId"] == module._watch_session_id
-
-    # Without a live client the file is written exactly as before.
-    monkeypatch.setattr(module, "_live_client", None)
-    (tmp_path / module.wglink_watch.FUSION_STATUS_FILENAME).unlink()
-    module._publish_fusion_status({"document_name": None, "document_id": None, "links": [], "diagnostics": {}})
-    assert (tmp_path / module.wglink_watch.FUSION_STATUS_FILENAME).exists()
-
-
-def test_the_live_client_log_is_printed_on_the_main_thread_tick(monkeypatch) -> None:
-    ui = _UI(_Panels(), _Definitions(reserve_ids=False))
-    module = _load_instance(monkeypatch, "WGLink_live_log", ui)
-    monkeypatch.setattr(module, "_live_client", _LiveRecorder(["WGLink is live with WG."]))
-    monkeypatch.setattr(module, "_fusion_snapshot", lambda: {
-        "document_name": None, "document_id": None, "links": [], "diagnostics": {},
-    })
-    monkeypatch.setattr(module, "_claims_swept", True)
-
-    module._on_watch_tick()
-
-    assert "WGLink is live with WG." in ui.text_palette.written
-
-
-def test_only_the_lease_owner_runs_a_live_client_and_stop_joins_it(monkeypatch) -> None:
-    ui = _UI(_Panels(), _Definitions(reserve_ids=False))
-    app = _Application(ui)
-    owner = _load_instance(monkeypatch, "WGLink_live_owner", ui, app)
-    standby = _load_instance(monkeypatch, "WGLink_live_standby", ui, app)
-
-    owner.run(None)
-    standby.run(None)
-    client = owner._live_client
-    assert client is not None and client.is_running()
-    assert standby._live_client is None
-
-    standby.stop(None)
-    assert owner._live_client is client and client.is_running()
-    owner.stop(None)
-    assert owner._live_client is None
-    assert not client.is_running()
-
-
-def test_the_main_thread_never_does_network_io_while_live(monkeypatch, tmp_path: Path) -> None:
-    """Start, tick, publish and stop on this (the "main") thread against a loopback WG stand-in."""
-
-    import socket
-    import threading
-
-    from test_wglink_live import LIVE, StubServer, _capabilities, _endpoint, _mac, _write_private
-
-    ipc = tmp_path / "ipc" / "wglink"
-    ipc.mkdir(parents=True)
-    os.chmod(ipc, 0o755)
-    secret, instance = "lifecycle-secret", "e" * 32
-    heartbeats: list[dict] = []
-    arrived = threading.Event()
-
-    def handle(_stub, method, path, headers, body):
-        if (method, path) == ("GET", LIVE + "/endpoint"):
-            return 200, {}, json.dumps({"schemaVersion": 1, "producer": "waveguide-generator",
-                                        "instanceId": instance, "liveProtocol": 1, "deliveryVersion": 3}).encode()
-        if (method, path) == ("POST", LIVE + "/sessions"):
-            sent = json.loads(body)
-            proof = _mac(secret, "wglink-server", sent["clientNonce"], instance, headers["x-wglink-installation"])
-            return 201, {}, json.dumps({"liveSessionId": "s", "sessionToken": "lifecycle-token",
-                                        "serverProof": proof, "instanceId": instance, "liveProtocol": 1}).encode()
-        if (method, path) == ("POST", LIVE + "/heartbeat"):
-            heartbeats.append(json.loads(body))
-            if (heartbeats[-1].get("document") or {}).get("name") == "Speaker":
-                arrived.set()
-        return 204, {}, b""
-
-    stub = StubServer(handle)
-    try:
-        _write_private(ipc / "wg-capabilities.json", _capabilities())
-        _write_private(ipc / "wg-endpoint.json", _endpoint(instance, secret, stub.port))
-        main = threading.current_thread()
-        connecting: list[threading.Thread] = []
-        original = socket.socket.connect
-
-        def recording_connect(self, address):
-            connecting.append(threading.current_thread())
-            return original(self, address)
-
-        monkeypatch.setattr(socket.socket, "connect", recording_connect)
-        ui = _UI(_Panels(), _Definitions(reserve_ids=False))
-        module = _load_instance(monkeypatch, "WGLink_live_main_thread", ui)
-        monkeypatch.setattr(module.wglink_workspace, "ipc_folder", lambda **_kwargs: ipc)
-
-        module.run(None)
-        client = module._live_client
-        deadline = time.monotonic() + 10
-        while not client.healthy() and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert client.healthy(), client.take_log_lines()
-        module._publish_fusion_status({"document_name": "Speaker", "document_id": None, "links": [],
-                                       "diagnostics": {"watchIntervalSeconds": 4.0}})
-        assert arrived.wait(10)
-        module.stop(None)
-    finally:
-        stub.close()
-
-    file_heartbeat = ipc / module.wglink_watch.FUSION_STATUS_FILENAME
-    assert not file_heartbeat.exists()  # removed at stop, as before
-    speaker = [h for h in heartbeats if (h.get("document") or {}).get("name") == "Speaker"]
-    assert len(speaker) == 1
-    assert speaker[0] == json.loads(json.dumps(speaker[0]))
-    assert all(h["sessionId"] == module._watch_session_id for h in heartbeats)
-    assert len(connecting) >= 4  # hello, register, heartbeat, end
-    assert main not in connecting
-    assert ("DELETE", LIVE + "/sessions/current") in [(m, p) for m, p, _h, _b in stub.requests]
-    assert not client.is_running()
-
-
-# -- the outbox, main-thread half (wglink_live producers and notices) ----------------------
-
-
-class _OutboxClient(_IdleDispatch):
-    """Stands in for the live client where only the main thread's half matters."""
-
-    def __init__(self, *, healthy: bool, notices: list[dict] | None = None) -> None:
-        self._healthy = healthy
-        self.enqueued = 0
-        self.notices = list(notices or [])
-        self.acknowledged: list[str] = []
-
-    def healthy(self) -> bool:
-        return self._healthy
-
-    def enqueue_delivery(self) -> None:
-        self.enqueued += 1
-
-    def take_delivery_notices(self) -> list[dict]:
-        notices, self.notices = self.notices, []
-        return notices
-
-    def acknowledge_delivery_notice(self, operation_id: str) -> None:
-        self.acknowledged.append(operation_id)
-
-    def offer_heartbeat(self, _payload: dict) -> None:
-        pass
-
-    def take_log_lines(self) -> list[str]:
-        return []
-
-
-_LIVE_CAPABILITIES = {
-    "schemaVersion": 1,
-    "solveCommandDelivery": 3,
-    "fusionRequestDelivery": 3,
-    "liveProtocol": 1,
-    "automaticDomain": 1,
-    "documentUp": 1,
-}
-
-
-def _outbox_setup(monkeypatch, tmp_path: Path, name: str, *, live: bool = True):
-    module, ui = _design_module(monkeypatch, name)
-    ipc, _bundles = _per_request_folders(monkeypatch, module, tmp_path)
-    if live:
-        (ipc / "wg-capabilities.json").write_text(json.dumps(_LIVE_CAPABILITIES))
-    bundle = tmp_path / "workspace" / "wgreturn" / "speaker.wgreturn"
-    bundle.mkdir(parents=True)
-    (bundle / "wgreturn.json").write_bytes(b'{"return": "speaker"}')
-    monkeypatch.setattr(module, "_owns_active_ipc_lease", lambda: True)
-    return module, ui, ipc, bundle
-
-
-def _outbox_items(ipc: Path) -> dict[str, dict]:
-    folder = ipc / ".wglink-outbox"
-    if not folder.is_dir():
-        return {}
-    return {p.stem: json.loads(p.read_text()) for p in folder.iterdir() if not p.name.startswith(".")}
-
-
-def _v3_solve_files(ipc: Path) -> list[Path]:
-    folder = ipc / ".wg-solve-requests"
-    return sorted(p for p in folder.iterdir() if not p.name.startswith(".")) if folder.is_dir() else []
-
-
-def test_final_delivery_answers_are_recorded_and_the_ones_that_need_the_user_shown_then_acknowledged(
-    monkeypatch, tmp_path: Path
-) -> None:
-    module, ui, ipc, _bundle = _outbox_setup(monkeypatch, tmp_path, "WGLink_outbox_notices")
-    notices = [
-        {"operationId": "op-ok", "kind": "prepare_and_solve", "createdAt": "2026-09-17T10:00:00.000Z",
-         "outcome": "delivered", "state": "received", "reason": None, "message": None, "durable": False},
-        {"operationId": "op-gone", "kind": "receive_snapshot", "createdAt": "2026-09-16T10:00:00.000Z",
-         "outcome": "rejected", "state": "rejected", "reason": "snapshot_unavailable",
-         "message": "WG could not read this snapshot in the WGLink folder for 24 hours. Send it again from Fusion.",
-         "durable": True},
-    ]
-    client = _OutboxClient(healthy=True, notices=notices)
-    monkeypatch.setattr(module, "_live_client", client)
-    monkeypatch.setattr(module, "_fusion_snapshot", _shared_snapshot)
-    monkeypatch.setattr(module, "_apply_pending_handoff", lambda _snapshot: module.IDLE)
-    monkeypatch.setattr(module, "_apply_pending_return_request", lambda _snapshot: module.IDLE)
-    monkeypatch.setattr(module._watcher, "survey", lambda _links: [])
-    monkeypatch.setattr(module, "_claims_swept", True)
-
-    module._on_watch_tick()
-
-    [(title, text)] = ui.messages
-    assert title == "WGLink delivery to WG"
-    assert "for 24 hours" in text and "snapshot_unavailable" in text and "op-gone" in text
-    assert "Send to WG" in text
-    assert client.acknowledged == ["op-gone"]
-    status = json.loads((ipc / ".fusion-status.json").read_text())
-    outcomes = status["diagnostics"]["recentOutcomes"]
-    assert {"channel": "solveCommand", "requestId": "op-ok", "outcome": "delivered"} in outcomes
-    assert {"channel": "snapshot", "requestId": "op-gone", "outcome": "rejected"} in outcomes
-
-
-# -- the live transport's main-thread half (protocol section 7) ----------------
-
-
-class _Dispatcher(_IdleDispatch):
-    """The live client's request half, scripted, with every report recorded.
-
-    Only the main thread's behaviour is under test here: which Fusion calls
-    happen, when, and what outcome is reported. ``tests/test_wglink_live_dispatch.py``
-    drives the same exchanges against WG's routes.
-    """
-
-    def __init__(self, *, healthy: bool = True, epoch: int = 1) -> None:
-        self._healthy = healthy
-        self.epoch = epoch
-        self.offered: list[object] = []
-        self.claimed: list[str] = []
-        self.dispatches: list[object] = []
-        self.adoptions: list[dict] = []
-        self.cancelled: set[str] = set()
-        self.progress: list[tuple[str, int, str]] = []
-        self.outcomes: list[dict] = []
-        self.lines: list[str] = []
-
-    # -- what WGLink.py calls ---------------------------------------------------
-
-    def healthy(self) -> bool:
-        return self._healthy
-
-    def offers(self) -> list:
-        return list(self.offered)
-
-    def claim(self, offer: object) -> None:
-        self.claimed.append(offer.operation_id)
-        self.offered = [item for item in self.offered if item is not offer]
-
-    def take_dispatch(self):
-        return self.dispatches.pop(0) if self.dispatches else None
-
-    def take_adoption(self):
-        return self.adoptions.pop(0) if self.adoptions else None
-
-    def cancel_pending(self, operation_id: str) -> bool:
-        return operation_id in self.cancelled
-
-    def report_progress(self, operation_id: str, generation: int, stage: str, **_kw) -> None:
-        self.progress.append((operation_id, generation, stage))
-
-    def report_outcome(self, operation_id: str, generation: int, outcome: str, **kwargs) -> None:
-        self.outcomes.append({
-            "operationId": operation_id, "attemptGeneration": generation,
-            "outcome": outcome, "evidence": kwargs.get("evidence"),
-            "message": kwargs.get("message"),
-        })
-
-    def offer_heartbeat(self, _payload: dict) -> None:
-        pass
-
-    def take_log_lines(self) -> list[str]:
-        lines, self.lines = self.lines, []
-        return lines
-
-    def take_delivery_notices(self) -> list[dict]:
-        return []
-
-
-def _live_request(module, bundle: Path, **overrides: object) -> dict:
-    body = {
-        "schemaVersion": 3,
-        "target": "fusion360",
-        "requestId": "op-live-1",
-        "operationId": "op-live-1",
-        "deliverySequence": 1,
-        "bundlePath": str(bundle),
-        "bundleId": "wgb_5",
-        "exportId": "wge_5",
-        "sequence": 5,
-        "designId": "wgd-shared",
-        "expectedDocumentId": "fusion:doc-a",
-        "expectedInstanceId": "instance-b",
-        "expectedReturnStateHash": "sha256:state-b",
-    }
-    body.update(overrides)
-    return body
-
-
-def _live_dispatch(module, request: dict, *, kind: str | None = None, generation: int = 1, epoch: int = 1):
-    return module.wglink_live.Dispatch(
-        str(request["operationId"]),
-        kind or module.wglink_live.KIND_UPDATE_LINK,
-        generation,
-        dict(request),
-        epoch,
-    )
-
-
-def _live_module(monkeypatch, tmp_path: Path, name: str):
+def _file_module(monkeypatch, tmp_path: Path, name: str):
     module, ui = _design_module(monkeypatch, name)
     ipc, bundles = _per_request_folders(monkeypatch, module, tmp_path)
     bundle = bundles / "horn.wglink"
@@ -6098,241 +5716,12 @@ def _live_module(monkeypatch, tmp_path: Path, name: str):
     return module, ui, ipc, bundle
 
 
-def test_a_live_update_runs_on_the_main_thread_and_reports_what_happened(
-    monkeypatch, tmp_path: Path
-) -> None:
-    module, ui, ipc, bundle = _live_module(monkeypatch, tmp_path, "WGLink_live_update")
-    client = _Dispatcher()
-    monkeypatch.setattr(module, "_live_client", client)
-    updated: list[object] = []
-    monkeypatch.setattr(module.wglink_core, "update", _recording(updated))
-    client.dispatches.append(_live_dispatch(module, _live_request(module, bundle)))
-
-    module._on_live_dispatch(_shared_snapshot())
-
-    assert [call[0] for call in updated] == [str(bundle)]
-    # ``executing`` is reported immediately before the first Fusion write, so a
-    # refusal before it never makes WG believe the model was being changed.
-    assert client.progress == [("op-live-1", 1, module.wglink_live.STAGE_EXECUTING)]
-    assert client.outcomes == [{
-        "operationId": "op-live-1", "attemptGeneration": 1, "outcome": "applied",
-        "evidence": {"operationId": "op-live-1", "exportId": "wge_5"}, "message": None,
-    }]
-    assert ui.messages == []
-
-
-def test_a_live_request_waits_behind_a_running_wglink_command(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """Nothing is claimed and the document is not read while WGLink's own command runs.
-
-    Two things this test does **not** prove, recorded here so the name cannot
-    be read as more than it is:
-
-    * ``_command_busy`` is WGLink's *own* command, never the user's. Nothing in
-      the add-in observes the user's active Fusion command -- there is no
-      ``commandStarting``/``commandTerminated`` hook anywhere in
-      ``fusion-addins/WGLink``. Waiting behind a user command is owed to the
-      real-Fusion responsiveness pass, not shown here.
-    * The ``_publish_fusion_status`` call below is **hand-made**. Production
-      never reaches it in this state: ``_on_watch_tick`` returns on
-      ``_command_busy`` before the ``finally`` that publishes, and
-      ``LiveEventHandler`` does not publish at all. So the assertion that
-      follows it shows that the reason is *recorded correctly*, not that WG
-      ever sees it while the wait lasts. A test that closed that gap would
-      assert the production path instead of hand-calling the publish.
-    """
-
-    module, _ui, ipc, bundle = _live_module(monkeypatch, tmp_path, "WGLink_live_busy")
-    client = _Dispatcher()
-    monkeypatch.setattr(module, "_live_client", client)
-    updated: list[object] = []
-    monkeypatch.setattr(module.wglink_core, "update", _recording(updated))
-    request = _live_request(module, bundle)
-    client.offered.append(module.wglink_live.Offer("op-live-1", "update_link", 0, request, 1))
-    client.dispatches.append(_live_dispatch(module, request))
-    reads: list[int] = []
-    monkeypatch.setattr(module, "_fusion_snapshot", lambda: (reads.append(1), _shared_snapshot())[1])
-    monkeypatch.setattr(module, "_command_busy", True)
-
-    assert module._on_live_dispatch() is False
-
-    assert updated == [] and client.claimed == [] and client.outcomes == []
-    # Nor is the document read: a command is running, and this thread is the
-    # one running it.
-    assert reads == []
-    # Production does not publish in this state; see the docstring. This
-    # hand-call checks the recorded reason, not its delivery.
-    assert not (ipc / ".fusion-status.json").exists(), (
-        "the status file appeared without a publish; the docstring's note is stale"
-    )
-    module._publish_fusion_status(_shared_snapshot())
-    status = json.loads((ipc / ".fusion-status.json").read_text())
-    assert status["diagnostics"]["liveDispatch"]["reason"] == "commandBusy"
-
-    # The command finishes; the same request runs on the next pass, once.
-    monkeypatch.setattr(module, "_command_busy", False)
-    module._on_live_dispatch(_shared_snapshot())
-    assert len(updated) == 1
-
-
-def test_file_claims_stand_still_while_the_live_session_is_healthy(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """One request can never be claimed by both transports."""
-
-    module, _ui, ipc, _bundle = _live_module(monkeypatch, tmp_path, "WGLink_live_exclusive")
-    bundles = tmp_path / "workspace" / "wglink"
-    _per_request_handoff(ipc, bundles, export_id="wge_5")
-    updated: list[object] = []
-    monkeypatch.setattr(module.wglink_core, "update", _recording(updated))
-    monkeypatch.setattr(module, "_fusion_snapshot", lambda: _shared_snapshot())
-    monkeypatch.setattr(module, "_live_client", _Dispatcher(healthy=True))
-
-    module._on_watch_tick()
-
-    assert updated == []
-    assert (ipc / ".fusion-handoffs" / "req-1.json").exists(), "the file was claimed while live"
-
-    # The session drops: the file transport takes the same request, unchanged.
-    monkeypatch.setattr(module, "_live_client", _Dispatcher(healthy=False))
-    module._on_watch_tick()
-    assert len(updated) == 1
-    assert list((ipc / ".fusion-handoffs").iterdir()) == []
-
-
-def test_a_cancellation_before_the_first_write_leaves_the_model_unchanged(
-    monkeypatch, tmp_path: Path
-) -> None:
-    module, ui, _ipc, bundle = _live_module(monkeypatch, tmp_path, "WGLink_live_cancel_clean")
-    client = _Dispatcher()
-    client.cancelled.add("op-live-1")
-    monkeypatch.setattr(module, "_live_client", client)
-    updated: list[object] = []
-    monkeypatch.setattr(module.wglink_core, "update", _recording(updated))
-    client.dispatches.append(_live_dispatch(module, _live_request(module, bundle)))
-
-    module._on_live_dispatch(_shared_snapshot())
-
-    assert updated == []
-    assert client.progress == []
-    [outcome] = client.outcomes
-    assert outcome["outcome"] == "discarded"
-    assert "stopped before it changed" in outcome["message"]
-
-
-def test_a_cancellation_that_arrives_inside_a_fusion_call_is_not_a_clean_cancellation(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """A Fusion call is never interrupted: the outcome reported is the truth."""
-
-    module, _ui, _ipc, bundle = _live_module(monkeypatch, tmp_path, "WGLink_live_cancel_late")
-    client = _Dispatcher()
-    monkeypatch.setattr(module, "_live_client", client)
-    updated: list[object] = []
-    recorder = _recording(updated)
-
-    def update_then_cancel(app, path, options):
-        result = recorder(app, path, options)
-        # WG dismissed it while Update was writing.
-        client.cancelled.add("op-live-1")
-        return result
-
-    monkeypatch.setattr(module.wglink_core, "update", update_then_cancel)
-    client.dispatches.append(_live_dispatch(module, _live_request(module, bundle)))
-
-    module._on_live_dispatch(_shared_snapshot())
-
-    assert len(updated) == 1, "the model was changed"
-    [outcome] = client.outcomes
-    assert outcome["outcome"] == "applied", "a completed change was reported as cancelled"
-
-
-def test_a_cancellation_at_the_precondition_stops_before_the_first_write(
-    monkeypatch, tmp_path: Path
-) -> None:
-    module, _ui, _ipc, bundle = _live_module(monkeypatch, tmp_path, "WGLink_live_cancel_pre")
-    client = _Dispatcher()
-    monkeypatch.setattr(module, "_live_client", client)
-    written: list[object] = []
-
-    def update(_app, _path, options):
-        client.cancelled.add("op-live-1")
-        options["precondition"]()
-        written.append("wrote")
-
-    monkeypatch.setattr(module.wglink_core, "update", update)
-    client.dispatches.append(_live_dispatch(module, _live_request(module, bundle)))
-
-    module._on_live_dispatch(_shared_snapshot())
-
-    assert written == []
-    assert client.outcomes[0]["outcome"] == "discarded"
-
-
-def test_an_interrupted_live_update_settles_recovery_required_and_never_reapplies(
-    monkeypatch, tmp_path: Path
-) -> None:
-    module, ui, _ipc, bundle = _live_module(monkeypatch, tmp_path, "WGLink_live_recovery")
-    client = _Dispatcher()
-    monkeypatch.setattr(module, "_live_client", client)
-    client.adoptions.append({
-        "schemaVersion": 1, "operationId": "op-live-1", "claimId": "c1",
-        "kind": "update_link", "attemptGeneration": 1, "state": "claimed",
-        "request": _live_request(module, bundle), "claimedAt": "2026-09-20T10:00:00Z",
-    })
-    updated: list[object] = []
-    monkeypatch.setattr(module.wglink_core, "update", _recording(updated))
-    snapshot = {
-        **_shared_snapshot(),
-        "applying_operation": {
-            "operation_id": "op-live-1", "kind": "update", "instance_id": "instance-b",
-            "export_id": "wge_5",
-        },
-    }
-
-    module._on_live_dispatch(snapshot)
-
-    assert updated == [], "an interrupted update was reapplied"
-    [outcome] = client.outcomes
-    assert outcome["outcome"] == "recoveryRequired"
-    assert "recovery required" in ui.messages[0][1]
-
-
-def test_a_live_claim_for_another_document_is_retained_not_discarded(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """Gate A3: document A's update is not discarded when B is active."""
-
-    module, _ui, ipc, bundle = _live_module(monkeypatch, tmp_path, "WGLink_live_other_doc")
-    client = _Dispatcher()
-    monkeypatch.setattr(module, "_live_client", client)
-    client.adoptions.append({
-        "schemaVersion": 1, "operationId": "op-live-1", "claimId": "c1",
-        "kind": "update_link", "attemptGeneration": 1, "state": "claimed",
-        "request": _live_request(module, bundle), "claimedAt": "2026-09-20T10:00:00Z",
-    })
-    elsewhere = {**_shared_snapshot(), "document_id": "fusion:doc-b", "links": [],
-                 "applying_operation": None}
-
-    module._on_live_dispatch(elsewhere)
-
-    assert client.outcomes == [], "an operation of an unopened document was settled"
-    module._publish_fusion_status(elsewhere)
-    status = json.loads((ipc / ".fusion-status.json").read_text())
-    assert status["diagnostics"]["liveDispatch"]["targetDocumentUnavailable"] == ["op-live-1"]
-
-    # Its own document opens: it is settled then, still read-only.
-    module._on_live_dispatch({**_shared_snapshot(), "applying_operation": None})
-    assert [item["outcome"] for item in client.outcomes] == ["discarded"]
-
-
 def test_a_file_claim_for_another_document_is_retained_not_discarded(
     monkeypatch, tmp_path: Path
 ) -> None:
     """The same rule on the file transport, where the defect was."""
 
-    module, _ui, ipc, _bundle = _live_module(monkeypatch, tmp_path, "WGLink_file_other_doc")
+    module, _ui, ipc, _bundle = _file_module(monkeypatch, tmp_path, "WGLink_file_other_doc")
     bundles = tmp_path / "workspace" / "wglink"
     _per_request_handoff(ipc, bundles, export_id="wge_5")
     left = module.wglink_watch.claim_request(
@@ -6354,182 +5743,22 @@ def test_a_file_claim_for_another_document_is_retained_not_discarded(
     assert module._recent_outcomes[-1]["outcome"] == "discarded"
 
 
-def test_a_dispatch_from_an_owner_that_lost_the_connection_never_runs(
-    monkeypatch, tmp_path: Path
-) -> None:
-    module, _ui, _ipc, bundle = _live_module(monkeypatch, tmp_path, "WGLink_live_stale_epoch")
-    client = _Dispatcher(epoch=4)
-    monkeypatch.setattr(module, "_live_client", client)
-    updated: list[object] = []
-    monkeypatch.setattr(module.wglink_core, "update", _recording(updated))
-    client.dispatches.append(_live_dispatch(module, _live_request(module, bundle), epoch=3))
 
-    module._on_live_dispatch(_shared_snapshot())
-
-    assert updated == [] and client.outcomes == []
-
-
-def test_a_superseded_live_update_is_completed_without_running(
-    monkeypatch, tmp_path: Path
-) -> None:
-    module, _ui, _ipc, bundle = _live_module(monkeypatch, tmp_path, "WGLink_live_superseded")
-    client = _Dispatcher()
-    monkeypatch.setattr(module, "_live_client", client)
-    updated: list[object] = []
-    monkeypatch.setattr(module.wglink_core, "update", _recording(updated))
-    older = _live_request(module, bundle, requestId="op-old", operationId="op-old", deliverySequence=1)
-    newer = _live_request(module, bundle, requestId="op-new", operationId="op-new", deliverySequence=2)
-    client.offered = [
-        module.wglink_live.Offer("op-old", "update_link", 0, older, 1),
-        module.wglink_live.Offer("op-new", "update_link", 0, newer, 1),
-    ]
-
-    module._on_live_dispatch(_shared_snapshot())
-    assert client.claimed == ["op-old", "op-new"]
-
-    client.dispatches.append(_live_dispatch(module, older, generation=1))
-    module._on_live_dispatch(_shared_snapshot())
-    assert updated == []
-    assert client.outcomes[0]["outcome"] == "superseded"
-
-
-def test_the_live_event_handler_ignores_a_queued_event_after_lease_loss(
-    monkeypatch, tmp_path: Path
-) -> None:
-    module, _ui, _ipc, bundle = _live_module(monkeypatch, tmp_path, "WGLink_live_lease_lost")
-    client = _Dispatcher()
-    monkeypatch.setattr(module, "_live_client", client)
-    updated: list[object] = []
-    monkeypatch.setattr(module.wglink_core, "update", _recording(updated))
-    monkeypatch.setattr(module, "_fusion_snapshot", lambda: _shared_snapshot())
-    client.dispatches.append(_live_dispatch(module, _live_request(module, bundle)))
+def test_file_watch_event_ignores_a_queued_event_after_lease_loss(monkeypatch) -> None:
+    module, _ui = _design_module(monkeypatch, "WGLink_file_lease_lost")
     monkeypatch.setattr(module, "_owns_active_ipc_lease", lambda: False)
-
-    module.LiveEventHandler().notify(None)
-
-    assert updated == [] and client.outcomes == []
-
-
-def test_a_live_return_request_for_another_session_is_never_claimed(
-    monkeypatch, tmp_path: Path
-) -> None:
-    module, _ui, _ipc, _bundle = _live_module(monkeypatch, tmp_path, "WGLink_live_other_session")
-    client = _Dispatcher()
-    monkeypatch.setattr(module, "_live_client", client)
-    request = {
-        "schemaVersion": 3, "target": "fusion360", "requestId": "op-ret",
-        "operationId": "op-ret", "deliverySequence": 1, "sessionId": "another-session",
-        "designId": "wgd-shared", "documentId": "fusion:doc-a",
-        "instanceId": "instance-b", "expectedReturnStateHash": "sha256:state-b",
-    }
-    client.offered.append(
-        module.wglink_live.Offer("op-ret", "request_return", 0, request, 1)
-    )
-
-    module._on_live_dispatch(_shared_snapshot())
-
-    assert client.claimed == []
+    ran = []
+    monkeypatch.setattr(module, "_on_watch_tick", lambda: ran.append("tick"))
+    module.WatchEventHandler().notify(None)
+    assert ran == []
 
 
-def test_a_live_return_request_exports_once_and_reports_applied(
-    monkeypatch, tmp_path: Path
-) -> None:
-    module, _ui, _ipc, _bundle = _live_module(monkeypatch, tmp_path, "WGLink_live_return")
-    client = _Dispatcher()
-    monkeypatch.setattr(module, "_live_client", client)
-    sent: list[dict] = []
-    monkeypatch.setattr(module.wglink_send, "send", lambda _app, options, **_k: sent.append(dict(options)))
-    monkeypatch.setattr(module.wglink_workspace, "return_folder", lambda: tmp_path / "workspace")
-    request = {
-        "schemaVersion": 3, "target": "fusion360", "requestId": "op-ret",
-        "operationId": "op-ret", "deliverySequence": 1,
-        "sessionId": module._watch_session_id, "designId": "wgd-shared",
-        "documentId": "fusion:doc-a", "instanceId": "instance-b",
-        "expectedReturnStateHash": "sha256:state-b",
-    }
-    client.dispatches.append(
-        _live_dispatch(module, request, kind="request_return", generation=1)
-    )
-
-    module._on_live_dispatch(_shared_snapshot())
-
-    assert [item["request_id"] for item in sent] == ["op-ret"]
-    assert client.progress == [("op-ret", 1, module.wglink_live.STAGE_EXECUTING)]
-    # A return request never changes the model, so it carries no evidence.
-    assert client.outcomes == [{
-        "operationId": "op-ret", "attemptGeneration": 1, "outcome": "applied",
-        "evidence": None, "message": None,
-    }]
-
-
-def test_a_live_insert_past_its_ttl_is_refused_without_touching_the_model(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """The live path applies the file path's pre-mutation checks unchanged."""
-
-    module, ui, _ipc, bundle = _live_module(monkeypatch, tmp_path, "WGLink_live_ttl")
-    client = _Dispatcher()
-    monkeypatch.setattr(module, "_live_client", client)
-    inserted: list[object] = []
-    monkeypatch.setattr(module.wglink_core, "insert", _recording(inserted))
-    request = _live_request(
-        module, bundle,
-        expectedInstanceId="", expectedDocumentId="", expectedReturnStateHash="",
-        requestedAt="2000-01-01T00:00:00Z",
-        destination={"kind": "document", "value": "fusion:doc-a"},
-    )
-    client.dispatches.append(
-        _live_dispatch(module, request, kind=module.wglink_live.KIND_INSERT_LINK)
-    )
-
-    module._on_live_dispatch(_shared_snapshot())
-
-    assert inserted == []
-    assert client.outcomes[0]["outcome"] == "refused"
-    assert "expired" in ui.messages[0][1]
-
-
-def test_an_offer_this_session_declines_stops_waking_the_main_thread(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """WG keeps offering it, so a declined offer must not cost a document read."""
-
-    module, _ui, _ipc, _bundle = _live_module(monkeypatch, tmp_path, "WGLink_live_declined")
-    client = _Dispatcher()
-    monkeypatch.setattr(module, "_live_client", client)
-    reads: list[int] = []
-    monkeypatch.setattr(module, "_fusion_snapshot", lambda: (reads.append(1), _shared_snapshot())[1])
-    offer = module.wglink_live.Offer("op-ret", "request_return", 0, {
-        "schemaVersion": 3, "target": "fusion360", "requestId": "op-ret",
-        "operationId": "op-ret", "deliverySequence": 1, "sessionId": "another-session",
-    }, 1)
-    client.offered.append(offer)
-
-    assert module._on_live_dispatch() is False
-    assert len(reads) == 1
-
-    # WG offers it again on the next poll: nothing is read a second time.
-    client.offered.append(offer)
-    assert module._on_live_dispatch() is False
-    assert len(reads) == 1
-
-
-def test_a_live_handoff_waits_when_no_wg_workspace_is_selected(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """Not a reason to refuse the request for good; a reason to wait and say so."""
-
-    module, _ui, ipc, bundle = _live_module(monkeypatch, tmp_path, "WGLink_live_no_workspace")
-    client = _Dispatcher()
-    monkeypatch.setattr(module, "_live_client", client)
+def test_file_handoff_waits_when_no_workspace_is_selected(monkeypatch, tmp_path: Path) -> None:
+    module, _ui, ipc, bundle = _file_module(monkeypatch, tmp_path, "WGLink_file_no_workspace")
+    _per_request_handoff(ipc, bundle.parent)
     monkeypatch.setattr(module.wglink_workspace, "bundle_folder", lambda: None)
-    updated: list[object] = []
-    monkeypatch.setattr(module.wglink_core, "update", _recording(updated))
-    client.dispatches.append(_live_dispatch(module, _live_request(module, bundle)))
-
-    module._on_live_dispatch(_shared_snapshot())
-
-    assert updated == [] and client.outcomes == []
-    module._publish_fusion_status(_shared_snapshot())
-    status = json.loads((ipc / ".fusion-status.json").read_text())
-    assert status["diagnostics"]["liveDispatch"]["reason"] == "workspaceNotSelected"
+    writes = []
+    monkeypatch.setattr(module.wglink_core, "update", lambda *a: writes.append("update"))
+    assert module._apply_pending_handoff(_shared_snapshot()) == module.IDLE
+    assert (ipc / ".fusion-handoffs" / "req-1.json").exists()
+    assert writes == []

@@ -68,38 +68,22 @@ the same strict observation used by Send to WG; an unavailable or fallback
 identity is omitted, while older WG clients can continue ignoring the added
 members under heartbeat schema 1.
 
-When WG advertises the live protocol (`liveProtocol` in `wg-capabilities.json`
-and a `wg-endpoint.json` beside it), the active WGLink also registers a live
-session with WG over loopback HTTP and posts the same heartbeat object there.
-This is additive: `.fusion-status.json` is still written on every tick, and
-every request still travels as the v3 files, so WG started later, a WG without
-live support, or any refusal simply leaves WGLink on the files. The session
-runs on its own background thread, never through a proxy, and only in the
-WGLink registration that owns the panel. When its state changes, it writes a
-line to Fusion's Text Commands palette (for example "WGLink is live with WG."
-or "WGLink uses the files: …"); a state that persists is not repeated, but
-each new change, including a return to an earlier state, is written again. A
-refusal that only a new WG start can change (an add-in or protocol WG does not
-accept, or a registration proof that does not verify) waits for WG to restart;
-anything else is tried again within 30 seconds.
+**Send to WG** and **Solve in WG** publish the complete return bundle before
+writing one request to `ipc/wglink/.wg-solve-requests/<operationId>.json`.
+Send imports and displays the snapshot; Solve also asks WG to prepare and solve.
+A request keeps the same id across a delivery retry, so WG can recover it as
+one operation. Pressing Send or Solve again creates a new request.
 
-With such a WG, **Solve in WG** and **Send to WG** also put the return in
-WGLink's outbox (`ipc/wglink/.wglink-outbox/`, one private file per return,
-which WG never reads). Each item keeps one operation id for good; WG accepts an
-id once, so delivering it again — after a lost answer, a WG restart or a Fusion
-restart — never makes a second operation. While the live session is healthy the
-background thread delivers the item over HTTP. Without one (WG closed, starting,
-or refusing the session), Solve in WG writes the v3 solve file under the same id
-at once, and a queued solve gets its file when the live session is lost;
-WG takes whichever arrives first and recovers the other. A Send to WG item never
-becomes a file: it waits for WG's next live session (the return itself is in the
-WGLink folder either way). WG's answer is final for the item: an accepted
-delivery is removed silently; a return WG rejected (for example one it could not
-read for 24 hours) or an id WG says names a different request is shown once in a
-message box and then removed. WGLink never resends either by itself: send the
-return again from Fusion, which is a new request. The outbox holds at most 100
-items; an item not delivered within 7 days is removed with a message. A WG
-without the live protocol gets exactly the v3 files, as before.
+The add-in exchanges requests, acknowledgements, Insert/Update handoffs and
+status with WG through files. With acknowledgement support, WG's durable
+acceptance is shown after it takes the request; until then, the message says
+it was written to the inbox. If WG leaves it waiting for a minute, WGLink says
+so once. A refused acknowledgement includes WG's reason; fix it and send again.
+
+Earlier queued returns are migrated to request files once at startup. If an
+older WG cannot accept a queued Send, WGLink reports it as not delivered and
+asks you to update WG and send again. A failed migration keeps the request
+under its original id for the next startup.
 
 ## 3. The linked round trip
 
@@ -332,22 +316,6 @@ occurrence where it already is and never moves it back to the origin.)
 - **Nothing arrives in WG after Solve in WG** — WG must be running; the
   request survives until it next runs, and the WG window still has to be
   brought forward by hand.
-- **"WGLink delivery to WG" message** — WG gave a final answer that needs you:
-  the return was rejected (the message carries WG's reason) or its id already
-  named a different request. Nothing is retried; send the return again from
-  Fusion if you still want it.
-- **Text Commands says "WGLink uses the files: …"** — nothing is broken:
-  the live session is optional and the files carry everything. The line names
-  why. On macOS and Linux WGLink refuses a `wg-endpoint.json` that other users
-  could read or change, an `ipc/wglink` folder that group or other can write
-  to, and an `ipc/wglink` folder or endpoint file that is a symlink; a
-  `WG2_DATA_DIR` on a shared location therefore stays on the files.
-- **WG says a request is running and nothing happens in Fusion** — a WGLink
-  command is open, or no design is. WGLink starts nothing over its own command:
-  the request waits. Finish or cancel the WGLink command, and it runs on the
-  next pass. If no design is ready, or no WG workspace is selected, the reason
-  travels to WG in the heartbeat; while a WGLink command is open it does not,
-  so WG shows the request as simply still running.
 - **WG shows an update as still running after Fusion restarted** — WGLink
   settles what it can against the open document, read-only, and never runs an
   interrupted update again. If the update was for a document you do not have
@@ -355,15 +323,6 @@ occurrence where it already is and never moves it back to the origin.)
   document and it is settled. An update that had started changing the model
   reports **Update interrupted — recovery required**: undo the partial change
   or repair the link, then send it from WG again.
-- **You cancelled in WG and Fusion still changed the model** — a Fusion call
-  that has started cannot be interrupted. WGLink stops at the last point before
-  a write; past that it finishes the call and reports what actually happened
-  rather than claiming a clean cancellation.
-- **Text Commands alternates between "live" and "ended the live session"** —
-  two Fusion processes are running against the same WG data folder. They share
-  one WGLink installation id, so each registration replaces the other's. WGLink
-  bounds this: a second loss within 30 seconds of registering again keeps that
-  process on the files for 30 seconds. Close one of the Fusion processes.
 - **Duplicate WGLink installations** — remove the extra registration and
   restart Fusion. Current copies elect one active panel/watcher and promote a
   surviving standby if the owner stops, but a mixed-version duplicate remains

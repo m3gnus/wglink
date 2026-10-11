@@ -49,7 +49,7 @@ def _load_registration_package() -> dict[str, types.ModuleType]:
         "wglink_return",
         "wglink_send",
         "wglink_watch",
-        "wglink_live",
+        "wglink_legacy_queue",
     ):
         loaded[name] = importlib.import_module(f"{_registration_package_name}.{name}")
     return loaded
@@ -62,7 +62,7 @@ wglink_author = _registration_modules["wglink_author"]
 wglink_core = _registration_modules["wglink_core"]
 wglink_send = _registration_modules["wglink_send"]
 wglink_watch = _registration_modules["wglink_watch"]
-wglink_live = _registration_modules["wglink_live"]
+wglink_legacy_queue = _registration_modules["wglink_legacy_queue"]
 format_measurement_mm = _registration_modules["wglink_bundle"].format_measurement_mm
 
 
@@ -160,10 +160,6 @@ _GEOMETRY_REFRESH_ATTEMPTS_TRACKED = 64
 _geometry_refresh_attempts: dict[str, float] = {}
 OWNER_LEASE_SECONDS = WATCH_INTERVAL_SECONDS * 3
 WATCH_EVENT_ID = f"hornlab_wglink_export_available_{_watch_session_id}"
-# The second custom event: the live worker raises it when WG hands this add-in
-# a request, so the work reaches Fusion's main thread without the worker ever
-# touching the API. Nothing travels on the event itself.
-LIVE_EVENT_ID = f"hornlab_wglink_live_{_watch_session_id}"
 _candidate_event_id = f"hornlab_wglink_owner_candidate_{_watch_session_id}"
 
 # Executable add-in modules are registration-local. This deliberately tiny
@@ -216,42 +212,16 @@ _wg_outdated_noticed = False
 # ``diagnostics.recentOutcomes``, newest last.
 _recent_outcomes: list[dict[str, str]] = []
 _RECENT_OUTCOMES_LIMIT = 16
-# The live CAD Link session (``wglink_live``), run only by the IPC lease owner.
-# It is additive: the file heartbeat and every v3 request file keep working
-# whatever it does. Its worker thread owns every network exchange; this thread
-# only hands it the heartbeat and prints what it logged.
-_live_client = None
-_live_event = None
-_live_handler = None
-# Requests WG handed this add-in that have not run yet. A dispatch stays here
-# while a WGLink command is running or no design is open. WGLink starts nothing
-# of its own over its own command; the request waits instead. Note that
-# ``_command_busy`` tracks WGLink's commands only -- nothing here observes the
-# user's active Fusion command (there is no ``commandStarting`` hook anywhere in
-# this add-in), so waiting behind a *user* command is not implemented.
-_live_pending: list[object] = []
-# Claims an interrupted session left ``claimed`` in the live journal, and the
-# file claims it left in WG's request folders, that this session could not
-# settle yet because their target document is not the active one. Neither is
-# ever re-run, and neither is reported as never-started: they are settled when
-# their document is active, and kept meanwhile.
-_live_adopted: dict[str, dict] = {}
+# Interrupted file claims wait until their exact target document is active.
+# They are settled read-only and never replayed.
 _deferred_file_claims: list[object] = []
-# Why the live transport is holding work back, for the heartbeat diagnostics.
-_live_waiting: dict[str, object] | None = None
-_live_waiting_logged: str | None = None
-# What this registration loaded, captured once (protocol "loadedIdentity").
-_loaded_identity = wglink_live.loaded_identity(
-    ADDIN_DIR, addin_version=wglink_send.ADAPTER_VERSION
-)
 
 # -- the activation boundary (STEP2 section 4) ---------------------------------
 #
 # One gate, read once when this registration starts, and checked where each
 # engine starts -- never threaded through the tick. On, WGLink coordinates as
-# it always has: the four-second watch tick (A), owner-candidate promotion (B),
-# the live session's send and poll workers (C, D) and the live custom event
-# (E). Off, none of them starts or registers, so nothing between the user's
+# it always has: the four-second watch tick and owner-candidate promotion.
+# Off, neither starts or registers, so nothing between the user's
 # commands can inspect the document, publish status or apply a WG request.
 #
 # The gate is off by default. The owner may enable it with a JSON boolean in
@@ -304,7 +274,7 @@ def _release_command_busy() -> None:
     """Clear ``_command_busy`` and re-drive whatever waited behind it.
 
     The only way the flag is cleared. Work deferred behind a busy holder --
-    a pickup check, a command's follow-up, a live request -- is queued rather
+    a pickup check or a command's follow-up -- is queued rather
     than dropped, and nothing but this re-raises it: the tick does not drain
     follow-ups, and with coordination off there is no tick.
     """
@@ -1249,7 +1219,7 @@ def _submit_to_wg(report: dict[str, object], kind: str) -> str:
     """Hand the return this command just published to WG: one file, one id.
 
     Send and Solve both come here and differ only in ``kind`` (M1 transfer
-    contract C1/C2). There is one path in every configuration: no live outbox
+    contract C1/C2). There is one path in every configuration: no outbox
     item is created for new work, whatever the activation gate says. The
     outcome is synchronous -- the returned request id, or a ``WgLinkError``
     naming why WG was not asked -- and one follow-up, the pickup check, says
@@ -1441,7 +1411,7 @@ def _recheck_requests_at_startup() -> None:
 
     One check, one notice at most. Every file already older than the pickup
     window is checked now; if any is younger (written within the last minute,
-    or converted from the outbox just now) the one check waits until the
+    or migrated from an earlier queue just now) the one check waits until the
     youngest has had its full window, so WG gets the same minute a pickup
     check always gives it. Nothing is waiting: no check, and no timer.
     """
@@ -1486,23 +1456,40 @@ OUTBOX_KEPT_TEXT = (
 
 
 def _convert_outbox_at_startup() -> None:
-    """Move unanswered live-outbox items onto the one path (C1, E1). Start-up only.
-
-    Runs before any live thread starts, in both gate states, and reads no CAD
-    state. What WG advertises now decides: schema 4 takes every item; at 3 a
-    solve converts and a snapshot is left for the live worker when one will run,
-    otherwise dropped with one notice; with nothing advertised nothing moves,
-    and the next start-up tries again.
-    """
+    """Migrate earlier queued requests into the file inbox once at startup."""
 
     ipc = wglink_workspace.ipc_folder()
     if ipc is None:
         return
     try:
-        result = wglink_live.convert_outbox(
+        # Final answers from an earlier session are never sent again. Show an
+        # outstanding refusal before removing its item, so a restart cannot
+        # silently lose the notice the old session had not displayed yet.
+        queue = wglink_legacy_queue.LegacyQueue(ipc)
+        items, _foreign = queue.scan()
+        for item in items:
+            answer = item.get("answer")
+            if not isinstance(answer, dict):
+                continue
+            operation_id = item["operationId"]
+            outcome = str(answer.get("outcome") or "rejected")
+            if outcome != "delivered":
+                if _ui() is None:
+                    continue
+                command = "Solve in WG" if item["kind"] == wglink_watch.KIND_PREPARE_AND_SOLVE else "Send to WG"
+                reason = str(answer.get("message") or answer.get("reason") or outcome)
+                _modal(
+                    f"Waveguide Generator did not accept the earlier {command} "
+                    f"(request {operation_id}): {reason}\n\n"
+                    "WGLink does not send it again by itself. Send it again from "
+                    "Fusion if you still want it; that is a new request.",
+                    f"{PANEL_NAME} earlier delivery to WG",
+                )
+            _note_outcome("outbox", operation_id, outcome)
+            queue.delete(operation_id)
+        result = wglink_legacy_queue.convert_outbox(
             ipc,
             solve_files=wglink_watch,
-            live_will_run=_coordinating() and wglink_live.advertises_live(ipc),
         )
     except Exception as exc:  # noqa: BLE001 - the commands must still load
         _log(f"[{PANEL_NAME}] could not convert queued deliveries: {exc}")
@@ -1535,50 +1522,6 @@ def _convert_outbox_at_startup() -> None:
             "Fusion. Their returns are still in the WGLink folder.",
             f"{PANEL_NAME} earlier sends not delivered",
         )
-
-
-def _delivery_notice_text(notice: dict[str, object]) -> str:
-    """What the user is told about a final delivery answer that needs them."""
-
-    what = "Solve in WG" if notice.get("kind") == wglink_live.KIND_SOLVE else "Send to WG"
-    sent = str(notice.get("createdAt") or "earlier")
-    operation = str(notice.get("operationId") or "?")
-    outcome = notice.get("outcome")
-    if outcome == "rejected":
-        reason = str(notice.get("reason") or "")
-        detail = str(notice.get("message") or "") or "WG gave no message"
-        return (
-            f"Waveguide Generator did not accept the return from {what} (sent {sent}, "
-            f"operation {operation}): {detail}"
-            f"{f' [{reason}]' if reason else ''}\n\n"
-            "WGLink does not send it again by itself. Send it again from Fusion if you "
-            "still want it; that is a new request."
-        )
-    if outcome == "conflict":
-        return (
-            f"Waveguide Generator refused the return from {what} (sent {sent}): its "
-            f"operation id {operation} already names a different request, so nothing "
-            "changed in WG. Send it again from Fusion."
-        )
-    return (
-        f"The return from {what} (sent {sent}, operation {operation}) could not be "
-        "delivered to Waveguide Generator within 7 days and was removed from WGLink's "
-        "queue. Send it again from Fusion if you still want it."
-    )
-
-
-def _notice_deliveries() -> None:
-    """Record final delivery answers and show the ones that need the user."""
-
-    client = _live_client
-    if client is None:
-        return
-    for notice in client.take_delivery_notices():
-        channel = "solveCommand" if notice.get("kind") == wglink_live.KIND_SOLVE else "snapshot"
-        _note_outcome(channel, str(notice.get("operationId")), str(notice.get("outcome")))
-        if notice.get("durable"):
-            _modal(_delivery_notice_text(notice), f"{PANEL_NAME} delivery to WG")
-            client.acknowledge_delivery_notice(str(notice.get("operationId")))
 
 
 def _show_export_progress(operation: str) -> object | None:
@@ -2856,12 +2799,6 @@ def _publish_fusion_status(snapshot: dict[str, object] | None = None) -> None:
         diagnostics["lastRequest"] = dict(_request_trace)
     if _recent_outcomes:
         diagnostics["recentOutcomes"] = [dict(item) for item in _recent_outcomes]
-    if _live_waiting:
-        # Why live work is waiting, and which interrupted claims this add-in is
-        # holding because their Fusion document is not open. It is diagnostics,
-        # not an operation state: WG's own states are untouched, and a claim
-        # named here is neither cancelled nor reported as never started.
-        diagnostics["liveDispatch"] = dict(_live_waiting)
     try:
         payload = wglink_watch.fusion_status_payload(
             session_id=_watch_session_id,
@@ -2876,18 +2813,9 @@ def _publish_fusion_status(snapshot: dict[str, object] | None = None) -> None:
     except Exception:  # noqa: BLE001 - presence must never block CAD commands
         return
     try:
-        # The file heartbeat is always written: WG reads it whenever no live
-        # session is current, including right after WG itself restarts.
         wglink_watch.write_fusion_status_payload(folder, payload)
     except Exception:  # noqa: BLE001 - presence must never block CAD commands
         pass
-    client = _live_client
-    if client is not None:
-        try:
-            # Never blocks: the worker thread posts it.
-            client.offer_heartbeat(payload)
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def _apply_announced_updates(announcements: list) -> None:
@@ -2969,29 +2897,14 @@ def _apply_pending_return_request(
 def _execute_return_request(
     request: wglink_watch.PendingReturnRequest,
     snapshot: dict[str, object] | None = None,
-    *,
-    cancelled: object = None,
-    started: object = None,
 ) -> str:
-    """Run one claimed return request and return its local outcome.
-
-    Shared by both transports: the file path claims the request by renaming it
-    and deletes that claim afterwards, the live path holds a durable claim
-    journal entry instead. Neither changes what the request means or what is
-    checked before it runs.
-
-    ``cancelled()``, when given, reports whether WG has dismissed the request.
-    It is consulted at the boundaries in the cancellation table
-    (``README.md``): the export itself has no interruption mechanism, so a
-    dismissal that arrives during it is retained and stopped at the next one.
-    """
+    """Run one claimed file request; its caller removes the claim afterwards."""
 
     global _command_busy
     trace = _begin_request("returnRequest", request.request_id, DELIVERY)
     outcome = "failed"
     _command_busy = True
     try:
-        _stop_if_cancelled(cancelled)
         if (
             not request.design_id
             or not request.document_id
@@ -3019,7 +2932,6 @@ def _execute_return_request(
             raise wglink_core.WgLinkError(
                 "The active Fusion document no longer contains the exact WG link requested by WG."
             )
-        _stop_if_cancelled(cancelled)
         # Measured here, not read off ``matching[0]``: the snapshot's token
         # comes from the heartbeat cache and can equal the stale token WG is
         # holding while the model has already moved.
@@ -3042,18 +2954,10 @@ def _execute_return_request(
             "source_identity": _source_identity_enabled(),
             **_required_manifest_features(),
         }
-        # The last safe point: the export has no interruption mechanism, so a
-        # dismissal that arrives from here on is deferred to the next boundary.
-        _stop_if_cancelled(cancelled)
-        if started is not None:
-            started()
         # This path holds ``_command_busy`` (above), so the adoption question
         # cannot have the watcher's prompt stacked over it.
         wglink_send.send(_app(), options, confirm_adoption=_confirm_source_adoption)
         outcome = "applied"
-    except _CancelledRequest:
-        outcome = "cancelled"
-        _log("WGLink stopped a return request WG cancelled; nothing was exported.")
     except wglink_core.WgLinkError as exc:
         outcome = "refused"
         _message(
@@ -3170,23 +3074,6 @@ _RECOVERY_REQUIRED_TEXT = (
 
 class _ExpiredInsertError(wglink_core.WgLinkError):
     """An insert crossed its TTL after it was claimed but before mutation."""
-
-
-class _CancelledRequest(Exception):
-    """WG dismissed this request, and WGLink stopped before it changed anything.
-
-    Raised only at a documented safe point. A Fusion call that has started is
-    never interrupted: the dismissal is retained and the outcome reported is
-    what actually happened, so a partial change is never reported as a clean
-    cancellation (``README.md``, "Cancelling a live request").
-    """
-
-
-def _stop_if_cancelled(cancelled: object) -> None:
-    """Stop here when WG has dismissed the request; a no-op for the file path."""
-
-    if cancelled is not None and cancelled():
-        raise _CancelledRequest()
 
 
 def _design_ready() -> bool:
@@ -3327,21 +3214,8 @@ def _execute_handoff(
     snapshot: dict[str, object] | None = None,
     *,
     new_document_id: str | None = None,
-    cancelled: object = None,
-    started: object = None,
 ) -> str:
-    """Run one claimed handoff and return its local outcome.
-
-    Shared by the file and live transports: what is checked, in what order, and
-    what the user is told do not depend on how the request arrived. The caller
-    settles the request -- the file path deletes its claim, the live path
-    records the outcome in its claim journal and reports it to WG.
-
-    ``cancelled()`` reports whether WG has dismissed the request. It is
-    consulted before the first Fusion write, inside the precondition that runs
-    after the last read, and nowhere inside a Fusion call: those are deferred
-    to the next safe boundary (``README.md``, the cancellation table).
-    """
+    """Run one claimed file request; its caller removes the claim afterwards."""
 
     global _command_busy
     document_id = (
@@ -3357,7 +3231,6 @@ def _execute_handoff(
     operation = "update" if handoff.expected_instance_id else "insert"
     _command_busy = True
     try:
-        _stop_if_cancelled(cancelled)
         # Reconciliation below decides from these whether this operation
         # already applied; with no reading of them there is no deciding.
         links = _evidence_or_refuse(snapshot)
@@ -3400,8 +3273,6 @@ def _execute_handoff(
                 outcome = "alreadyCurrent"
             else:
                 expected = str(handoff.expected_return_state_hash)
-                if started is not None:
-                    started()
                 wglink_core.update(
                     _app(),
                     handoff.bundle_path,
@@ -3414,14 +3285,10 @@ def _execute_handoff(
                         # token comes from the heartbeat cache and can equal the
                         # stale token WG holds while the model has moved. The
                         # precondition runs after Update's last read and before
-                        # its first write, so it is also this operation's last
-                        # cancellation point.
-                        "precondition": lambda: (
-                            _stop_if_cancelled(cancelled),
-                            _require_live_state(
-                                expected,
-                                "The Fusion model changed after WG prepared this update. Refresh CAD Link and choose a sync direction again.",
-                            ),
+                        # its first write.
+                        "precondition": lambda: _require_live_state(
+                            expected,
+                            "The Fusion model changed after WG prepared this update. Refresh CAD Link and choose a sync direction again.",
                         ),
                     },
                 )
@@ -3435,8 +3302,6 @@ def _execute_handoff(
         elif _linked_to(handoff, links):
             raise wglink_core.WgLinkError(_ALREADY_LINKED_TEXT)
         else:
-            if started is not None:
-                started()
             wglink_core.insert(
                 _app(),
                 handoff.bundle_path,
@@ -3444,12 +3309,8 @@ def _execute_handoff(
                     "allow_root_fallback": True,
                     "operation_id": handoff.operation_id,
                     # The document and "no link of this design yet", read live
-                    # again immediately before the insert's first write -- and
-                    # the last point at which a dismissal stops it cleanly.
-                    "precondition": lambda: (
-                        _stop_if_cancelled(cancelled),
-                        _require_insert_target(handoff, new_document_id),
-                    ),
+                    # again immediately before the insert's first write.
+                    "precondition": lambda: _require_insert_target(handoff, new_document_id),
                 },
             )
             outcome = "applied"
@@ -3460,11 +3321,6 @@ def _execute_handoff(
         # root-fallback warning look like an error. Keep detailed reports for
         # the manual Insert command; automatic success stays silent. Genuine
         # refusals and unexpected failures below still demand attention.
-    except _CancelledRequest:
-        # Stopped at a safe point: nothing was written, so this is a clean
-        # cancellation and never a recovery.
-        outcome = "cancelled"
-        _log(f"WGLink stopped an {operation} WG cancelled; the model was not changed.")
     except _ExpiredInsertError as exc:
         outcome = "expired"
         _message(
@@ -3571,438 +3427,6 @@ def _settle_file_claims(
         )
 
 
-# -- the live transport's main-thread half (protocol section 7) ----------------
-
-
-#: Local outcome names mapped to the seven WG accepts (protocol section 7.4).
-#: ``message`` carries what the state name is too coarse to say.
-_WIRE_OUTCOME = {
-    "applied": "applied",
-    "reconciled": "reconciled",
-    "alreadyCurrent": "discarded",
-    "expired": "refused",
-    "refused": "refused",
-    "superseded": "superseded",
-    "discarded": "discarded",
-    "cancelled": "discarded",
-    "recoveryRequired": "recoveryRequired",
-    "failed": "failed",
-}
-_OUTCOME_MESSAGE = {
-    "alreadyCurrent": "This export is already on the link; WGLink changed nothing.",
-    "expired": "This insert request expired before WGLink applied it.",
-    "cancelled": "Cancelled in WG; WGLink stopped before it changed the Fusion model.",
-    "superseded": "A newer update for the same link replaced this one before it started.",
-}
-_LIVE_UNUSABLE_REQUEST = (
-    "WGLink could not read this request as a version 3 Fusion request, so it ran nothing."
-)
-_ADOPTED_RETURN_TEXT = (
-    "WGLink was interrupted while this return request was claimed. A return request "
-    "never changes the Fusion model, so nothing needs recovery."
-)
-_ADOPTED_RECONCILED_TEXT = (
-    "The Fusion document carries this operation's own evidence: it applied before "
-    "WGLink was interrupted."
-)
-_ADOPTED_NOT_STARTED_TEXT = (
-    "WGLink was interrupted while this request was claimed and the document shows no "
-    "sign of it, so it never started. Send it from WG again."
-)
-# Live updates a newer one for the same exact target replaced. They are claimed
-# so that the request is recorded terminal rather than left waiting, and then
-# completed without running -- WG's supersession rule, over the session.
-_live_superseded: set[str] = set()
-# Offers this session will not claim -- a return request naming another Fusion
-# session. WG keeps offering them, so without this the poll would raise the
-# custom event, and the main thread would read the document, on every answer.
-_live_declined: set[str] = set()
-_LIVE_IDS_TRACKED = 256
-
-
-def _bound_live_ids(ids: set[str]) -> None:
-    """Keep a per-session id set from growing without bound over a long day."""
-
-    while len(ids) > _LIVE_IDS_TRACKED:
-        ids.pop()
-
-
-def _live_transport_healthy() -> bool:
-    """Whether the live session is current, so the file claims stand still."""
-
-    client = _live_client
-    try:
-        return client is not None and bool(client.healthy())
-    except Exception:  # noqa: BLE001 - the files are always the safe answer
-        return False
-
-
-def _raise_live_event() -> None:
-    """Called from the live worker: the only call it makes towards Fusion."""
-
-    app = _app()
-    if app is not None:
-        app.fireCustomEvent(LIVE_EVENT_ID)
-
-
-def _live_claim_path(operation_id: str) -> Path:
-    """The claim journal entry that stands in for a live request's claim file.
-
-    It is a label, not a claim file: ``acknowledge_handoff`` and
-    ``release_claim`` only ever touch a name beginning with the file
-    transport's claim prefix, so neither can delete a journal entry.
-    """
-
-    ipc = wglink_workspace.ipc_folder()
-    base = Path(ipc) if ipc is not None else ADDIN_DIR
-    return base / wglink_live.CLAIM_DIRECTORY / f"{operation_id}.json"
-
-
-def _wire_outcome(kind: str, outcome: str) -> str:
-    wire = _WIRE_OUTCOME.get(outcome, "failed")
-    if kind == wglink_live.KIND_REQUEST_RETURN and wire == "recoveryRequired":
-        # A return request never changes the model, so WG refuses that outcome
-        # for it; an export that did not finish is ``failed``.
-        wire = "failed"
-    return wire
-
-
-def _settle_live(
-    client: object,
-    dispatch: object,
-    outcome: str,
-    *,
-    message: str | None = None,
-    export_id: str = "",
-) -> None:
-    """Record this operation's one terminal outcome and hand it to the worker."""
-
-    wire = _wire_outcome(dispatch.kind, outcome)
-    evidence = None
-    if wire in ("applied", "reconciled") and dispatch.kind != wglink_live.KIND_REQUEST_RETURN:
-        if not export_id:
-            # WG accepts a mutation only with its own operation and export ids.
-            # Without them, say what happened instead of claiming an acceptance
-            # WG would refuse.
-            wire = "failed"
-        else:
-            evidence = {"operationId": dispatch.operation_id, "exportId": export_id}
-    client.report_outcome(
-        dispatch.operation_id,
-        dispatch.attempt_generation,
-        wire,
-        message=message or _OUTCOME_MESSAGE.get(outcome),
-        evidence=evidence,
-        epoch=dispatch.epoch,
-    )
-
-
-def _on_live_dispatch(snapshot: dict[str, object] | None = None) -> bool:
-    """Service the live transport on Fusion's main thread. Returns whether it ran.
-
-    Every Fusion call for a live request happens here, inside the custom event
-    or the watch tick that calls this. The worker threads never touch ``adsk``.
-    """
-
-    global _live_waiting
-    client = _live_client
-    if client is None:
-        return False
-    while True:
-        entry = client.take_adoption()
-        if entry is None:
-            break
-        _live_adopted[str(entry.get("operationId"))] = dict(entry)
-    while True:
-        dispatch = client.take_dispatch()
-        if dispatch is None:
-            break
-        _live_pending.append(dispatch)
-    offers = [offer for offer in client.offers() if offer.operation_id not in _live_declined]
-    if not _live_pending and not _live_adopted and not offers:
-        _live_waiting = None
-        return False
-    if _command_busy:
-        # A WGLink command is running -- its own, not the user's: nothing in
-        # this add-in observes the user's active Fusion command. WG's work
-        # waits behind it rather than racing it. The reason is recorded here,
-        # but it does NOT reach WG while this state lasts: _on_watch_tick
-        # returns on _command_busy before the finally that publishes, and the
-        # live event handler does not publish. Closing that gap means
-        # publishing from the live event handler off the CACHED snapshot, never
-        # a fresh one -- a fresh read here would put geometry back on a
-        # periodic path. Deliberately not done in this change.
-        _live_waiting = {"reason": "commandBusy", "waiting": len(_live_pending) + len(offers)}
-        return False
-    current = snapshot if snapshot is not None else _fusion_snapshot()
-    ran = _settle_adopted_claims(client, current)
-    ran = _run_live_pending(client, current) or ran
-    _claim_live_offers(client)
-    _publish_live_waiting(client)
-    return ran
-
-
-def _publish_live_waiting(client: object) -> None:
-    global _live_waiting
-    # A reason a dispatch could not run this pass was set while it ran; keep it.
-    waiting: dict[str, object] = (
-        {"reason": _live_waiting["reason"]}
-        if isinstance(_live_waiting, dict) and "reason" in _live_waiting and _live_pending
-        else {}
-    )
-    held = sorted(
-        {str(claim.request_id) for claim in _deferred_file_claims if claim.request_id}
-        | set(_live_adopted)
-    )
-    if held:
-        waiting["targetDocumentUnavailable"] = held
-    if _live_pending:
-        waiting["pending"] = [item.operation_id for item in _live_pending]
-    try:
-        waiting["transport"] = "live" if client.healthy() else "file"
-    except Exception:  # noqa: BLE001
-        pass
-    _live_waiting = waiting or None
-
-
-def _settle_adopted_claims(client: object, snapshot: dict[str, object]) -> bool:
-    """Settle an interrupted session's live claims read-only; never re-run one.
-
-    Protocol section 9: "Fusion restarts mid-request | The claim journal is
-    settled read-only; the operation is never re-run." A claim whose target
-    document is not the active one is kept, exactly as a file claim is, so
-    *target document unavailable* is never reported as *never started*.
-    """
-
-    settled = False
-    for operation_id, entry in list(_live_adopted.items()):
-        kind = str(entry.get("kind") or "")
-        request = entry.get("request") or {}
-        generation = int(entry.get("attemptGeneration") or 0)
-        export_id = str(request.get("exportId") or "")
-        if kind == wglink_live.KIND_REQUEST_RETURN:
-            outcome, message = "discarded", _ADOPTED_RETURN_TEXT
-        else:
-            expected_document = str(request.get("expectedDocumentId") or "")
-            if expected_document and expected_document != snapshot.get("document_id"):
-                continue
-            evidence = _link_evidence(snapshot)
-            if evidence is None:
-                # Not inspected is not "no sign of it": keep the claim.
-                continue
-            if _reconciled(operation_id, export_id, evidence):
-                outcome, message = "reconciled", _ADOPTED_RECONCILED_TEXT
-            elif _interrupted(operation_id, snapshot.get("applying_operation")):
-                outcome, message = "recoveryRequired", _RECOVERY_REQUIRED_TEXT
-                _modal(
-                    _refusal_text(_RECOVERY_REQUIRED_TEXT, _HANDOFF_RETRY_HINT),
-                    "WGLink update interrupted",
-                )
-            else:
-                outcome, message = "discarded", _ADOPTED_NOT_STARTED_TEXT
-        wire = _wire_outcome(kind, outcome)
-        evidence = (
-            {"operationId": operation_id, "exportId": export_id}
-            if wire == "reconciled" and export_id
-            else None
-        )
-        if wire == "reconciled" and evidence is None:
-            wire, message = "failed", _ADOPTED_NOT_STARTED_TEXT
-        client.report_outcome(operation_id, generation, wire, message=message, evidence=evidence)
-        _note_outcome(
-            "returnRequest" if kind == wglink_live.KIND_REQUEST_RETURN else "handoff",
-            operation_id,
-            outcome,
-        )
-        del _live_adopted[operation_id]
-        settled = True
-    return settled
-
-
-def _run_live_pending(client: object, snapshot: dict[str, object]) -> bool:
-    """Run the claimed requests this tick can run; keep the rest, with a reason."""
-
-    global _live_waiting
-    keep: list[object] = []
-    ran = False
-    for dispatch in list(_live_pending):
-        if dispatch.epoch != client.epoch:
-            # Another add-in instance owns the connection now: late work from
-            # this one must not reach the document.
-            continue
-        if _command_busy:
-            keep.append(dispatch)
-            _live_waiting = {"reason": "commandBusy", "waiting": len(keep)}
-            continue
-        if _run_live_dispatch(client, dispatch, snapshot):
-            ran = True
-        else:
-            keep.append(dispatch)
-    _live_pending[:] = keep
-    return ran
-
-
-def _run_live_dispatch(client: object, dispatch: object, snapshot: dict[str, object]) -> bool:
-    """One claimed request. Returns False to keep it waiting for a better moment."""
-
-    global _live_waiting
-
-    def cancelled() -> bool:
-        return bool(client.cancel_pending(dispatch.operation_id))
-
-    def started() -> None:
-        client.report_progress(
-            dispatch.operation_id,
-            dispatch.attempt_generation,
-            wglink_live.STAGE_EXECUTING,
-            epoch=dispatch.epoch,
-        )
-
-    if dispatch.operation_id in _live_superseded:
-        _live_superseded.discard(dispatch.operation_id)
-        _note_outcome("handoff", dispatch.operation_id, "superseded")
-        _settle_live(client, dispatch, "superseded")
-        return True
-    if dispatch.kind == wglink_live.KIND_REQUEST_RETURN:
-        request = wglink_watch.return_request_from_document(
-            dispatch.request,
-            session_id=_watch_session_id,
-            marker_path=_live_claim_path(dispatch.operation_id),
-        )
-        if request is None:
-            _settle_live(client, dispatch, "refused", message=_LIVE_UNUSABLE_REQUEST)
-            return True
-        if not _design_ready():
-            _live_waiting = {"reason": "designNotReady", "waiting": 1}
-            return False
-        _settle_live(client, dispatch, _execute_return_request(
-            request, snapshot, cancelled=cancelled, started=started
-        ))
-        return True
-    bundles = wglink_workspace.bundle_folder()
-    if bundles is None:
-        # No WG workspace to validate the bundle against. The request is not
-        # wrong, so it waits rather than being refused for good.
-        _live_waiting = {"reason": "workspaceNotSelected", "waiting": 1}
-        return False
-    handoff = wglink_watch.handoff_from_document(
-        dispatch.request,
-        bundle_root=bundles,
-        marker_path=_live_claim_path(dispatch.operation_id),
-    )
-    if handoff is None:
-        _settle_live(client, dispatch, "refused", message=_LIVE_UNUSABLE_REQUEST)
-        return True
-    issue = _insert_handoff_issue(handoff, _active_document_id())
-    if issue is not None:
-        outcome, reason = issue
-        _begin_request("handoff", handoff.operation_id, DELIVERY)["outcome"] = outcome
-        _message(reason, "WGLink automatic insert refused")
-        _settle_live(client, dispatch, outcome, message=reason)
-        return True
-    try:
-        ready = _ensure_design_ready()
-    except wglink_core.WgLinkError as exc:
-        _begin_request("handoff", handoff.operation_id, DELIVERY)["outcome"] = "refused"
-        _message(_refusal_text(str(exc), _HANDOFF_RETRY_HINT), "WGLink automatic open refused")
-        _settle_live(client, dispatch, "refused", message=str(exc))
-        return True
-    if not ready:
-        _live_waiting = {"reason": "designNotReady", "waiting": 1}
-        return False
-    new_document_id = None
-    destination = getattr(handoff, "destination", None)
-    if (
-        not getattr(handoff, "expected_instance_id", "")
-        and destination is not None
-        and destination.get("kind") == "new_document"
-    ):
-        new_document_id = _active_document_id()
-    outcome = _execute_handoff(
-        handoff,
-        snapshot,
-        new_document_id=new_document_id,
-        cancelled=cancelled,
-        started=started,
-    )
-    _settle_live(client, dispatch, outcome, export_id=handoff.export_id)
-    return True
-
-
-def _claim_live_offers(client: object) -> None:
-    """Take at most one runnable offer, plus every update a newer one replaced."""
-
-    offers = client.offers()
-    if not offers or _command_busy:
-        return
-    newest: dict[tuple[str, str], object] = {}
-    for offer in offers:
-        target = _live_update_target(offer)
-        if target is None:
-            continue
-        previous = newest.get(target)
-        if previous is None or _live_sequence(offer) >= _live_sequence(previous):
-            newest[target] = offer
-    runnable: list[object] = []
-    for offer in offers:
-        target = _live_update_target(offer)
-        if target is not None and newest.get(target) is not offer:
-            # WG's ordering rule: an update that has not started is superseded
-            # only by a newer one for the same exact target.
-            _live_superseded.add(offer.operation_id)
-            _bound_live_ids(_live_superseded)
-            client.claim(offer)
-            continue
-        if (
-            offer.kind == wglink_live.KIND_REQUEST_RETURN
-            and offer.request.get("sessionId") != _watch_session_id
-        ):
-            # Another Fusion session's request. WG filters these too; declining
-            # it here also stops WG's next offer from waking this thread again.
-            if offer.operation_id not in _live_declined:
-                _live_declined.add(offer.operation_id)
-                _bound_live_ids(_live_declined)
-                _log(
-                    "WGLink left a WG return request for another Fusion session unclaimed."
-                )
-            continue
-        runnable.append(offer)
-    if runnable and not [item for item in _live_pending if item.operation_id not in _live_superseded]:
-        # One at a time: Fusion runs main-thread work serially anyway, and a
-        # claim that waits is re-offered by the next poll unchanged.
-        client.claim(runnable[0])
-
-
-def _live_update_target(offer: object) -> tuple[str, str] | None:
-    if offer.kind != wglink_live.KIND_UPDATE_LINK:
-        return None
-    document_id = str(offer.request.get("expectedDocumentId") or "")
-    instance_id = str(offer.request.get("expectedInstanceId") or "")
-    return (document_id, instance_id) if document_id and instance_id else None
-
-
-def _live_sequence(offer: object) -> int:
-    value = offer.request.get("deliverySequence")
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-
-class LiveEventHandler(adsk.core.CustomEventHandler):
-    """The live worker asked for main-thread time; this is that thread."""
-
-    def notify(self, _args: object) -> None:
-        try:
-            # A queued event from an expired owner must not touch the document
-            # after a candidate has promoted and taken over the connection.
-            if not _owns_active_ipc_lease():
-                return
-            with wglink_activity.because(wglink_activity.CAUSE_LIVE):
-                _on_live_dispatch()
-        except Exception as exc:  # noqa: BLE001
-            _report_error("Servicing a live WG request", "WGLink live request error", exc)
-        finally:
-            _print_live_log()
-
-
 def _notice_outdated_wg() -> None:
     """Say once per session that WG is too old to exchange requests with."""
 
@@ -4055,30 +3479,12 @@ def _on_watch_tick() -> None:
     try:
         _settle_claims(snapshot)
         _notice_outdated_wg()
-        # Answers for deliveries queued before the one path existed (C1).
-        _notice_deliveries()
-        # The live transport is serviced on the same main thread. The custom
-        # event makes it prompt; this call makes it certain, so a missed event
-        # costs one tick rather than an operation. What it runs was asked for
-        # over the live channel, so it is counted there, not under the tick.
-        with wglink_activity.because(wglink_activity.CAUSE_LIVE):
-            if _on_live_dispatch(snapshot):
-                return
-        # Live and file are two workflows, not a negotiation. While the session
-        # is healthy WG hands requests over it and the request files stand
-        # still, so nothing can be claimed by both; when it is not, the file
-        # path runs exactly as it always has. The export survey belongs to
-        # neither and keeps running.
-        if not _live_transport_healthy():
-            # Only a channel that actually did something claims the tick. A
-            # suppressed refusal did nothing, so the channels behind it are
-            # still owed this tick -- otherwise one refused handoff silently
-            # swallows every return request and every newer export for the
-            # session.
-            if _apply_pending_handoff(snapshot) == HANDLED:
-                return
-            if _apply_pending_return_request(snapshot) == HANDLED:
-                return
+        # Only a channel that did work claims the tick. A suppressed refusal
+        # must not starve the other file channel or the export survey.
+        if _apply_pending_handoff(snapshot) == HANDLED:
+            return
+        if _apply_pending_return_request(snapshot) == HANDLED:
+            return
         surveyed = _link_evidence(snapshot)
         if surveyed is None:
             # Unread links are not an empty document: surveying [] would drop
@@ -4106,7 +3512,6 @@ def _on_watch_tick() -> None:
             _release_command_busy()
     finally:
         _publish_fusion_status(snapshot)
-        _print_live_log()
 
 
 class WatchEventHandler(adsk.core.CustomEventHandler):
@@ -4202,22 +3607,11 @@ def _command_finished() -> None:
     """A WGLink command or modal released the main thread: re-drive what waited.
 
     ``_command_busy`` defers work rather than dropping it. The watch tick used
-    to be the retry; this is the retry that does not need one. With
-    coordination on, live work that waited is re-raised at once instead of on
-    the next tick; with it off, the queued follow-ups run.
+    to be the retry; this is the retry that does not need one. Queued follow-ups are re-raised when the command releases the thread.
     """
 
     if _followups:
         _raise_followup_event()
-    if _coordinating() and _live_client is not None and (
-        _live_pending
-        or (isinstance(_live_waiting, dict) and _live_waiting.get("reason") == "commandBusy")
-    ):
-        try:
-            _raise_live_event()
-        except Exception:  # noqa: BLE001 - the tick remains the backstop
-            pass
-
 
 def _after_command() -> None:
     """What a finished command owes WG and itself when no tick runs.
@@ -4299,57 +3693,10 @@ def _stop_candidate(app: object) -> None:
     _candidate_event = _candidate_handler = _candidate_stop = _candidate_thread = None
 
 
-def _start_live() -> None:
-    """Start the live session worker; only the active lease owner calls this."""
-
-    global _live_client
-    if _live_client is not None:
-        return
-    client = wglink_live.LiveClient(
-        ipc_folder=lambda: wglink_workspace.ipc_folder(),
-        adapter_session_id=_watch_session_id,
-        adapter_version=wglink_send.ADAPTER_VERSION,
-        loaded_identity=_loaded_identity,
-        # Reads the lease broker only; no Fusion call.
-        lease_ok=lambda: _owns_active_ipc_lease(),
-        # Writes a queued solve's v3 file when live delivery is not possible.
-        solve_files=wglink_watch,
-        # Raised when WG hands this add-in a request, so the main thread picks
-        # it up without waiting for the next four-second tick.
-        notify=_raise_live_event,
-    )
-    client.start()
-    _live_client = client
-
-
-def _stop_live() -> None:
-    """End the live session (from its worker) and wait a bounded time for it."""
-
-    global _live_client
-    client, _live_client = _live_client, None
-    if client is None:
-        return
-    try:
-        client.stop(timeout=WATCH_INTERVAL_SECONDS + 1)
-    except Exception:  # noqa: BLE001 - shutdown is best effort
-        pass
-    for line in client.take_log_lines():
-        _log(line)
-
-
-def _print_live_log() -> None:
-    client = _live_client
-    if client is None:
-        return
-    for line in client.take_log_lines():
-        _log(line)
-
-
 def _start_watch(app: object) -> bool:
     global _watch_event, _watch_handler, _watch_stop, _watch_thread
     global _handoff_attempted_id, _return_request_attempted_id, _request_trace
     global _claims_swept, _wg_outdated_noticed
-    global _live_event, _live_handler, _live_waiting
     _watcher.reset()
     _handoff_attempted_id = None
     _return_request_attempted_id = None
@@ -4357,12 +3704,7 @@ def _start_watch(app: object) -> bool:
     _claims_swept = False
     _wg_outdated_noticed = False
     _recent_outcomes.clear()
-    _live_pending.clear()
-    _live_adopted.clear()
     _deferred_file_claims.clear()
-    _live_superseded.clear()
-    _live_declined.clear()
-    _live_waiting = None
     _followups.clear()
     # The transfer path's carrier, in both gate states (C8).
     if not _start_followups(app):
@@ -4374,10 +3716,6 @@ def _start_watch(app: object) -> bool:
         return False
     _watch_handler = WatchEventHandler()
     _watch_event.add(_watch_handler)
-    _live_event = app.registerCustomEvent(LIVE_EVENT_ID)
-    if _live_event is not None:
-        _live_handler = LiveEventHandler()
-        _live_event.add(_live_handler)
     _watch_stop = threading.Event()
     _watch_thread = threading.Thread(
         target=_watch_loop,
@@ -4393,8 +3731,7 @@ def _start_followups(app: object) -> bool:
     """The one event a command raises for itself, registered in both gate states.
 
     With coordination off it is the whole of what starts: no thread, no timer,
-    and neither the watch nor the live event, so engines A to E stay dormant
-    in the tree. It is raised only by a command's own completion
+    and no watch event. It is raised only by a command's own completion
     (:func:`_schedule_followup`) or by the one-shot pickup timer a Send or
     Solve starts (:func:`_schedule_pickup_check`), or that start-up starts
     for a request it found still waiting (:func:`_recheck_requests_at_startup`).
@@ -4434,29 +3771,8 @@ def _stop_watch(app: object) -> None:
     global _watch_event, _watch_handler, _watch_stop, _watch_thread
     global _handoff_attempted_id, _return_request_attempted_id, _request_trace
     global _claims_swept, _wg_outdated_noticed
-    global _live_event, _live_handler, _live_waiting
-    # The live client stops first: its workers must not raise an event into a
-    # handler that is about to be removed, and its bounded stop is what makes
-    # the add-in's shutdown bounded.
-    _stop_live()
     _stop_followups(app)
-    if _live_event is not None and _live_handler is not None:
-        try:
-            _live_event.remove(_live_handler)
-        except Exception:  # noqa: BLE001
-            pass
-    try:
-        if app:
-            app.unregisterCustomEvent(LIVE_EVENT_ID)
-    except Exception:  # noqa: BLE001
-        pass
-    _live_event = _live_handler = None
-    _live_pending.clear()
-    _live_adopted.clear()
     _deferred_file_claims.clear()
-    _live_superseded.clear()
-    _live_declined.clear()
-    _live_waiting = None
     if _watch_stop is not None:
         _watch_stop.set()
     if _watch_thread is not None and _watch_thread.is_alive():
@@ -4608,14 +3924,13 @@ def _build_owner(app: object, ui: object) -> None:
         if not _activate_ipc_lease():
             raise RuntimeError("WGLink's IPC owner lease was lost during startup")
         _owned = True
-        # Before any live thread starts, and whatever the gate says (C1).
+        # Migrate earlier queued requests once, in either gate state.
         _convert_outbox_at_startup()
         # The pickup checks a restart lost, whatever the gate says (C6, C8).
         _recheck_requests_at_startup()
         if not _coordinating():
             _start_without_coordination()
             return
-        _start_live()
         # No separate startup refresh. Loading the add-in is not the event that
         # matters -- seeing a linked document is, and a document stamped at
         # load time is routinely the wrong one or none at all, because WGLink
@@ -4632,8 +3947,7 @@ def _build_owner(app: object, ui: object) -> None:
 def _start_without_coordination() -> None:
     """Start-up with the gate off: bounded, once, and then nothing until a command.
 
-    The live session is not started, so nothing is posted to WG and nothing
-    arrives from it. What start-up still owes is done here, once: read the
+    What start-up still owes is done here, once: read the
     document if one is open, settle interrupted claims against it read-only
     (a claim for a document that is not open is kept, as always), and publish
     one status so WG knows which add-in is present and how it is configured.
