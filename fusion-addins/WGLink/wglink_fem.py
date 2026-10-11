@@ -52,6 +52,12 @@ FEM_REGIONS_FEATURE = wglink_protocol.FEM_REGIONS_FEATURE
 FEM_REGION_PURPOSE = wglink_protocol.FEM_REGION_PURPOSE
 SURFACE_KINDS = wglink_protocol.FEM_SURFACE_KINDS
 CAPABILITY = "femRegions"
+UNAVAILABLE_MESSAGE = (
+    "This Waveguide Generator does not offer FEM regions "
+    "(update it, or turn FEM regions on). Clear the declarations to send without them."
+)
+EXPERIMENTAL_NOTE = "Experimental: geometry-checked only and not yet acoustically qualified."
+GROUP_AREA_TOLERANCE = 0.01
 
 # Fusion's internal length unit is the centimetre.
 CM_TO_MM = 10.0
@@ -139,6 +145,7 @@ class GroupDeclaration:
     mesh_size_mm: float
     drive_role: str | None
     face_keys: tuple[Any, ...]
+    declared_area_mm2: float
 
     def payload(self) -> dict[str, Any]:
         record: dict[str, Any] = {
@@ -146,6 +153,7 @@ class GroupDeclaration:
             "name": self.name,
             "kind": self.kind,
             "mesh_size_mm": self.mesh_size_mm,
+            "declared_area_mm2": self.declared_area_mm2,
         }
         if self.drive_role is not None:
             record["drive_role"] = self.drive_role
@@ -215,8 +223,8 @@ def plan_region_declaration(
 
     ``groups`` entries carry ``name``, ``kind`` (label or kind), ``mesh_size_mm``,
     ``drive_role`` (for moving groups) and ``faces``: hashable keys of the
-    selected faces, each paired with ``body_matches`` so the planner can refuse
-    faces of another body without touching Fusion. Errors come out in the
+    selected faces, each paired with ``area_cm2`` and ``body_matches`` so the
+    planner can refuse faces of another body without touching Fusion. Errors come out in the
     order a user fixes them: body, region, then each group top to bottom.
     """
 
@@ -259,6 +267,7 @@ def plan_region_declaration(
         if not faces:
             raise FemDeclarationError(f"Select at least one face for {label!r}.")
         keys: list[Any] = []
+        areas: list[float] = []
         for face in faces:
             if not face.get("body_matches", False):
                 raise FemDeclarationError(
@@ -270,6 +279,10 @@ def plan_region_declaration(
                 raise FemDeclarationError("A face can belong to only one surface group.")
             seen_faces.add(key)
             keys.append(key)
+            areas.append(
+                _positive(face.get("area_cm2"), f"The face area of {label!r}")
+                * CM_TO_MM * CM_TO_MM
+            )
         planned.append(
             GroupDeclaration(
                 group_id=_unique(identifier(group_name, fallback="group"), group_ids),
@@ -278,6 +291,7 @@ def plan_region_declaration(
                 mesh_size_mm=group_size,
                 drive_role=role,
                 face_keys=tuple(keys),
+                declared_area_mm2=math.fsum(areas),
             )
         )
     return RegionDeclaration(
@@ -397,10 +411,48 @@ class RegionExport:
     faces_by_group: Mapping[str, Sequence[Mapping[str, Any]]]
 
 
+def validate_group_areas(export: RegionExport) -> None:
+    """Refuse missing area baselines and total area drift after declaration."""
+
+    declaration = export.declaration
+    for group in declaration.get("groups") or ():
+        group_id = str(group["group_id"])
+        label = (
+            f"Surface group {group.get('name', group_id)!r} of FEM region "
+            f"{declaration.get('name', declaration['region_id'])!r}"
+        )
+        faces = export.faces_by_group.get(group_id) or ()
+        if not faces:
+            raise FemDeclarationError(
+                f"{label} has no faces left. Reselect its faces and re-declare "
+                "this region with Declare FEM Region (Experimental)…."
+            )
+        try:
+            declared = _positive(group.get("declared_area_mm2"), "The declared group area")
+        except FemDeclarationError:
+            raise FemDeclarationError(
+                f"{label} has no valid stored total face area; re-declare this region "
+                "with Declare FEM Region (Experimental)… before sending."
+            ) from None
+        current = math.fsum(
+            _positive(face.get("area_mm2"), f"The face area of {label}")
+            for face in faces
+        )
+        drift = abs(current - declared)
+        limit = GROUP_AREA_TOLERANCE * declared
+        # Treat only floating-point roundoff at the 1 % boundary as equal.
+        if drift > limit and not math.isclose(drift, limit, rel_tol=1e-12):
+            raise FemDeclarationError(
+                f"{label} total face area changed by {100 * drift / declared:g} % "
+                f"({declared:g} to {current:g} mm²), more than 1 %. Reselect its "
+                "faces and re-declare this region with Declare FEM Region (Experimental)…."
+            )
+
+
 def plan_fem_regions(exports: Sequence[RegionExport]) -> list[dict[str, Any]]:
     """Build ``scope.fem_regions`` from the declared bodies in scope.
 
-    A group whose faces all disappeared (deleted or merged by a later edit)
+    A group whose total face area drifted by more than 1 % (or disappeared)
     refuses the export rather than silently becoming a wall: a lost diaphragm
     would solve to silence and a lost interface would seal the chamber.
     """
@@ -413,19 +465,14 @@ def plan_fem_regions(exports: Sequence[RegionExport]) -> list[dict[str, Any]]:
         if region_id in used:
             raise FemDeclarationError(
                 f"Two bodies declare FEM region {region_id!r}. A copied body keeps its "
-                "declaration; redeclare one of them with Declare FEM Region…."
+                "declaration; redeclare one of them with Declare FEM Region (Experimental)…."
             )
         used.add(region_id)
+        validate_group_areas(export)
         groups: list[dict[str, Any]] = []
         for group in declaration.get("groups") or ():
             group_id = str(group["group_id"])
             faces = list(export.faces_by_group.get(group_id) or ())
-            if not faces:
-                raise FemDeclarationError(
-                    f"Surface group {group.get('name', group_id)!r} of FEM region "
-                    f"{declaration.get('name', region_id)!r} has no faces left. "
-                    "Reselect its faces with Declare FEM Region…."
-                )
             record: dict[str, Any] = {
                 "group_id": group_id,
                 "name": str(group["name"]),

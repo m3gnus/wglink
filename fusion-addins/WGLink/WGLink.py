@@ -93,9 +93,9 @@ COMMANDS = {
     ),
     "fem": (
         "hornlab_wglink_declare_fem_region",
-        "Declare FEM Region…",
+        "Declare FEM Region (Experimental)…",
         "Mark a solid body of air as a FEM region and name its driver, interface "
-        "and termination faces for a coupled FEM/BEM solve.",
+        "and termination faces for a coupled FEM/BEM solve. " + wglink_fem.EXPERIMENTAL_NOTE,
     ),
     "solve": (
         "hornlab_wglink_solve",
@@ -754,9 +754,7 @@ def _manifest_feature_enabled(name: str) -> bool:
 def _require_fem_regions() -> None:
     if not _manifest_feature_enabled(wglink_inbox.FEM_REGIONS):
         raise wglink_core.WgLinkError(
-            "Waveguide Generator no longer advertises FEM regions. Enable "
-            "WG2_FEM_REGIONS=1 in WG and restart WG and this add-in before "
-            "declaring a FEM region."
+            wglink_fem.UNAVAILABLE_MESSAGE
         )
 
 
@@ -2062,6 +2060,7 @@ def _fem_group_rows(inputs: object, state: FemDialogState, body: object) -> list
             faces.append({
                 "key": wglink_send.face_identity(native),
                 "body_matches": matches,
+                "area_cm2": getattr(native, "area", None),
                 "face": face,
             })
         rows.append({

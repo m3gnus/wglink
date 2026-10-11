@@ -16,8 +16,8 @@ import wglink_fem as fem  # noqa: E402
 import wglink_protocol as protocol  # noqa: E402
 
 
-def _face(key, *, body_matches=True):
-    return {"key": key, "body_matches": body_matches}
+def _face(key, *, body_matches=True, area_cm2=1.0):
+    return {"key": key, "body_matches": body_matches, "area_cm2": area_cm2}
 
 
 def _plan(**overrides):
@@ -48,7 +48,7 @@ def test_plan_stores_region_and_groups():
     }
     assert stored["groups"][0] == {
         "group_id": "cone", "name": "Cone", "kind": "moving", "mesh_size_mm": 3.0,
-        "drive_role": "LF",
+        "drive_role": "LF", "declared_area_mm2": 200.0,
     }
     assert fem.read_face_attribute(plan.face_attribute(plan.groups[1])) == (
         "rear-chamber", "port-exit",
@@ -145,11 +145,48 @@ def test_plan_fem_regions_builds_manifest_records():
 def test_plan_fem_regions_refuses_lost_faces_and_copies():
     declaration = fem.read_region_attribute(_plan().body_attribute())
     with pytest.raises(fem.FemDeclarationError, match="has no faces left"):
-        fem.plan_fem_regions([fem.RegionExport("b", declaration, {"cone": [_descriptor()]})])
-    faces = {"cone": [_descriptor()], "port-exit": [_descriptor()]}
+        fem.plan_fem_regions([fem.RegionExport("b", declaration,
+                                             {"cone": [_descriptor(), _descriptor()]})])
+    faces = {"cone": [_descriptor(), _descriptor()], "port-exit": [_descriptor()]}
     with pytest.raises(fem.FemDeclarationError, match="Two bodies declare"):
         fem.plan_fem_regions([fem.RegionExport("a", declaration, faces),
                               fem.RegionExport("b", declaration, faces)])
+
+
+@pytest.mark.parametrize("area_cm2", [None, 0, -1, float("nan"), float("inf"), "bad"])
+def test_declaration_requires_measurable_face_areas(area_cm2):
+    with pytest.raises(fem.FemDeclarationError, match="face area"):
+        _plan(groups=[{"name": "Wall", "kind": "rigid", "mesh_size_mm": 1,
+                       "faces": [_face("wall", area_cm2=area_cm2)]}])
+
+
+@pytest.mark.parametrize("current, accepted", [
+    (198.0, True), (202.0, True), (199.0, True), (201.0, True),
+    (197.999, False), (202.001, False), (100.0, False),
+])
+def test_group_area_drift_threshold(current, accepted):
+    declaration = fem.read_region_attribute(_plan().body_attribute())
+    changed = {**_descriptor(), "area_mm2": current}
+    export = fem.RegionExport("b", declaration,
+                              {"cone": [changed], "port-exit": [_descriptor()]})
+    if accepted:
+        assert fem.plan_fem_regions([export])[0]["surface_groups"][0]["faces"] == [changed]
+    else:
+        with pytest.raises(fem.FemDeclarationError, match="'Cone'.*'Rear Chamber'.*more than 1 %"):
+            fem.plan_fem_regions([export])
+
+
+@pytest.mark.parametrize("baseline", [None, 0, -1, float("nan"), float("inf"), "bad"])
+def test_old_or_invalid_area_baseline_requires_redeclaration(baseline):
+    declaration = fem.read_region_attribute(_plan().body_attribute())
+    if baseline is None:
+        del declaration["groups"][0]["declared_area_mm2"]
+    else:
+        declaration["groups"][0]["declared_area_mm2"] = baseline
+    export = fem.RegionExport("b", declaration,
+                              {"cone": [_descriptor(), _descriptor()], "port-exit": [_descriptor()]})
+    with pytest.raises(fem.FemDeclarationError, match="'Cone'.*'Rear Chamber'.*re-declare this region"):
+        fem.plan_fem_regions([export])
 
 
 def test_preflight_warns_without_interface():

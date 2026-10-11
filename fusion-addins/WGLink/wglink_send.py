@@ -3826,16 +3826,16 @@ def _fem_region_exports(walk: dict[str, Any]) -> list[tuple["wglink_fem.RegionEx
             if key is None or key[0] != region_id:
                 continue
             faces.setdefault(key[1], []).append(_fem_face_descriptor(face))
-        exports.append(
-            (
-                wglink_fem.RegionExport(
-                    object_id=item["object_id"],
-                    declaration=item["declaration"],
-                    faces_by_group=faces,
-                ),
-                item["body"],
-            )
+        export = wglink_fem.RegionExport(
+            object_id=item["object_id"],
+            declaration=item["declaration"],
+            faces_by_group=faces,
         )
+        try:
+            wglink_fem.validate_group_areas(export)
+        except wglink_fem.FemDeclarationError as exc:
+            raise wglink_core.WgLinkError(str(exc)) from exc
+        exports.append((export, item["body"]))
     return exports
 
 
@@ -4110,14 +4110,12 @@ def send(
     # component would land in assembly.step, and no inventory rule can account
     # for it there.
     _refuse_fem_bodies_in_export(walk["fem_exported_bodies"])
-    region_exports = _fem_region_exports(walk)
     fem_regions_enabled = bool(options.get("fem_regions"))
-    if region_exports and not fem_regions_enabled:
+    if any(not item["suppressed"] for item in walk["fem_regions"]) and not fem_regions_enabled:
         raise wglink_core.WgLinkError(
-            "This design declares FEM regions, and this Waveguide Generator cannot "
-            "solve them yet. Update Waveguide Generator, or clear the FEM region "
-            "declarations."
+            wglink_fem.UNAVAILABLE_MESSAGE
         )
+    region_exports = _fem_region_exports(walk)
     try:
         fem_region_records = wglink_fem.plan_fem_regions(
             [export for export, _body in region_exports]

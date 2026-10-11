@@ -89,9 +89,9 @@ def _declare(send_module, air, cone, port, fem):
         body_is_solid=True,
         groups=[
             {"name": "Cone", "kind": "moving", "drive_role": "LF", "mesh_size_mm": 3,
-             "faces": [{"key": cone.entityToken, "body_matches": True}]},
+             "faces": [{"key": cone.entityToken, "body_matches": True, "area_cm2": cone.area}]},
             {"name": "Port", "kind": "interface", "mesh_size_mm": 4,
-             "faces": [{"key": port.entityToken, "body_matches": True}]},
+             "faces": [{"key": port.entityToken, "body_matches": True, "area_cm2": port.area}]},
         ],
     )
     send_module.declare_fem_region(air, plan, {"cone": [cone], "port": [port]})
@@ -129,7 +129,7 @@ def test_declaration_round_trips_and_clears(send_module):
         name="Rear chamber", mesh_size_mm=8, body_is_solid=True,
         region_id=plan.region_id,
         groups=[{"name": "Cone", "kind": "moving", "drive_role": "LF", "mesh_size_mm": 3,
-                 "faces": [{"key": cone.entityToken, "body_matches": True}]}],
+                 "faces": [{"key": cone.entityToken, "body_matches": True, "area_cm2": cone.area}]}],
     )
     send_module.declare_fem_region(air, replan, {"cone": [cone]})
     assert send_module.fem_region_faces(air, plan.region_id) == {"cone": [cone]}
@@ -203,18 +203,23 @@ def test_a_visible_region_refuses_before_any_export(send_module, tmp_path, monke
     assert list(tmp_path.iterdir()) == []
 
 
-def test_an_older_wg_refuses_a_design_with_regions(send_module, tmp_path, monkeypatch):
+def test_a_wg_without_the_capability_refuses_a_design_with_regions(send_module, tmp_path, monkeypatch):
     fem = _fem(send_module)
     air, cone, port = air_body()
     _declare(send_module, air, cone, port, fem)
     root = component("Speaker", [body("cabinet", faces=[face("LF")]), air])
     _design(send_module, monkeypatch, root)
 
-    with pytest.raises(send_module.wglink_core.WgLinkError, match="cannot solve them yet"):
+    with pytest.raises(send_module.wglink_core.WgLinkError) as refusal:
         send_module.send(
             types.SimpleNamespace(version="1"),
             {"output_folder": str(tmp_path), "capture_document": False},
         )
+    assert str(refusal.value) == (
+        "This Waveguide Generator does not offer FEM regions "
+        "(update it, or turn FEM regions on). Clear the declarations to send without them."
+    )
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_a_group_whose_faces_were_lost_refuses(send_module, tmp_path, monkeypatch):
@@ -230,6 +235,58 @@ def test_a_group_whose_faces_were_lost_refuses(send_module, tmp_path, monkeypatc
             types.SimpleNamespace(version="1"),
             {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True},
         )
+
+
+@pytest.mark.parametrize("edit", ["partial-loss", "shrink", "grow", "legacy"])
+def test_group_area_changes_refuse_before_export(send_module, tmp_path, monkeypatch, edit):
+    fem = _fem(send_module)
+    air, cone, port = air_body()
+    extra = fem_face(z=1.0)
+    air.faces.append(extra)
+    plan = fem.plan_region_declaration(
+        name="Rear chamber", mesh_size_mm=8, body_is_solid=True,
+        groups=[{"name": "Cone", "kind": "moving", "drive_role": "LF", "mesh_size_mm": 3,
+                 "faces": [{"key": item.entityToken, "body_matches": True, "area_cm2": item.area}
+                           for item in (cone, extra)]}],
+    )
+    send_module.declare_fem_region(air, plan, {"cone": [cone, extra]})
+    if edit == "partial-loss":
+        extra.attributes = Attributes()
+    elif edit == "shrink":
+        cone.area *= 0.95
+    elif edit == "grow":
+        cone.area *= 1.05
+    else:
+        legacy = send_module.read_fem_region(air)
+        del legacy["groups"][0]["declared_area_mm2"]
+        air.attributes.add("WGLink", "fem_region", json.dumps(legacy))
+        assert send_module.read_fem_region(air) is not None
+    root = component("Speaker", [body("cabinet", faces=[face("LF")]), air])
+    design, app = _design(send_module, monkeypatch, root)
+    exports = []
+    monkeypatch.setattr(design.exportManager, "execute", lambda options: exports.append(options))
+    with pytest.raises(send_module.wglink_core.WgLinkError,
+                       match="'Cone'.*'Rear chamber'.*re-declare this region"):
+        send_module.send(app, {"output_folder": str(tmp_path), "capture_document": False,
+                               "fem_regions": True})
+    assert exports == []
+    assert list(tmp_path.iterdir()) == []
+    report = send_module.preflight_scope(app, {})
+    assert "re-declare this region" in report["fem_region_error"]
+
+
+def test_redeclaration_resets_the_area_baseline(send_module, tmp_path, monkeypatch):
+    fem = _fem(send_module)
+    air, cone, port = air_body()
+    _declare(send_module, air, cone, port, fem)
+    cone.area *= 0.5
+    _declare(send_module, air, cone, port, fem)
+    assert send_module.read_fem_region(air)["groups"][0]["declared_area_mm2"] == 200.0
+    root = component("Speaker", [body("cabinet", faces=[face("LF")]), air])
+    _, app = _design(send_module, monkeypatch, root)
+    report = send_module.send(app, {"output_folder": str(tmp_path), "capture_document": False,
+                                   "fem_regions": True})
+    assert report["manifest"]["scope"]["fem_regions"][0]["surface_groups"][0]["faces"][0]["area_mm2"] == 200.0
 
 
 def test_preflight_lists_regions_and_accepts_a_fem_driver(send_module, monkeypatch):

@@ -206,9 +206,10 @@ Relink remain full head-less APIs but are not panel commands.
 
 ## FEM regions (`fem-regions-v1`)
 
-**Declare FEM Region…** appears under Manage only when `wg-capabilities.json`
-advertises `femRegions` at add-in startup. WG advertises it only with
-`WG2_FEM_REGIONS=1`. Restart the add-in after enabling it; there is no polling
+**Declare FEM Region (Experimental)…** appears under Manage only when
+`wg-capabilities.json` advertises `femRegions` at add-in startup. The tooltip
+states: "Experimental: geometry-checked only and not yet acoustically qualified."
+WG may have this feature turned off. Restart the add-in after enabling it; there is no polling
 or toolbar refresh. Opening the command and executing it both re-check the
 capability and refuse if it has been withdrawn. Without the capability, no
 FEM command or icon is registered, and a design without declared regions keeps
@@ -223,17 +224,26 @@ plane-wave termination, rigid wall), each with a local size and its faces.
 - `wglink_fem.py` (no `adsk`) owns validation, the attribute payloads, face
   descriptors and the `scope.fem_regions` records.
 - The native body carries `WGLink/fem_region` (JSON: region id, name, size,
-  medium, groups) and each grouped face carries `WGLink/fem_surface_group`
+  medium, groups including `declared_area_mm2`) and each grouped face carries `WGLink/fem_surface_group`
   (JSON: region id, group id). Faces are compared by entity token or temp id,
   never by wrapper identity.
 - Send (`wglink_send._fem_region_exports`) refuses a visible region body,
-  a non-root frame, and a group whose faces are gone. It exports each region by
+  a non-root frame, and a group whose faces are gone or whose total area differs
+  from the stored declaration by more than 1 %. Missing or invalid area totals
+  in older declarations require "re-declare this region" before Send. The
+  attribute schema stays at 1; the area baseline is local authoring evidence
+  and is not added to the shared protocol or return manifest.
+  It exports each region by
   copying the body into a temporary root component, which is deleted again,
   and gates the member to one solid.
 - No meshing happens in Fusion. Faces are described by geometry in the export
   frame and WG matches them to its own gmsh surfaces, so mesh tags stay WG's.
 - `wglink_protocol.validate_fem_regions` is shared by both profiles; the
   feature is optional and gated on WG's `femRegions` capability.
+
+A design with declarations and no advertised capability is refused with:
+"This Waveguide Generator does not offer FEM regions (update it, or turn FEM
+regions on). Clear the declarations to send without them."
 
 ## The workspace is WG's setting
 

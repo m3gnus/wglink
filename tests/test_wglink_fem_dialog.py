@@ -33,6 +33,7 @@ def _air(module):
     for index in range(3):
         faces.append(types.SimpleNamespace(
             entityToken=f"face-{index}", attributes=_Attributes(), body=air,
+            area=float(index + 1),
         ))
     air.faces = faces
     return air, faces
@@ -121,6 +122,10 @@ def test_startup_registers_the_command_and_icon_only_under_the_capability(
             module.run(None)
             assert fixture.ui.commandDefinitions.itemById(fem_id) is None
             assert len(registered) == 7
+        else:
+            record = next(record for record in registered if record[0] == fem_id)
+            assert record[1] == "Declare FEM Region (Experimental)…"
+            assert "Experimental: geometry-checked only and not yet acoustically qualified." in record[2]
     finally:
         module.stop(None)
     assert fixture.ui.commandDefinitions.itemById(fem_id) is None
@@ -180,7 +185,8 @@ def test_withdrawn_capability_refuses_open_and_execute_then_hides_on_restart(fix
         execute.fem_state = _state(module, 1, 2)
         execute.notify(args)
         assert len(fixture.ui.messages) == 2
-        assert all("no longer advertises FEM regions" in text for _title, text in fixture.ui.messages)
+        assert all(module.wglink_fem.UNAVAILABLE_MESSAGE in text
+                   for _title, text in fixture.ui.messages)
         assert air.attributes.values == {}
         assert all(face.attributes.values == {} for face in faces)
         module.stop(None)
@@ -209,6 +215,7 @@ def test_declaring_writes_the_body_and_its_faces(fixture):
     region = json.loads(air.attributes.values[("WGLink", "fem_region")])
     assert region["region_id"] == "rear-chamber"
     assert region["medium"]["bulk_loss_factor"] == 0.02
+    assert [group["declared_area_mm2"] for group in region["groups"]] == [100.0, 200.0]
     assert [(group["name"], group["kind"], group.get("drive_role"), group["mesh_size_mm"])
             for group in region["groups"]] == [
         ("Cone", "moving", "MF", 3.0), ("Port", "interface", None, 4.0),
