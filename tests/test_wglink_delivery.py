@@ -333,18 +333,18 @@ def test_unknown_capability_fields_and_later_versions_are_still_read(
 
 
 @pytest.mark.parametrize(
-    "capability",
+    "capability,error",
     [
-        None,
-        "not json at all",
-        [],
-        {"schemaVersion": 2, "solveCommandDelivery": 4},
-        {"schemaVersion": True, "solveCommandDelivery": 4},
-        {"schemaVersion": 1},
-        {"schemaVersion": 1, "solveCommandDelivery": 2},
-        {"schemaVersion": 1, "solveCommandDelivery": "3"},
-        {"schemaVersion": 1, "solveCommandDelivery": True},
-        {"schemaVersion": 1, "solveCommandDelivery": 4.0},
+        (None, wglink_inbox.WgNotCollectingError),
+        ("not json at all", wglink_inbox.WgNotCollectingError),
+        ([], wglink_inbox.WgOutdatedError),
+        ({"schemaVersion": 2, "solveCommandDelivery": 4}, wglink_inbox.WgOutdatedError),
+        ({"schemaVersion": True, "solveCommandDelivery": 4}, wglink_inbox.WgOutdatedError),
+        ({"schemaVersion": 1}, wglink_inbox.WgNotCollectingError),
+        ({"schemaVersion": 1, "solveCommandDelivery": 2}, wglink_inbox.WgOutdatedError),
+        ({"schemaVersion": 1, "solveCommandDelivery": "3"}, wglink_inbox.WgOutdatedError),
+        ({"schemaVersion": 1, "solveCommandDelivery": True}, wglink_inbox.WgOutdatedError),
+        ({"schemaVersion": 1, "solveCommandDelivery": 4.0}, wglink_inbox.WgOutdatedError),
     ],
     ids=[
         "absent",
@@ -360,17 +360,22 @@ def test_unknown_capability_fields_and_later_versions_are_still_read(
     ],
 )
 def test_a_wg_that_does_not_advertise_version_3_gets_no_solve_command(
-    ipc: Path, tmp_path: Path, capability: Any
+    ipc: Path, tmp_path: Path, capability: Any, error: type
 ) -> None:
-    """No older format is written instead: WG is asked to update."""
+    """No older format is written; the remedy distinguishes skew from no consumer."""
 
     if isinstance(capability, str):
         (ipc / CAPABILITIES).write_text(capability, encoding="utf-8")
     elif capability is not None:
         _write(ipc / CAPABILITIES, capability)
 
-    with pytest.raises(wglink_inbox.WgOutdatedError, match="Update Waveguide Generator"):
+    with pytest.raises(error) as raised:
         _write_solve(ipc, tmp_path)
+    if error is wglink_inbox.WgNotCollectingError:
+        assert "Start Waveguide Generator" in str(raised.value)
+        assert "Update Waveguide Generator" not in str(raised.value)
+    else:
+        assert "Update Waveguide Generator" in str(raised.value)
 
     assert not (ipc / ".wg-solve-request.json").exists()
     assert _taken_names(ipc / SOLVE_FOLDER) == []

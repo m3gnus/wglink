@@ -46,9 +46,10 @@ and export watcher are removed. Exports are no longer watched: the user presses
 Send, and new WG exports require an explicit Insert/Update command or handoff.
 The optional tick only services explicit file requests and publishes status.
 
-Send, Solve, Insert and Update require advertised `solveCommandDelivery >= 4`
-and `fusionRequestDelivery >= 3` under capability schema 1. Test the refusal
-with older advertised values; product version strings are ignored. Keep the
+Insert, Update, WG handoffs and return requests require advertised
+`fusionRequestDelivery >= 3` under capability schema 1. Send and Solve also
+require `solveCommandDelivery >= 4`. Test both the older-version refusal and
+Fusion-bound delivery with WG's request consumer off; product version strings are ignored. Keep the
 add-in version at 0.2.1 during feature work. WG's R-2 test-loader and provenance
 changes are listed in the implementation guide's packaged-pair reference table.
 

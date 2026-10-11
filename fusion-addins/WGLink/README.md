@@ -227,15 +227,19 @@ Commands and requests cross through WG's machine-local IPC folder,
 `<WG data folder>/ipc/wglink`. The contract is WG's
 `docs/architecture/CAD-OPERATIONS.md`; WGLink implements the add-in's half.
 
-- **Capability gate before export or mutation.** Send, Solve, Insert and Update
-  require a schema-1 `wg-capabilities.json` advertising integer
-  `solveCommandDelivery >= 4` and `fusionRequestDelivery >= 3`. Product version
+- **Capability gate before export or mutation.** Insert, Update, WG handoffs
+  and return requests require a schema-1 `wg-capabilities.json` advertising
+  integer `fusionRequestDelivery >= 3`. Send and Solve additionally require
+  integer `solveCommandDelivery >= 4`. WG's Solve consumer can be off while
+  Fusion-bound requests still run. Product version
   strings do not establish compatibility. A WG advertising older or invalid
   delivery values is refused with "Update Waveguide Generator" before export
   or mutation; missing inbox advertisement reports "not collecting requests".
   Fusion-bound requests and the heartbeat retain delivery version 3. Optional
-  manifest requirements are checked separately (Send/Solve also need
-  `automaticDomain` and `documentUp`; source identity is optional). The add-in version stays 0.2.1.
+  manifest requirements are checked separately (Send/Solve and return requests
+  also need `automaticDomain` and `documentUp`; source identity is optional).
+  Return requests publish a bundle WG reads directly, without writing WG's
+  Send/Solve inbox. The add-in version stays 0.2.1.
 - **Send and Solve: one request file each (the WG request inbox).** Both write
   `.wg-solve-requests/<operationId>.json` and nothing else, whatever the activation gate says — and differ only in `kind`
   (`receive_snapshot` or `prepare_and_solve`). Both write schema 4; a WG
@@ -485,9 +489,11 @@ always writes schema 4. No compatibility re-export is retained.
 
 When re-pinning, update WG's `integrations/wglink/source.json` commit and
 `server/cadlink/wglink_protocol.source.json` provenance commit together as
-appropriate; the protocol SHA stays the same. WG's `server/tests/fixtures/wgreturn-endpoint-oracle/PROVENANCE.json`
+appropriate; the protocol SHA stays the same. WG's `server/tests/fixtures/cadlink-endpoint-oracle/PROVENANCE.json`
 `addin_commit` must match the package pin (its test asserts this), so
-regenerate/update that provenance. If the add-in shared-fixture provenance
+regenerate/update that provenance. The packaged-pair test also pins its
+`wg_commit`; keep that WG endpoint-oracle baseline consistent when regenerating.
+If the add-in shared-fixture provenance
 changes, re-copy it to WG's `server/tests/fixtures/wglink-shared-protocol/` and
 update that directory's `MANIFEST.sha256` consistently. Rebuild the package and run both WG suites against the new pin.
 The builder itself needs no code change, and `addinVersion` remains 0.2.1.

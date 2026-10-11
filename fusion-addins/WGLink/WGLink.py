@@ -1597,8 +1597,8 @@ def _hide_export_progress(dialog: object | None) -> None:
         pass
 
 
-def _require_compatible_wg() -> None:
-    """Refuse before export or mutation unless WG advertises the file contract."""
+def _require_compatible_wg(*, wg_inbox: bool = False) -> None:
+    """Require the command's channel before export or mutation."""
 
     ipc = wglink_workspace.ipc_folder()
     try:
@@ -1606,7 +1606,10 @@ def _require_compatible_wg() -> None:
             if wglink_workspace.missing_workspace() is not None:
                 raise wglink_core.WgLinkError(_no_workspace_text())
             raise wglink_inbox.WgNotCollectingError(wglink_inbox.WG_NOT_COLLECTING_MESSAGE)
-        wglink_inbox.require_wg_delivery(ipc)
+        if wg_inbox:
+            wglink_inbox.require_wg_delivery(ipc)
+        else:
+            wglink_inbox.require_fusion_delivery(ipc)
     except (wglink_inbox.WgOutdatedError, wglink_inbox.WgNotCollectingError) as exc:
         raise wglink_core.WgLinkError(str(exc)) from exc
 
@@ -1635,7 +1638,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         try:
             adsk.doEvents()
             if self.operation in {"send", "solve", "insert", "update"}:
-                _require_compatible_wg()
+                _require_compatible_wg(wg_inbox=self.operation in {"send", "solve"})
             inputs = args.command.commandInputs
             options = _command_options(inputs)
             if self.operation == "insert":
@@ -2923,6 +2926,8 @@ def _execute_return_request(
     outcome = "failed"
     _command_busy = True
     try:
+        # WG reads the exported bundle directly; this request never writes its
+        # Send/Solve inbox. Manifest features are checked below before export.
         _require_compatible_wg()
         if (
             not request.design_id

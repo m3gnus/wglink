@@ -45,14 +45,38 @@ Send need no folder dialogs afterwards.
 Exports are no longer watched. Press **Send to WG** to send Fusion geometry;
 use **Update** or an explicit WG **Send to CAD** Update handoff to apply a new
 WG export. Creating an export alone never raises a newer-export prompt.
-Send, Solve, Insert and Update refuse incompatible WG delivery before export
-or model mutation and ask you to **Update Waveguide Generator**. Compatibility
-comes from WG's advertised capabilities, not its product version string.
 
 Internally, `wglink_inbox.py` handles WG requests and acknowledgements,
 `wglink_handoff.py` reads Insert/Update and return requests, and
 `wglink_status.py` publishes Fusion status. `WGLink.py` owns the panel and
 main-thread command execution.
+
+### Compatibility
+
+Compatibility comes from WG's advertised capabilities, not its product version
+string. Insert, Update, WG handoffs and return requests require capability
+schema 1 and integer `fusionRequestDelivery >= 3`. They continue to work when
+WG's CAD Link request consumer is off. Send and Solve additionally require
+integer `solveCommandDelivery >= 4`. An unsupported schema or delivery version
+asks you to **Update Waveguide Generator** before export or model mutation.
+A missing advertisement or disabled Send/Solve consumer asks you to start WG
+and check its CAD Link folder.
+
+Return requests publish a `.wgreturn` bundle for WG to read directly; they do
+not write WG's Send/Solve inbox. Like Send and Solve, they still require WG's
+`automaticDomain` and `documentUp` manifest capabilities before export.
+`sourceIdentity` remains optional.
+
+The file-channel split deliberately changes these compatibility behaviors;
+include them in the R-2 re-pin and release notes:
+
+- Solve no longer falls back to schema 3. New Send and Solve requests always
+  use schema 4 and require `solveCommandDelivery >= 4`.
+- Unanswered items from earlier sessions in `.wglink-outbox` stay queued for
+  an older or unavailable WG until a later startup with both delivery channels
+  compatible. Previously, with inbox 3, queued Solves were converted to schema
+  3 and queued Sends were removed with a not-delivered notice. Answered items
+  retain their existing handling.
 
 ## 2. The panel
 

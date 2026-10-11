@@ -81,12 +81,16 @@ WG_NOT_COLLECTING_MESSAGE = (
     "Waveguide Generator is not collecting requests from Fusion: it has not said "
     "that it reads them. Either WG is not running with this CAD Link folder, or "
     "its CAD Link request handling is switched off. Start Waveguide Generator, "
-    "check its CAD Link folder, then try again. Update Waveguide Generator if "
-    "it does not advertise the required delivery capabilities."
+    "check its CAD Link folder, then try again."
 )
 WG_OUTDATED_MESSAGE = (
     "This Waveguide Generator does not advertise the delivery capabilities this "
     "WGLink add-in needs (WG request inbox 4 and Fusion request delivery 3). "
+    "Update Waveguide Generator; it installs the WGLink that matches it."
+)
+WG_FUSION_OUTDATED_MESSAGE = (
+    "This Waveguide Generator does not advertise the delivery capabilities this "
+    "WGLink add-in needs (Fusion request delivery 3 under capability schema 1). "
     "Update Waveguide Generator; it installs the WGLink that matches it."
 )
 
@@ -307,13 +311,46 @@ def wg_speaks_delivery_version(ipc_folder: Path) -> bool:
     )
 
 
-def require_wg_delivery(ipc_folder: Path) -> None:
-    """Require both delivery channels before a command exports or mutates."""
+def _require_capabilities(ipc_folder: Path, outdated_message: str) -> Mapping[str, Any]:
+    """Separate an unavailable advertisement from an unsupported schema."""
 
-    if wg_request_capability(ipc_folder) is None:
+    payload = _read_json(Path(ipc_folder) / CAPABILITIES_FILENAME)
+    if payload is None:
         raise WgNotCollectingError(WG_NOT_COLLECTING_MESSAGE)
-    if not wg_speaks_delivery_version(ipc_folder):
-        raise WgOutdatedError(WG_OUTDATED_MESSAGE)
+    if not isinstance(payload, Mapping):
+        raise WgOutdatedError(outdated_message)
+    schema = payload.get("schemaVersion")
+    if (
+        isinstance(schema, bool)
+        or not isinstance(schema, int)
+        or schema != CAPABILITIES_SCHEMA_VERSION
+    ):
+        raise WgOutdatedError(outdated_message)
+    return payload
+
+
+def require_fusion_delivery(ipc_folder: Path) -> None:
+    """Require only WG's Fusion-bound channel, independent of its Solve consumer."""
+
+    payload = _require_capabilities(ipc_folder, WG_FUSION_OUTDATED_MESSAGE)
+    value = payload.get(FUSION_REQUEST_DELIVERY)
+    if isinstance(value, bool) or not isinstance(value, int) or value < DELIVERY_VERSION:
+        raise WgOutdatedError(WG_FUSION_OUTDATED_MESSAGE)
+
+
+def require_wg_delivery(ipc_folder: Path) -> None:
+    """Require WG's Send/Solve inbox and Fusion delivery before exporting."""
+
+    payload = _require_capabilities(ipc_folder, WG_OUTDATED_MESSAGE)
+    if SOLVE_COMMAND_DELIVERY not in payload:
+        raise WgNotCollectingError(WG_NOT_COLLECTING_MESSAGE)
+    for name, minimum in (
+        (SOLVE_COMMAND_DELIVERY, WG_REQUEST_SCHEMA_VERSION),
+        (FUSION_REQUEST_DELIVERY, DELIVERY_VERSION),
+    ):
+        value = payload.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise WgOutdatedError(WG_OUTDATED_MESSAGE)
 
 
 def write_solve_request(
@@ -564,8 +601,7 @@ def untaken_requests(
 def require_solve_delivery(ipc_folder: Path) -> None:
     """Require both channels for the packaged-pair schema-3 solve writer."""
 
-    if not wg_speaks_delivery_version(ipc_folder):
-        raise WgOutdatedError(WG_OUTDATED_MESSAGE)
+    require_wg_delivery(ipc_folder)
 
 
 def utc_timestamp(moment: datetime | None = None) -> str:
