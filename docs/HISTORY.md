@@ -2,8 +2,8 @@
 
 WGLink was developed in the `m3gnus/hornlab-fusion-addin` repository, which began as the
 WGMetalPipeline add-in. This repository was extracted from that repository's `main` at
-`63ba92c012887c9b81da5273f25f418a29a826b5` (WGLink 0.2.1). That repository is archived,
-read-only.
+`63ba92c012887c9b81da5273f25f418a29a826b5` (WGLink 0.2.1). That repository is now private;
+the commit map below is the way to find an old commit's counterpart here.
 
 The extraction rewrote history in three ways:
 
