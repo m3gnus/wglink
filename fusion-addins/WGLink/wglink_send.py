@@ -934,13 +934,17 @@ def _scope_walk(design: object, selection_value: object) -> dict[str, Any]:
             region_attribute = attributes.itemByName(
                 wglink_core.ATTRIBUTE_GROUP, wglink_fem.REGION_ATTRIBUTE
             ) if attributes is not None else None
-        except Exception as exc:  # noqa: BLE001 - declarations cannot silently disappear
-            raise wglink_core.WgLinkError(
-                f"Could not read the FEM region attribute on body {name!r}: {exc}."
-            ) from exc
-        region = wglink_fem.read_region_attribute(
-            wglink_core._attribute_value(native, wglink_fem.REGION_ATTRIBUTE)
-        ) if region_attribute is not None else None
+        except Exception:  # noqa: BLE001 - preserve the tolerant no-attribute path
+            region_value = wglink_core._attribute_value(native, wglink_fem.REGION_ATTRIBUTE)
+            region_attribute = region_value or None
+        else:
+            region_value = wglink_core._attribute_value(
+                native, wglink_fem.REGION_ATTRIBUTE
+            ) if region_attribute is not None else None
+        region = (
+            wglink_fem.read_region_attribute(region_value)
+            if region_attribute is not None else None
+        )
         if region_attribute is not None:
             # A declared FEM region is bounded air, never exterior geometry:
             # it stays out of the exterior inventory and gets its own member.
@@ -954,7 +958,9 @@ def _scope_walk(design: object, selection_value: object) -> dict[str, Any]:
                     "solid": bool(getattr(body, "isSolid", False)),
                     "declaration": region,
                     "body": body,
-                    "direct_root_body": component is design.rootComponent and occurrence is None,
+                    # Only the root-scope walk passes no occurrence. Fusion
+                    # returns fresh Component wrappers, so identity is unsafe.
+                    "direct_root_body": occurrence is None,
                 }
             )
             return
@@ -3852,6 +3858,41 @@ def _fem_region_exports(walk: dict[str, Any]) -> list[tuple["wglink_fem.RegionEx
     return exports
 
 
+def _refuse_ambiguous_fem_drivers(
+    region_exports: list[tuple["wglink_fem.RegionExport", object]],
+    sources: list[dict[str, Any]],
+) -> None:
+    """One moving group per role can share one exterior source's channel."""
+
+    moving: dict[str, list[str]] = {}
+    for export, _body in region_exports:
+        declaration = export.declaration
+        for group in declaration["groups"]:
+            if group["kind"] == "moving":
+                moving.setdefault(group["drive_role"], []).append(
+                    f"{group['name']!r} in region {declaration['name']!r}"
+                )
+    for role, groups in moving.items():
+        if len(groups) > 1:
+            raise wglink_core.WgLinkError(
+                f"Drive role {role!r} has more than one FEM moving group: "
+                + ", ".join(groups)
+                + ". Use a different drive role for each driver before sending."
+            )
+        exterior = [source for source in sources if source["role"] == role]
+        channels = {source["default_drive_channel_id"] for source in exterior}
+        if len(channels) > 1:
+            labels = ", ".join(
+                f"{source['id']!r} ({source['default_drive_channel_id']})"
+                for source in exterior
+            )
+            raise wglink_core.WgLinkError(
+                f"Drive role {role!r} for FEM moving group {groups[0]} has more "
+                f"than one exterior source channel: {labels}. Use a different "
+                "drive role for each driver before sending."
+            )
+
+
 def _export_body_step(design: object, path: Path, body: object) -> None:
     """Export one body by copying it into a temporary root component.
 
@@ -4253,6 +4294,7 @@ def send(
         adopted=adopted_sources,
         allow_empty=fem_driven,
     )
+    _refuse_ambiguous_fem_drivers(region_exports, sources)
     # After ``_sources``, deliberately: an adoption above has already written
     # its stamps, so the fingerprint is taken of the document as it now is
     # rather than of one that could not be fingerprinted at all.

@@ -1494,7 +1494,9 @@ def _contract_design(root, manager=None):
     return design, app, manager
 
 
-def _no_fem_export(send_module, monkeypatch, output, profile, **extra_options):
+def _no_fem_export(
+    send_module, monkeypatch, output, profile, *, attributes_unavailable=False, **extra_options
+):
     """The deterministic design used to capture the e9f0dfb bundle goldens.
 
     Send, Solve and the returns after Insert/Update all use this exporter.
@@ -1508,6 +1510,10 @@ def _no_fem_export(send_module, monkeypatch, output, profile, **extra_options):
         "face": "stable-face-hf", "faces": 1,
     }, sort_keys=True, separators=(",", ":")))
     root = component("Speaker", [body("cabinet", faces=[painted])])
+    if attributes_unavailable:
+        def unavailable(*_args):
+            raise RuntimeError("attributes unavailable")
+        root.bRepBodies[0].attributes.itemByName = unavailable
     design, app, _manager = _contract_design(root)
     app.preferences = types.SimpleNamespace(
         generalPreferences=types.SimpleNamespace(defaultModelingOrientation=0)
@@ -1523,12 +1529,17 @@ def _no_fem_export(send_module, monkeypatch, output, profile, **extra_options):
 
 
 @pytest.mark.parametrize("profile", ["legacy", "modern"])
+@pytest.mark.parametrize("attributes_unavailable", [False, True],
+                         ids=["readable-attributes", "unavailable-attributes"])
 @pytest.mark.parametrize("fem_options", [{}, {"fem_regions": False}, {"fem_regions": True}],
                          ids=["capability-absent", "capability-off", "capability-on"])
 def test_no_declared_regions_keep_e9f0dfb_bundle_bytes(
-    send_module, monkeypatch, tmp_path, profile, fem_options
+    send_module, monkeypatch, tmp_path, profile, fem_options, attributes_unavailable
 ):
-    report = _no_fem_export(send_module, monkeypatch, tmp_path, profile, **fem_options)
+    report = _no_fem_export(
+        send_module, monkeypatch, tmp_path, profile,
+        attributes_unavailable=attributes_unavailable, **fem_options
+    )
     actual = Path(report["bundle_path"])
     golden = ROOT / "tests" / "fixtures" / "no-fem-e9f0dfb" / profile
 

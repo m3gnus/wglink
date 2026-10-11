@@ -9,6 +9,7 @@ import types
 
 import pytest
 
+from test_wglink_addin_lifecycle import _proxying_root
 from test_wglink_send import (  # noqa: F401 - send_module is a fixture
     Attributes,
     Collection,
@@ -19,6 +20,7 @@ from test_wglink_send import (  # noqa: F401 - send_module is a fixture
     face,
     point,
     send_module,
+    _linked_cut_design,
 )
 
 
@@ -82,13 +84,13 @@ def air_body(*, visible=False):
     return value, cone, port
 
 
-def _declare(send_module, air, cone, port, fem):
+def _declare(send_module, air, cone, port, fem, *, name="Rear chamber", role="LF"):
     plan = fem.plan_region_declaration(
-        name="Rear chamber",
+        name=name,
         mesh_size_mm=8,
         body_is_solid=True,
         groups=[
-            {"name": "Cone", "kind": "moving", "drive_role": "LF", "mesh_size_mm": 3,
+            {"name": "Cone", "kind": "moving", "drive_role": role, "mesh_size_mm": 3,
              "faces": [{"key": cone.entityToken, "body_matches": True, "area_cm2": cone.area}]},
             {"name": "Port", "kind": "interface", "mesh_size_mm": 4,
              "faces": [{"key": port.entityToken, "body_matches": True, "area_cm2": port.area}]},
@@ -187,6 +189,81 @@ def test_a_fem_diaphragm_alone_drives_the_return(send_module, tmp_path, monkeypa
         {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True},
     )
     assert report["sources"] == []
+
+
+@pytest.mark.parametrize("separate_regions", [False, True],
+                         ids=["same-region", "across-regions"])
+def test_same_role_fem_moving_groups_refuse_before_export(
+    send_module, tmp_path, monkeypatch, separate_regions
+):
+    fem = _fem(send_module)
+    air, cone, port = air_body()
+    _declare(send_module, air, cone, port, fem)
+    regions = [air]
+    if separate_regions:
+        second, second_cone, second_port = air_body()
+        second.name, second.entityToken = "front air", "token-front-air"
+        _declare(send_module, second, second_cone, second_port, fem, name="Front chamber")
+        regions.append(second)
+    else:
+        plan = fem.plan_region_declaration(
+            name="Rear chamber", mesh_size_mm=8, body_is_solid=True,
+            groups=[
+                {"name": name, "kind": "moving", "drive_role": "LF", "mesh_size_mm": 3,
+                 "faces": [{"key": item.entityToken, "body_matches": True, "area_cm2": item.area}]}
+                for name, item in [("Cone", cone), ("Second cone", port)]
+            ],
+        )
+        send_module.declare_fem_region(air, plan, {"cone": [cone], "second-cone": [port]})
+    root = component("Speaker", [body("cabinet", faces=[face("LF")]), *regions])
+    design, app = _design(send_module, monkeypatch, root)
+    exports = []
+    execute = design.exportManager.execute
+    def track_export(options):
+        exports.append(options)
+        return execute(options)
+    monkeypatch.setattr(design.exportManager, "execute", track_export)
+    with pytest.raises(send_module.wglink_core.WgLinkError) as refusal:
+        send_module.send(app, {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True})
+    message = str(refusal.value)
+    assert "Drive role 'LF' has more than one FEM moving group" in message
+    assert "'Cone' in region 'Rear chamber'" in message
+    assert ("'Cone' in region 'Front chamber'" if separate_regions
+            else "'Second cone' in region 'Rear chamber'") in message
+    assert exports == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_fem_role_with_multiple_exterior_channels_refuses_before_export(
+    send_module, tmp_path, monkeypatch
+):
+    # A linked throat and unclaimed exterior paint allocate two HF channels.
+    design, app = _linked_cut_design(
+        send_module, retained_fraction=1.0, low=(-1, -1, -1), high=(1, 1, 1)
+    )
+    root = design.rootComponent
+    air, cone, port = air_body()
+    _declare(send_module, air, cone, port, _fem(send_module), role="HF")
+    root.bRepBodies.extend([body("second driver", faces=[face("HF")]), air])
+    root.occurrences = Occurrences()
+    send_module.adsk.core.Matrix3D = types.SimpleNamespace(create=lambda: object())
+    monkeypatch.setattr(send_module.wglink_core, "_design", lambda _app: design)
+    exports = []
+    execute = design.exportManager.execute
+    def track_export(options):
+        exports.append(options)
+        return execute(options)
+    monkeypatch.setattr(design.exportManager, "execute", track_export)
+    with pytest.raises(send_module.wglink_core.WgLinkError) as refusal:
+        send_module.send(app, {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True})
+    message = str(refusal.value)
+    assert "Drive role 'HF'" in message
+    assert "'Cone' in region 'Rear chamber'" in message
+    assert "more than one exterior source channel" in message
+    assert "'source-hf' (drive-hf)" in message
+    assert "'source-hf-2' (drive-hf-2)" in message
+    assert exports == []
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_a_visible_region_refuses_before_any_export(send_module, tmp_path, monkeypatch):
@@ -432,29 +509,64 @@ def test_invalid_region_attributes_refuse_by_body_name(send_module, tmp_path, mo
     assert list(tmp_path.iterdir()) == []
 
 
-def test_child_component_region_refuses_even_at_identity_placement(send_module, tmp_path, monkeypatch):
+@pytest.mark.parametrize("in_occurrence", [False, True])
+def test_fresh_root_wrappers_accept_only_direct_root_regions(
+    send_module, tmp_path, monkeypatch, in_occurrence
+):
     air, cone, port = air_body()
     _declare(send_module, air, cone, port, _fem(send_module))
-    child = component("Child", [air])
     root = component("Speaker", [body("cabinet", faces=[face("LF")])])
-    occurrence = types.SimpleNamespace(component=child, name="Child:1", fullPathName="Child:1", isVisible=True)
-    root.occurrences.append(occurrence)
-    _, app = _design(send_module, monkeypatch, root)
-    with pytest.raises(send_module.wglink_core.WgLinkError, match="body 'air'.*directly to the root component"):
-        send_module.send(app, {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True})
-    assert list(tmp_path.iterdir()) == []
+    if in_occurrence:
+        child = component("Child", [air])
+        occurrence = types.SimpleNamespace(component=child, name="Child:1", fullPathName="Child:1", isVisible=True)
+        root.occurrences.append(occurrence)
+    else:
+        root.bRepBodies.append(air)
+        air.parentComponent = root
+    design, app = _design(send_module, monkeypatch, root)
+    design = _proxying_root(design)
+    assert design.rootComponent is not design.rootComponent
+    monkeypatch.setattr(send_module.wglink_core, "_design", lambda _app: design)
+    options = {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True}
+    if in_occurrence:
+        with pytest.raises(send_module.wglink_core.WgLinkError, match="body 'air'.*directly to the root component"):
+            send_module.send(app, options)
+        assert list(tmp_path.iterdir()) == []
+    else:
+        report = send_module.send(app, options)
+        assert report["manifest"]["scope"]["fem_regions"][0]["name"] == "Rear chamber"
+        assert list(root.occurrences) == []
 
 
-def test_unreadable_attribute_collection_refuses_by_body_name(send_module, tmp_path, monkeypatch):
-    air, _, _ = air_body()
-    def unreadable(*_args):
-        raise RuntimeError("attributes unavailable")
-    air.attributes.itemByName = unreadable
+@pytest.mark.parametrize("malformed", [False, True])
+def test_failed_direct_lookup_still_reads_a_region_via_tolerant_fallback(
+    send_module, tmp_path, monkeypatch, malformed
+):
+    air, cone, port = air_body()
+    fem = _fem(send_module)
+    _declare(send_module, air, cone, port, fem)
+    if malformed:
+        air.attributes.add("WGLink", fem.REGION_ATTRIBUTE, "malformed")
+    lookup = air.attributes.itemByName
+    failed = False
+    def unavailable_once(group, name):
+        nonlocal failed
+        if name == fem.REGION_ATTRIBUTE and not failed:
+            failed = True
+            raise RuntimeError("attributes unavailable")
+        return lookup(group, name)
+    air.attributes.itemByName = unavailable_once
     root = component("Speaker", [body("cabinet", faces=[face("LF")]), air])
     _, app = _design(send_module, monkeypatch, root)
-    with pytest.raises(send_module.wglink_core.WgLinkError, match="FEM region attribute on body 'air'.*attributes unavailable"):
-        send_module.send(app, {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True})
-    assert list(tmp_path.iterdir()) == []
+    options = {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True}
+    if malformed:
+        with pytest.raises(send_module.wglink_core.WgLinkError, match="body 'air'.*unreadable, malformed"):
+            send_module.send(app, options)
+        assert list(tmp_path.iterdir()) == []
+    else:
+        report = send_module.send(app, options)
+        assert report["manifest"]["scope"]["fem_regions"][0]["name"] == "Rear chamber"
+    assert failed
 
 
 def test_clear_recovery_removes_malformed_body_and_face_attributes(send_module, tmp_path, monkeypatch):

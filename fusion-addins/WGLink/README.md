@@ -236,6 +236,12 @@ plane-wave termination, rigid wall), each with a local size and its faces.
   It exports each region by
   copying the body into a temporary root component, which is deleted again,
   and gates the member to one solid.
+- Send allows only one moving group per drive role across all declared regions.
+  A FEM diaphragm also refuses a role with more than one exterior source channel
+  (for example, `drive-lf` and `drive-lf-2`); the refusal names the role and
+  conflicting regions/groups or sources. Use a different role for each driver.
+  One painted exterior source and one FEM diaphragm on the same role are allowed
+  and share one drive channel as one driver.
 - No meshing happens in Fusion. Faces are described by geometry in the export
   frame and WG matches them to its own gmsh surfaces, so mesh tags stay WG's.
 - `wglink_protocol.validate_fem_regions` is shared by both profiles; the
