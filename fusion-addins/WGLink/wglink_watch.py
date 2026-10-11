@@ -1346,6 +1346,14 @@ def write_fusion_status_payload(bundle_root: Path, payload: Mapping[str, Any]) -
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, marker)
+        if os.name == "posix":
+            # Recovery journals may be removed after this returns: persist
+            # the directory entry as well as the already fsynced file data.
+            directory = os.open(root, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         temporary.unlink(missing_ok=True)
     return marker

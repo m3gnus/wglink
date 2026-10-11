@@ -12,7 +12,6 @@ The former WG Metal pipeline is maintained separately as a frozen fallback. It i
 - [WGLink implementation and development guide](fusion-addins/WGLink/README.md)
 - [Naming a WGLink link](docs/WGLINK-LINK-NAMING.md)
 - [Validating a WGLink change without a release](docs/WGLINK-DEV-LOOP.md)
-- [A5-1 deleted-test coverage map](docs/WGLINK-A5-1-COVERAGE.md)
 - [Headless workflow status](docs/HEADLESS.md)
 - [Retired pipeline guide](docs/WGMETAL-PIPELINE-GUIDE.md)
 

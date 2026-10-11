@@ -9,15 +9,23 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import json
+from itertools import islice
+import os
 from pathlib import Path
 import re
 import time
+import tempfile
 from typing import Any
 
 
 KIND_SOLVE = "prepare_and_solve"
 KIND_SNAPSHOT = "receive_snapshot"
 OUTBOX_DIRECTORY = ".wglink-outbox"
+CLAIM_DIRECTORY = ".wglink-live-claims"
+CLAIM_KINDS = ("insert_link", "update_link", "request_return")
+CLAIM_OUTCOMES = (
+    "applied", "reconciled", "refused", "superseded", "discarded", "recoveryRequired", "failed",
+)
 _SCAN_LIMIT = 400
 _OPERATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 READ_RETRY_SECONDS = 0.5
@@ -99,6 +107,83 @@ class LegacyQueue:
                 if time.monotonic() >= deadline:
                     return False
                 time.sleep(_RETRY_STEP_SECONDS)
+
+    def notice_shown(self, operation_id: str) -> bool:
+        return self.path(operation_id).with_suffix(".notice-shown").is_file()
+
+    def mark_notice_shown(self, operation_id: str) -> None:
+        """Keep the displayed notice acknowledged even if its item is held."""
+
+        path = self.path(operation_id).with_suffix(".notice-shown")
+        descriptor, name = tempfile.mkstemp(prefix=".notice-", dir=self.folder)
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write("shown\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            if os.name == "posix":
+                directory = os.open(self.folder, os.O_RDONLY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+class LegacyClaims:
+    """Bounded reader for the retired claim journal; never delivers requests."""
+
+    def __init__(self, ipc_folder: Path) -> None:
+        self.folder = Path(ipc_folder) / CLAIM_DIRECTORY
+
+    def scan(self, limit: int) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        try:
+            if self.folder.is_symlink():
+                return entries
+            # Bound directory enumeration as well as file size and report count.
+            with os.scandir(self.folder) as iterator:
+                paths = [Path(item.path) for item in islice(iterator, _SCAN_LIMIT)]
+            for path in sorted(paths):
+                if path.suffix != ".json" or path.name.startswith(".") or path.is_symlink():
+                    continue
+                try:
+                    if path.stat().st_size > 256 * 1024:
+                        continue
+                    entry = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, ValueError):
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                generation = entry.get("attemptGeneration")
+                operation = entry.get("operationId")
+                claim = entry.get("claimId")
+                if (entry.get("schemaVersion") != 1
+                        or entry.get("state") not in ("claiming", "claimed", "outcome")
+                        or entry.get("kind") not in CLAIM_KINDS
+                        or type(generation) is not int or generation < 0
+                        or not isinstance(entry.get("request"), dict)
+                        or not isinstance(operation, str) or not _OPERATION_ID.fullmatch(operation)
+                        or path.stem != operation
+                        or not isinstance(claim, str)
+                        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", claim)):
+                    continue
+                entries.append(entry)
+                if len(entries) >= limit:
+                    break
+        except (OSError, UnicodeError, ValueError):
+            pass
+        return entries
+
+    def delete(self, operation_id: str) -> bool:
+        try:
+            (self.folder / (operation_id + ".json")).unlink(missing_ok=True)
+            return True
+        except OSError:
+            return False
 
 
 def convert_outbox(ipc_folder: Path, *, solve_files: Any) -> dict[str, list[str]]:

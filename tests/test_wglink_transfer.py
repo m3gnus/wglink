@@ -805,7 +805,7 @@ def test_startup_settles_earlier_answers_without_resending(monkeypatch, tmp_path
     fixture.module._convert_outbox_at_startup()
     assert _inbox(fixture.ipc) == [] and not path.exists()
     assert len(fixture.ui.messages) == (0 if outcome == "delivered" else 1)
-    if outcome != "delivered":
+    if outcome == "rejected":
         assert "earlier WG reason" in fixture.ui.messages[0][1]
         assert "new request" in fixture.ui.messages[0][1]
 
@@ -865,3 +865,42 @@ def test_earlier_refusal_is_kept_until_its_notice_can_be_shown(monkeypatch, tmp_
     fixture.module._convert_outbox_at_startup()
     assert not path.exists() and _inbox(fixture.ipc) == []
     assert "malformed" in fixture.ui.messages[-1][1]
+
+
+@pytest.mark.parametrize("outcome,wording", [
+    ("rejected", "did not accept"),
+    ("conflict", "already names a different request"),
+    ("expired", "within 7 days"),
+])
+@pytest.mark.parametrize("kind,command", [(SNAPSHOT, "Send to WG"), (SOLVE, "Solve in WG")])
+def test_earlier_delivery_notice_names_its_actual_outcome(
+    monkeypatch, tmp_path, outcome, wording, kind, command,
+):
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_earlier_notice")
+    _queued(fixture.ipc, kind, "settled-1", answered=True)
+    path = fixture.ipc / ".wglink-outbox" / "settled-1.json"
+    item = json.loads(path.read_text())
+    item["answer"] = {"outcome": outcome, "reason": "snapshot_invalid", "message": "malformed"}
+    path.write_text(json.dumps(item))
+    fixture.module._convert_outbox_at_startup()
+    text = fixture.ui.messages[-1][1]
+    assert wording in text and command in text and "settled-1" in text
+    if outcome == "rejected":
+        assert "malformed" in text and "snapshot_invalid" in text
+    else:
+        assert "did not accept" not in text
+
+
+def test_earlier_delivery_notice_is_shown_once_when_delete_fails(monkeypatch, tmp_path):
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_held_notice")
+    _queued(fixture.ipc, SNAPSHOT, "settled-1", answered=True)
+    path = fixture.ipc / ".wglink-outbox" / "settled-1.json"
+    item = json.loads(path.read_text())
+    item["answer"] = {"outcome": "rejected", "message": "malformed"}
+    path.write_text(json.dumps(item))
+    monkeypatch.setattr(fixture.module.wglink_legacy_queue.LegacyQueue, "delete", lambda *args: False)
+    fixture.module._convert_outbox_at_startup()
+    fixture.module._convert_outbox_at_startup()
+    assert len(fixture.ui.messages) == 1
+    # A new queue object reads the durable marker on the next startup.
+    assert fixture.module.wglink_legacy_queue.LegacyQueue(fixture.ipc).notice_shown("settled-1")

@@ -215,6 +215,7 @@ _RECENT_OUTCOMES_LIMIT = 16
 # Interrupted file claims wait until their exact target document is active.
 # They are settled read-only and never replayed.
 _deferred_file_claims: list[object] = []
+_legacy_claims_pending = True
 
 # -- the activation boundary (STEP2 section 4) ---------------------------------
 #
@@ -1473,18 +1474,14 @@ def _convert_outbox_at_startup() -> None:
                 continue
             operation_id = item["operationId"]
             outcome = str(answer.get("outcome") or "rejected")
-            if outcome != "delivered":
+            if outcome != "delivered" and not queue.notice_shown(operation_id):
                 if _ui() is None:
                     continue
-                command = "Solve in WG" if item["kind"] == wglink_watch.KIND_PREPARE_AND_SOLVE else "Send to WG"
-                reason = str(answer.get("message") or answer.get("reason") or outcome)
                 _modal(
-                    f"Waveguide Generator did not accept the earlier {command} "
-                    f"(request {operation_id}): {reason}\n\n"
-                    "WGLink does not send it again by itself. Send it again from "
-                    "Fusion if you still want it; that is a new request.",
+                    _delivery_notice_text({**item, **answer}),
                     f"{PANEL_NAME} earlier delivery to WG",
                 )
+                queue.mark_notice_shown(operation_id)
             _note_outcome("outbox", operation_id, outcome)
             queue.delete(operation_id)
         result = wglink_legacy_queue.convert_outbox(
@@ -1522,6 +1519,36 @@ def _convert_outbox_at_startup() -> None:
             "Fusion. Their returns are still in the WGLink folder.",
             f"{PANEL_NAME} earlier sends not delivered",
         )
+
+
+def _delivery_notice_text(notice: dict[str, object]) -> str:
+    """Describe the final answer, including a locally expired delivery."""
+
+    what = "Solve in WG" if notice.get("kind") == wglink_legacy_queue.KIND_SOLVE else "Send to WG"
+    sent = str(notice.get("createdAt") or "earlier")
+    operation = str(notice.get("operationId") or "?")
+    outcome = notice.get("outcome")
+    if outcome == "rejected":
+        reason = str(notice.get("reason") or "")
+        detail = str(notice.get("message") or "") or "WG gave no message"
+        return (
+            f"Waveguide Generator did not accept the return from {what} (sent {sent}, "
+            f"operation {operation}): {detail}"
+            f"{f' [{reason}]' if reason else ''}\n\n"
+            "WGLink does not send it again by itself. Send it again from Fusion if you "
+            "still want it; that is a new request."
+        )
+    if outcome == "conflict":
+        return (
+            f"Waveguide Generator refused the return from {what} (sent {sent}): its "
+            f"operation id {operation} already names a different request, so nothing "
+            "changed in WG. Send it again from Fusion."
+        )
+    return (
+        f"The return from {what} (sent {sent}, operation {operation}) could not be "
+        "delivered to Waveguide Generator within 7 days and was removed from WGLink's "
+        "queue. Send it again from Fusion if you still want it."
+    )
 
 
 def _show_export_progress(operation: str) -> object | None:
@@ -2770,7 +2797,7 @@ def _fusion_snapshot() -> dict[str, object]:
     }
 
 
-def _publish_fusion_status(snapshot: dict[str, object] | None = None) -> None:
+def _publish_fusion_status(snapshot: dict[str, object] | None = None) -> bool:
     """Best-effort owner presence for WG; every Fusion read stays on this thread.
 
     Counted on entry, whoever calls it: with automatic coordination off it is
@@ -2779,17 +2806,17 @@ def _publish_fusion_status(snapshot: dict[str, object] | None = None) -> None:
 
     wglink_activity.record(wglink_activity.STATUS_PUBLICATION)
     if not _owns_active_ipc_lease():
-        return
+        return False
 
     folder = wglink_workspace.ipc_folder(create=True)
     if folder is None:
-        return
+        return False
     current = snapshot if snapshot is not None else _fusion_snapshot()
     if current.get("links_inspected") is False and current.get("document_name") is not None:
         # The document's links could not be read. Publishing its link list
         # empty would tell WG "this document has no links"; the last status
         # stands instead, and ages out on WG's side as it would with no add-in.
-        return
+        return False
     diagnostics = dict(current.get("diagnostics") or {})
     # How this add-in is configured, from its own mouth, so a comparison run
     # records its configuration from the components rather than from notes.
@@ -2811,11 +2838,12 @@ def _publish_fusion_status(snapshot: dict[str, object] | None = None) -> None:
             applying_operation=current.get("applying_operation"),
         )
     except Exception:  # noqa: BLE001 - presence must never block CAD commands
-        return
+        return False
     try:
         wglink_watch.write_fusion_status_payload(folder, payload)
     except Exception:  # noqa: BLE001 - presence must never block CAD commands
-        pass
+        return False
+    return True
 
 
 def _apply_announced_updates(announcements: list) -> None:
@@ -3444,6 +3472,146 @@ def _notice_outdated_wg() -> None:
     _modal(wglink_watch.WG_OUTDATED_MESSAGE, f"{PANEL_NAME} cannot read this request")
 
 
+def _legacy_claim_outcome(entry: dict, snapshot: dict[str, object]) -> str | None:
+    """Read model or journal evidence; uncertainty never proves success."""
+
+    operation_id = entry["operationId"]
+    request = entry["request"]
+    mutating = entry["kind"] != "request_return"
+    export_id = str(request.get("exportId") or "")
+    destination = request.get("destination")
+    if not isinstance(destination, dict):
+        destination = {}
+    expected_document = request.get("expectedDocumentId") or (
+        destination.get("value") if destination.get("kind") == "document" else None
+    )
+    document_matches = not expected_document or expected_document == snapshot.get("document_id")
+    links = _link_evidence(snapshot) if document_matches else None
+    if mutating and export_id and links is not None and _reconciled(operation_id, export_id, links):
+        return "reconciled"
+    record = entry.get("outcome") if entry["state"] == "outcome" else None
+    if isinstance(record, dict):
+        outcome = record.get("outcome")
+        if outcome in ("applied", "reconciled"):
+            if not mutating:
+                return "applied" if outcome == "applied" else "failed"
+            evidence = record.get("evidence")
+            if (export_id and isinstance(evidence, dict)
+                    and evidence.get("operationId") == operation_id
+                    and evidence.get("exportId") == export_id):
+                # WG checks a reconciled report against its target document.
+                # Keep a known completion until that document is open.
+                return "reconciled" if document_matches else None
+        elif outcome in wglink_legacy_queue.CLAIM_OUTCOMES:
+            if outcome == "recoveryRequired" and not mutating:
+                return "failed"
+            # A journaled failure during a mutation may have left partial work.
+            return "recoveryRequired" if mutating and outcome == "failed" else str(outcome)
+    if mutating and document_matches and _interrupted(operation_id, snapshot.get("applying_operation")):
+        return "recoveryRequired"
+    if entry["state"] == "claiming":
+        # This state was never handed to Fusion's main thread.
+        return "discarded"
+    return "recoveryRequired" if mutating else "failed"
+
+
+def _settle_legacy_claims(snapshot: dict[str, object]) -> None:
+    """Publish retired HTTP claims through the file outcome channel, read-only.
+
+    Each bounded batch fits WG's recent-outcome window. A claim is removed
+    only after the atomic, fsynced status publication succeeds. A held claim
+    whose exact outcome is already in that file is only removed, not reported
+    again. Unknown mutations need recovery; an interrupted return is failed.
+    """
+
+    global _legacy_claims_pending
+    ipc = wglink_workspace.ipc_folder()
+    if ipc is None:
+        return
+    journal = wglink_legacy_queue.LegacyClaims(ipc)
+    entries = journal.scan(_RECENT_OUTCOMES_LIMIT)
+    _legacy_claims_pending = bool(entries)
+    if not entries:
+        return
+    try:
+        path = Path(ipc) / wglink_watch.FUSION_STATUS_FILENAME
+        if path.is_symlink() or path.stat().st_size > 256 * 1024:
+            raise ValueError("Unsafe status file")
+        previous = json.loads(path.read_text(encoding="utf-8"))
+        published = previous.get("diagnostics", {}).get("recentOutcomes", [])
+        if previous.get("schemaVersion") != 1 or previous.get("cadApplication") != "fusion360":
+            published = []
+    except (OSError, ValueError, TypeError, AttributeError):
+        published = []
+    if not isinstance(published, list):
+        published = []
+    # Preserve the already published outcomes if a fresh registration is
+    # cleaning up a held journal. Deduplicate by correlation, newest last.
+    for item in published[-_RECENT_OUTCOMES_LIMIT:]:
+        if (isinstance(item, dict) and item.get("channel") in ("handoff", "returnRequest")
+                and isinstance(item.get("requestId"), str)
+                and item.get("outcome") in wglink_legacy_queue.CLAIM_OUTCOMES
+                and not any(existing["channel"] == item["channel"]
+                            and existing["requestId"] == item["requestId"] for existing in _recent_outcomes)):
+            _recent_outcomes.append(dict(item))
+    ready = []
+    refusal = None
+    for entry in entries:
+        channel = "returnRequest" if entry["kind"] == "request_return" else "handoff"
+        earlier = next((item for item in reversed(published)
+                        if isinstance(item, dict) and item.get("channel") == channel
+                        and item.get("requestId") == entry["operationId"]
+                        and item.get("outcome") in wglink_legacy_queue.CLAIM_OUTCOMES), None)
+        # Once published, a held journal is cleanup work. A later undo or
+        # document switch must not change its already reported completion.
+        outcome = earlier["outcome"] if earlier is not None else _legacy_claim_outcome(entry, snapshot)
+        if outcome == "reconciled":
+            request = entry["request"]
+            destination = request.get("destination")
+            if not isinstance(destination, dict):
+                destination = {}
+            expected = request.get("expectedDocumentId") or (
+                destination.get("value") if destination.get("kind") == "document" else None
+            )
+            if expected and expected != snapshot.get("document_id"):
+                # A fresh report in another document would no longer be
+                # acceptable evidence to WG. Keep the journal until it is.
+                continue
+        if outcome is None:
+            continue
+        # WG reads mutation refusals from the single lastRequest slot. Keep
+        # further refusals journaled for a later pass rather than overwriting
+        # their only readable report in this same batch.
+        if outcome == "refused" and channel == "handoff":
+            if refusal is not None:
+                continue
+            refusal = entry["operationId"]
+        item = {"channel": channel, "requestId": entry["operationId"], "outcome": outcome}
+        _recent_outcomes[:] = [existing for existing in _recent_outcomes
+                              if (existing["channel"], existing["requestId"])
+                              != (channel, entry["operationId"])]
+        if item not in published:
+            _note_outcome(channel, entry["operationId"], outcome)
+        else:
+            _recent_outcomes.append(item)
+            del _recent_outcomes[:-_RECENT_OUTCOMES_LIMIT]
+        _begin_request(channel, entry["operationId"], DELIVERY)["outcome"] = outcome
+        ready.append(entry)
+    if ready:
+        if refusal is not None:
+            _begin_request("handoff", refusal, DELIVERY)["outcome"] = "refused"
+        report = snapshot
+        if snapshot.get("links_inspected") is False:
+            # No reading means no document observation. An outcome can still
+            # report recovery without advertising an empty link list.
+            report = {**snapshot, "document_name": None, "document_id": None, "links": []}
+        if not _publish_fusion_status(report):
+            return
+    for entry in ready:
+        journal.delete(entry["operationId"])
+    _legacy_claims_pending = bool(journal.scan(1))
+
+
 def _settle_claims(snapshot: dict[str, object]) -> None:
     """Settle interrupted claims read-only: once per session, then as documents open.
 
@@ -3452,6 +3620,8 @@ def _settle_claims(snapshot: dict[str, object]) -> None:
     """
 
     with wglink_activity.because(wglink_activity.CAUSE_CLAIM_SETTLEMENT):
+        if _legacy_claims_pending:
+            _settle_legacy_claims(snapshot)
         if not _claims_swept:
             _sweep_leftover_claims(snapshot)
         elif _deferred_file_claims and snapshot.get("document_id") is not None:
@@ -3461,7 +3631,7 @@ def _settle_claims(snapshot: dict[str, object]) -> None:
 
 
 def _claims_outstanding() -> bool:
-    return not _claims_swept or bool(_deferred_file_claims)
+    return not _claims_swept or bool(_deferred_file_claims) or _legacy_claims_pending
 
 
 def _on_watch_tick() -> None:
@@ -3607,11 +3777,13 @@ def _command_finished() -> None:
     """A WGLink command or modal released the main thread: re-drive what waited.
 
     ``_command_busy`` defers work rather than dropping it. The watch tick used
-    to be the retry; this is the retry that does not need one. Queued follow-ups are re-raised when the command releases the thread.
+    to be the retry; this is the retry that does not need one. Queued follow-ups
+    are re-raised when the command releases the thread.
     """
 
     if _followups:
         _raise_followup_event()
+
 
 def _after_command() -> None:
     """What a finished command owes WG and itself when no tick runs.
@@ -3696,12 +3868,13 @@ def _stop_candidate(app: object) -> None:
 def _start_watch(app: object) -> bool:
     global _watch_event, _watch_handler, _watch_stop, _watch_thread
     global _handoff_attempted_id, _return_request_attempted_id, _request_trace
-    global _claims_swept, _wg_outdated_noticed
+    global _claims_swept, _wg_outdated_noticed, _legacy_claims_pending
     _watcher.reset()
     _handoff_attempted_id = None
     _return_request_attempted_id = None
     _request_trace = None
     _claims_swept = False
+    _legacy_claims_pending = True
     _wg_outdated_noticed = False
     _recent_outcomes.clear()
     _deferred_file_claims.clear()
@@ -3937,7 +4110,10 @@ def _build_owner(app: object, ui: object) -> None:
         # loads before the user opens a model. :func:`_note_active_document`
         # asks when the document is actually seen, on this very publish when
         # one is already open and on the first tick that finds one otherwise.
-        _publish_fusion_status()
+        snapshot = _fusion_snapshot()
+        with wglink_activity.because(wglink_activity.CAUSE_CLAIM_SETTLEMENT):
+            _settle_legacy_claims(snapshot)
+        _publish_fusion_status(snapshot)
     except Exception:
         _stop_watch(app)
         _delete_owned_ui(ui)
