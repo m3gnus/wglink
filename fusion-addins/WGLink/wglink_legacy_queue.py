@@ -154,7 +154,7 @@ class LegacyClaims:
                     if path.stat().st_size > 256 * 1024:
                         continue
                     entry = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, UnicodeError, ValueError):
+                except (OSError, UnicodeError, ValueError, RecursionError):
                     continue
                 if not isinstance(entry, dict):
                     continue
@@ -174,7 +174,7 @@ class LegacyClaims:
                 entries.append(entry)
                 if len(entries) >= limit:
                     break
-        except (OSError, UnicodeError, ValueError):
+        except (OSError, UnicodeError, ValueError, RecursionError):
             pass
         return entries
 

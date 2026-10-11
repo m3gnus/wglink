@@ -210,3 +210,14 @@ def test_legacy_refusals_do_not_overwrite_the_single_readable_result(monkeypatch
     status = json.loads((ipc / ".fusion-status.json").read_text())
     assert status["diagnostics"]["lastRequest"]["correlationId"] == "req-1"
     assert status["diagnostics"]["lastRequest"]["outcome"] == "refused"
+
+
+def test_deeply_nested_journal_entry_is_skipped_not_raised(tmp_path, monkeypatch):
+    """A corrupt journal must never stop the add-in from loading."""
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "fusion-addins" / "WGLink"))
+    import wglink_legacy_queue
+
+    claims = tmp_path / wglink_legacy_queue.CLAIM_DIRECTORY
+    claims.mkdir(parents=True)
+    (claims / "op-1.json").write_text("[" * 100000, encoding="utf-8")
+    assert wglink_legacy_queue.LegacyClaims(tmp_path).scan(16) == []

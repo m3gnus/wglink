@@ -3541,7 +3541,7 @@ def _settle_legacy_claims(snapshot: dict[str, object]) -> None:
         published = previous.get("diagnostics", {}).get("recentOutcomes", [])
         if previous.get("schemaVersion") != 1 or previous.get("cadApplication") != "fusion360":
             published = []
-    except (OSError, ValueError, TypeError, AttributeError):
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
         published = []
     if not isinstance(published, list):
         published = []
@@ -4111,8 +4111,11 @@ def _build_owner(app: object, ui: object) -> None:
         # asks when the document is actually seen, on this very publish when
         # one is already open and on the first tick that finds one otherwise.
         snapshot = _fusion_snapshot()
-        with wglink_activity.because(wglink_activity.CAUSE_CLAIM_SETTLEMENT):
-            _settle_legacy_claims(snapshot)
+        try:
+            with wglink_activity.because(wglink_activity.CAUSE_CLAIM_SETTLEMENT):
+                _settle_legacy_claims(snapshot)
+        except Exception as exc:  # noqa: BLE001 - an unreadable old journal never blocks loading
+            _log(f"[{PANEL_NAME}] could not settle requests claimed by an earlier version: {exc}")
         _publish_fusion_status(snapshot)
     except Exception:
         _stop_watch(app)
