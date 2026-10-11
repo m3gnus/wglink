@@ -488,6 +488,29 @@ def _confirm_detach() -> bool:
     return answer == accepted
 
 
+def _confirm_clear_fem() -> bool:
+    """Offer recovery on the command's main thread even when FEM UI is hidden."""
+
+    ui = _ui()
+    message_box = getattr(ui, "messageBox", None) if ui is not None else None
+    try:
+        yes_no = adsk.core.MessageBoxButtonTypes.YesNoButtonType
+        question = adsk.core.MessageBoxIconTypes.QuestionIconType
+        accepted = adsk.core.DialogResults.DialogYes
+    except AttributeError:
+        return False
+    if not callable(message_box):
+        return False
+    answer = message_box(
+        "This design declares FEM regions, which this Waveguide Generator does not offer. "
+        "Clear the FEM declarations and continue without them?",
+        f"{PANEL_NAME} — clear FEM declarations",
+        yes_no,
+        question,
+    )
+    return answer == accepted
+
+
 def _confirm_source_adoption(role: str, faces: int) -> bool:
     """Ask before assigning a random identity to paint in an unsaved document.
 
@@ -1700,6 +1723,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                     _app(),
                     send_options if send_options is not None else _send_options(inputs),
                     confirm_adoption=_confirm_source_adoption,
+                    confirm_clear_fem=_confirm_clear_fem,
                 )
                 exported = True
                 if report.get("adopted_sources") and not report.get("save_source_identities"):
@@ -3477,7 +3501,8 @@ def _execute_return_request(
             **_required_manifest_features(),
         }
         # This path holds ``_command_busy`` while adoption may prompt the user.
-        wglink_send.send(_app(), options, confirm_adoption=_confirm_source_adoption)
+        wglink_send.send(_app(), options, confirm_adoption=_confirm_source_adoption,
+                         confirm_clear_fem=_confirm_clear_fem)
         outcome = "applied"
     except wglink_core.WgLinkError as exc:
         outcome = "refused"

@@ -257,3 +257,48 @@ def test_the_command_executes_and_clearing_takes_it_all_back_off(fixture):
     assert report["summary"] == "Cleared the FEM region and its surface groups."
     assert air.attributes.values == {}
     assert all(face.attributes.values == {} for face in faces)
+
+
+@pytest.mark.parametrize("accept", [True, False])
+def test_clear_recovery_prompt_works_without_registering_fem(fixture, monkeypatch, accept):
+    module = fixture.module
+    _capabilities(fixture, {"schemaVersion": 1})
+    calls = []
+    def prompt(text, title, buttons, icon):
+        calls.append((text, buttons, icon))
+        return module.adsk.core.DialogResults.DialogYes if accept else module.adsk.core.DialogResults.DialogNo
+    monkeypatch.setattr(fixture.ui, "messageBox", prompt)
+    module.run(None)
+    try:
+        assert fixture.ui.commandDefinitions.itemById(module.COMMANDS["fem"][0]) is None
+        assert module._confirm_clear_fem() is accept
+        assert calls == [(
+            "This design declares FEM regions, which this Waveguide Generator does not offer. "
+            "Clear the FEM declarations and continue without them?",
+            module.adsk.core.MessageBoxButtonTypes.YesNoButtonType,
+            module.adsk.core.MessageBoxIconTypes.QuestionIconType,
+        )]
+    finally:
+        module.stop(None)
+
+
+@pytest.mark.parametrize("operation", ["send", "solve"])
+def test_send_and_solve_wire_the_clear_prompt_on_the_command_thread(fixture, monkeypatch, operation):
+    import threading
+
+    module = fixture.module
+    _capabilities(fixture, {"schemaVersion": 1})
+    monkeypatch.setattr(module, "_send_options", lambda _inputs: {})
+    monkeypatch.setattr(module, "_require_compatible_wg", lambda **_kwargs: None)
+    monkeypatch.setattr(module.CommandExecuteHandler, "_admit_backend", lambda *_args: False)
+    monkeypatch.setattr(module, "_submit_to_wg", lambda *_args: "request")
+    command_thread = threading.get_ident()
+    calls = []
+    def send(_app, _options, **kwargs):
+        calls.append((kwargs["confirm_clear_fem"], threading.get_ident()))
+        return {"bundle_path": "return.wgreturn", "return_id": "wgr_test", "scope": {"status": "clean"}, "sources": []}
+    monkeypatch.setattr(module.wglink_send, "send", send)
+    module.CommandExecuteHandler(operation).notify(types.SimpleNamespace(
+        command=types.SimpleNamespace(commandInputs=_dialog_inputs())
+    ))
+    assert calls == [(module._confirm_clear_fem, command_thread)]

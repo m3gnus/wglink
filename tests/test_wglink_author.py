@@ -466,3 +466,11 @@ def test_automatic_domain_and_recorded_cuts_are_visible_in_preflight(author):
 
     assert "Domain: Automatic (WG decides)" in summary.lines
     assert "Cut: Split Body 3 at x = 0" in summary.lines
+
+
+@pytest.mark.parametrize("name", ["moving chamber", "moving interface"])
+def test_fem_preflight_uses_driven_boolean_not_region_text(author, name):
+    summary = author.preflight_summary(clean_scope(sources=[], fem_regions=[f"FEM region: {name} (8 mm; 1 interface)"], fem_driven=False))
+    assert author.NO_SOURCE_WARNING in summary.warnings
+    driven = author.preflight_summary(clean_scope(sources=[], fem_regions=["FEM region: Chamber"], fem_driven=True))
+    assert driven.warnings == ()

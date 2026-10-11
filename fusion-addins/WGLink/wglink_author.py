@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import html
 import math
+import re
 from typing import Any, Mapping, Sequence
 
 if __package__:
@@ -53,6 +54,20 @@ CLEAR_SOURCE_LABEL = "Clear WG source"
 # canonical role -- so existing habits and any saved dropdown selection do not
 # start erroring.
 LEGACY_SOURCE_ROLE_ALIASES = wglink_protocol.LEGACY_SOURCE_ROLE_ALIASES
+
+def source_ids(role: str, used: set[str]) -> tuple[str, str]:
+    """Allocate the source and drive ids shared by exterior and FEM authoring."""
+
+    base = re.sub(r"[^a-z0-9]+", "-", role.strip().lower()).strip("-") or "unnamed"
+    suffix = ""
+    index = 2
+    while f"source-{base}{suffix}" in used:
+        suffix = f"-{index}"
+        index += 1
+    source_id = f"source-{base}{suffix}"
+    used.add(source_id)
+    return source_id, f"drive-{base}{suffix}"
+
 
 # Every appearance name that counts as an already-painted source: the current
 # roles plus every retired spelling. Recognition (a face someone already
@@ -567,7 +582,7 @@ def preflight_summary(scope: Mapping[str, Any]) -> Preflight:
     fem_lines = [str(line) for line in (scope.get("fem_regions") or ())]
     lines.extend(fem_lines)
     fem_region_error = str(scope.get("fem_region_error") or "").strip()
-    fem_driven = any("moving" in line for line in fem_lines if line.startswith("FEM region:"))
+    fem_driven = scope.get("fem_driven") is True
 
     warnings: list[str] = []
     if domain_error:

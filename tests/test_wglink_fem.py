@@ -49,6 +49,7 @@ def test_plan_stores_region_and_groups():
     assert stored["groups"][0] == {
         "group_id": "cone", "name": "Cone", "kind": "moving", "mesh_size_mm": 3.0,
         "drive_role": "LF", "declared_area_mm2": 200.0,
+        "declared_face_count": 2, "declared_face_ids": list(plan.groups[0].face_ids),
     }
     assert fem.read_face_attribute(plan.face_attribute(plan.groups[1])) == (
         "rear-chamber", "port-exit",
@@ -119,10 +120,16 @@ def _descriptor(z=0.0):
             "bbox_mm": [[-5.0, -5.0, z], [5.0, 5.0, z]]}
 
 
+def _export(object_id, declaration, faces_by_group):
+    ids = {group["group_id"]: group["declared_face_ids"][:len(faces_by_group.get(group["group_id"], ()))]
+           for group in declaration["groups"]}
+    return fem.RegionExport(object_id, declaration, faces_by_group, ids)
+
+
 def _region_records():
     declaration = fem.read_region_attribute(_plan().body_attribute())
     return fem.plan_fem_regions([
-        fem.RegionExport(
+        _export(
             object_id="body-1",
             declaration=declaration,
             faces_by_group={"cone": [_descriptor(1.0), _descriptor()], "port-exit": [_descriptor(9.0)]},
@@ -135,7 +142,7 @@ def test_plan_fem_regions_builds_manifest_records():
     assert record["file"] == "fem-regions/rear-chamber.step"
     assert record["n_bodies_expected"] == 1
     cone, port = record["surface_groups"]
-    assert cone["drive_channel_id"] == "drive-LF"
+    assert cone["drive_channel_id"] == "drive-lf"
     assert "drive_channel_id" not in port
     assert [face["centroid_mm"][2] for face in cone["faces"]] == [0.0, 1.0]
     lines = fem.preflight_lines([record])
@@ -145,12 +152,12 @@ def test_plan_fem_regions_builds_manifest_records():
 def test_plan_fem_regions_refuses_lost_faces_and_copies():
     declaration = fem.read_region_attribute(_plan().body_attribute())
     with pytest.raises(fem.FemDeclarationError, match="has no faces left"):
-        fem.plan_fem_regions([fem.RegionExport("b", declaration,
+        fem.plan_fem_regions([_export("b", declaration,
                                              {"cone": [_descriptor(), _descriptor()]})])
     faces = {"cone": [_descriptor(), _descriptor()], "port-exit": [_descriptor()]}
     with pytest.raises(fem.FemDeclarationError, match="Two bodies declare"):
-        fem.plan_fem_regions([fem.RegionExport("a", declaration, faces),
-                              fem.RegionExport("b", declaration, faces)])
+        fem.plan_fem_regions([_export("a", declaration, faces),
+                              _export("b", declaration, faces)])
 
 
 @pytest.mark.parametrize("area_cm2", [None, 0, -1, float("nan"), float("inf"), "bad"])
@@ -166,11 +173,11 @@ def test_declaration_requires_measurable_face_areas(area_cm2):
 ])
 def test_group_area_drift_threshold(current, accepted):
     declaration = fem.read_region_attribute(_plan().body_attribute())
-    changed = {**_descriptor(), "area_mm2": current}
-    export = fem.RegionExport("b", declaration,
-                              {"cone": [changed], "port-exit": [_descriptor()]})
+    changed = {**_descriptor(), "area_mm2": current / 2}
+    export = _export("b", declaration,
+                              {"cone": [changed, changed], "port-exit": [_descriptor()]})
     if accepted:
-        assert fem.plan_fem_regions([export])[0]["surface_groups"][0]["faces"] == [changed]
+        assert fem.plan_fem_regions([export])[0]["surface_groups"][0]["faces"] == [changed, changed]
     else:
         with pytest.raises(fem.FemDeclarationError, match="'Cone'.*'Rear Chamber'.*more than 1 %"):
             fem.plan_fem_regions([export])
@@ -183,7 +190,7 @@ def test_old_or_invalid_area_baseline_requires_redeclaration(baseline):
         del declaration["groups"][0]["declared_area_mm2"]
     else:
         declaration["groups"][0]["declared_area_mm2"] = baseline
-    export = fem.RegionExport("b", declaration,
+    export = _export("b", declaration,
                               {"cone": [_descriptor(), _descriptor()], "port-exit": [_descriptor()]})
     with pytest.raises(fem.FemDeclarationError, match="'Cone'.*'Rear Chamber'.*re-declare this region"):
         fem.plan_fem_regions([export])
@@ -266,7 +273,7 @@ def _mutations():
         del m["scope"]["fem_regions"][0]["surface_groups"][0]["drive_channel_id"]
 
     def channel_on_wall(m):
-        m["scope"]["fem_regions"][0]["surface_groups"][1]["drive_channel_id"] = "drive-LF"
+        m["scope"]["fem_regions"][0]["surface_groups"][1]["drive_channel_id"] = "drive-lf"
 
     def no_faces(m):
         m["scope"]["fem_regions"][0]["surface_groups"][1]["faces"] = []
@@ -309,3 +316,40 @@ def test_both_profiles_refuse_malformed_regions(fixture, profile, mutate, messag
     mutate(manifest)
     with pytest.raises(protocol.ProtocolValidationError, match=message):
         protocol.validate_structure(manifest, profile)
+
+
+@pytest.mark.parametrize(("fixture", "profile"), PROFILES)
+@pytest.mark.parametrize("count", [True, 1.0, "1", None])
+def test_region_body_count_requires_an_integer(fixture, profile, count):
+    manifest = _with_regions(_base(fixture))
+    manifest["scope"]["fem_regions"][0]["n_bodies_expected"] = count
+    with pytest.raises(protocol.ProtocolValidationError, match="n_bodies_expected.*exactly 1"):
+        protocol.validate_structure(manifest, profile)
+
+
+@pytest.mark.parametrize(("fixture", "profile"), PROFILES)
+@pytest.mark.parametrize("record", ["region", "group", "face", "medium"])
+def test_fem_records_refuse_unknown_members(fixture, profile, record):
+    manifest = _with_regions(_base(fixture))
+    region = manifest["scope"]["fem_regions"][0]
+    group = region["surface_groups"][0]
+    target = {"region": region, "group": group, "face": group["faces"][0], "medium": region["medium"]}[record]
+    target["unexpected"] = 1
+    with pytest.raises(protocol.ProtocolValidationError, match="unknown member.*unexpected"):
+        protocol.validate_structure(manifest, profile)
+
+
+@pytest.mark.parametrize(("fixture", "profile"), PROFILES)
+@pytest.mark.parametrize("channel", ["drive-LF", "drive-lf ", "lf", "drive-", "drive-lf/2", "drive-lf--2"])
+def test_fem_drive_id_uses_exterior_pattern(fixture, profile, channel):
+    manifest = _with_regions(_base(fixture))
+    manifest["scope"]["fem_regions"][0]["surface_groups"][0]["drive_channel_id"] = channel
+    with pytest.raises(protocol.ProtocolValidationError, match="exterior source drive-id pattern"):
+        protocol.validate_structure(manifest, profile)
+
+
+def test_shared_source_allocator_keeps_exterior_collision_suffixes():
+    used = set()
+    assert fem.wglink_author.source_ids("LF", used) == ("source-lf", "drive-lf")
+    assert fem.wglink_author.source_ids("LF", used) == ("source-lf-2", "drive-lf-2")
+    assert fem.drive_channel_for_role("LF") == "drive-lf"

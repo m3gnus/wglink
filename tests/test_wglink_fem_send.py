@@ -162,7 +162,8 @@ def test_send_exports_a_hidden_region_on_its_own(send_module, tmp_path, monkeypa
     assert manifest["files"][region["file"]]["purpose"] == "fem-region"
     assert send_module.count_step_bodies(bundle / region["file"]) == 1
     cone_group, port_group = region["surface_groups"]
-    assert cone_group["drive_channel_id"] == "drive-LF"
+    assert cone_group["drive_channel_id"] == "drive-lf"
+    assert manifest["sources"][0]["default_drive_channel_id"] == cone_group["drive_channel_id"]
     assert cone_group["faces"] == [{
         "area_mm2": 400.0,
         "centroid_mm": [0.0, 0.0, 0.0],
@@ -215,10 +216,7 @@ def test_a_wg_without_the_capability_refuses_a_design_with_regions(send_module, 
             types.SimpleNamespace(version="1"),
             {"output_folder": str(tmp_path), "capture_document": False},
         )
-    assert str(refusal.value) == (
-        "This Waveguide Generator does not offer FEM regions "
-        "(update it, or turn FEM regions on). Clear the declarations to send without them."
-    )
+    assert str(refusal.value) == fem.UNAVAILABLE_MESSAGE
     assert list(tmp_path.iterdir()) == []
 
 
@@ -303,3 +301,172 @@ def test_preflight_lists_regions_and_accepts_a_fem_driver(send_module, monkeypat
     summary = author.preflight_summary(report)
     assert "FEM region: Rear chamber (8 mm; 1 interface, 1 moving)" in summary.lines
     assert summary.warnings == ()
+
+
+@pytest.mark.parametrize("edit", ["small-loss", "compensating-growth", "same-count-replacement"])
+def test_membership_loss_cannot_hide_in_total_area(send_module, tmp_path, monkeypatch, edit):
+    fem = _fem(send_module)
+    air, cone, port = air_body()
+    cone.area, port.area = 9.95, 0.05  # 995 + 5 mm²
+    plan = fem.plan_region_declaration(
+        name="Rear chamber", mesh_size_mm=8, body_is_solid=True,
+        groups=[{"name": "Cone", "kind": "moving", "drive_role": "LF", "mesh_size_mm": 3,
+                 "faces": [{"key": item.entityToken, "body_matches": True, "area_cm2": item.area}
+                           for item in (cone, port)]}],
+    )
+    send_module.declare_fem_region(air, plan, {"cone": [cone, port]})
+    port.attributes = Attributes()
+    if edit == "compensating-growth":
+        cone.area = 10.0
+    elif edit == "same-count-replacement":
+        wall = air.faces[2]
+        wall.area = 0.05
+        wall.attributes.add("WGLink", fem.FACE_ATTRIBUTE,
+                            fem.face_attribute(plan.region_id, "cone", "replacement"))
+    root = component("Speaker", [body("cabinet", faces=[face("LF")]), air])
+    design, app = _design(send_module, monkeypatch, root)
+    exports = []
+    monkeypatch.setattr(design.exportManager, "execute", lambda options: exports.append(options))
+    with pytest.raises(send_module.wglink_core.WgLinkError, match="'Cone'.*membership changed"):
+        send_module.send(app, {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True})
+    assert exports == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_region_ungrouped_wall_geometry_changes_return_hash(send_module, monkeypatch):
+    air, cone, port = air_body()
+    _declare(send_module, air, cone, port, _fem(send_module))
+    root = component("Speaker", [body("cabinet", faces=[face("LF")]), air])
+    _, app = _design(send_module, monkeypatch, root)
+    before = send_module.return_state(app)
+    assert before["hash"] is not None
+    air.faces[2].boundingBox.maxPoint.z += 1.0
+    after = send_module.return_state(app)
+    assert before["state"]["fem_regions"] == after["state"]["fem_regions"]
+    assert before["hash"] != after["hash"]
+
+
+@pytest.mark.parametrize("failure", ["copy", "export"])
+def test_temporary_component_is_removed_when_export_raises(send_module, tmp_path, monkeypatch, failure):
+    air, _, _ = air_body()
+    root = component("Speaker", [air])
+    design, _ = _design(send_module, monkeypatch, root)
+    def fail(*args):
+        raise RuntimeError("export failed")
+    if failure == "copy":
+        air.copyToComponent = fail
+    else:
+        monkeypatch.setattr(send_module, "_export_step", fail)
+    with pytest.raises(RuntimeError, match="export failed"):
+        send_module._export_body_step(design, tmp_path / "region.step", air)
+    assert list(root.occurrences) == []
+
+
+@pytest.mark.parametrize("cleanup", ["false", "exception"])
+@pytest.mark.parametrize("export_fails", [False, True])
+def test_cleanup_failure_refuses_send_and_names_leftover(send_module, tmp_path, monkeypatch, cleanup, export_fails):
+    air, cone, port = air_body()
+    _declare(send_module, air, cone, port, _fem(send_module))
+    root = component("Speaker", [body("cabinet", faces=[face("LF")]), air])
+    design, app = _design(send_module, monkeypatch, root)
+    original = root.occurrences.addNewComponent
+    def add(transform):
+        occurrence = original(transform)
+        def delete():
+            if cleanup == "exception":
+                raise RuntimeError("locked")
+            return False
+        occurrence.deleteMe = delete
+        return occurrence
+    monkeypatch.setattr(root.occurrences, "addNewComponent", add)
+    if export_fails:
+        def fail(_occurrence):
+            raise RuntimeError("copy failed")
+        air.copyToComponent = fail
+    with pytest.raises(send_module.wglink_core.WgLinkError, match="temporary FEM export component 'WGLink FEM export:1'"):
+        send_module.send(app, {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True})
+    assert len(root.occurrences) == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("accept", [True, False])
+def test_missing_capability_clear_prompt_continues_or_cancels(send_module, tmp_path, monkeypatch, accept):
+    air, cone, port = air_body()
+    _declare(send_module, air, cone, port, _fem(send_module))
+    root = component("Speaker", [body("cabinet", faces=[face("LF")]), air])
+    _, app = _design(send_module, monkeypatch, root)
+    prompts = []
+    def confirm():
+        prompts.append(True)
+        return accept
+    options = {"output_folder": str(tmp_path), "capture_document": False}
+    if accept:
+        report = send_module.send(app, options, confirm_clear_fem=confirm)
+        assert "fem_regions" not in report["manifest"]["scope"]
+        assert air.attributes.values == {}
+        assert all(item.attributes.values == {} for item in air.faces)
+    else:
+        with pytest.raises(send_module.wglink_core.WgLinkError, match="Send cancelled"):
+            send_module.send(app, options, confirm_clear_fem=confirm)
+        assert send_module.read_fem_region(air) is not None
+        assert cone.attributes.values and port.attributes.values
+        assert list(tmp_path.iterdir()) == []
+    assert prompts == [True]
+
+
+@pytest.mark.parametrize("attribute", ["not json", "{}", '{"schema":2,"region_id":"future","groups":[]}',
+                                       '{"schema":1,"region_id":"bad","groups":[{}]}', "unreadable"])
+def test_invalid_region_attributes_refuse_by_body_name(send_module, tmp_path, monkeypatch, attribute):
+    air, _, _ = air_body()
+    air.attributes.add("WGLink", "fem_region", attribute)
+    if attribute == "unreadable":
+        class Unreadable:
+            @property
+            def value(self):
+                raise RuntimeError("unreadable")
+        air.attributes.itemByName = lambda *args: Unreadable()
+    root = component("Speaker", [body("cabinet", faces=[face("LF")]), air])
+    _, app = _design(send_module, monkeypatch, root)
+    with pytest.raises(send_module.wglink_core.WgLinkError, match="body 'air'.*unreadable, malformed"):
+        send_module.send(app, {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True})
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_child_component_region_refuses_even_at_identity_placement(send_module, tmp_path, monkeypatch):
+    air, cone, port = air_body()
+    _declare(send_module, air, cone, port, _fem(send_module))
+    child = component("Child", [air])
+    root = component("Speaker", [body("cabinet", faces=[face("LF")])])
+    occurrence = types.SimpleNamespace(component=child, name="Child:1", fullPathName="Child:1", isVisible=True)
+    root.occurrences.append(occurrence)
+    _, app = _design(send_module, monkeypatch, root)
+    with pytest.raises(send_module.wglink_core.WgLinkError, match="body 'air'.*directly to the root component"):
+        send_module.send(app, {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True})
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_unreadable_attribute_collection_refuses_by_body_name(send_module, tmp_path, monkeypatch):
+    air, _, _ = air_body()
+    def unreadable(*_args):
+        raise RuntimeError("attributes unavailable")
+    air.attributes.itemByName = unreadable
+    root = component("Speaker", [body("cabinet", faces=[face("LF")]), air])
+    _, app = _design(send_module, monkeypatch, root)
+    with pytest.raises(send_module.wglink_core.WgLinkError, match="FEM region attribute on body 'air'.*attributes unavailable"):
+        send_module.send(app, {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True})
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_clear_recovery_removes_malformed_body_and_face_attributes(send_module, tmp_path, monkeypatch):
+    fem = _fem(send_module)
+    air, cone, port = air_body()
+    air.attributes.add("WGLink", fem.REGION_ATTRIBUTE, "malformed")
+    cone.attributes.add("WGLink", fem.FACE_ATTRIBUTE, "malformed")
+    port.attributes.add("WGLink", fem.FACE_ATTRIBUTE, '{"schema":2}')
+    root = component("Speaker", [body("cabinet", faces=[face("LF")]), air])
+    _, app = _design(send_module, monkeypatch, root)
+    report = send_module.send(app, {"output_folder": str(tmp_path), "capture_document": False},
+                              confirm_clear_fem=lambda: True)
+    assert "fem_regions" not in report["manifest"]["scope"]
+    assert air.attributes.values == {}
+    assert all(item.attributes.values == {} for item in air.faces)

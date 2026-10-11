@@ -32,11 +32,13 @@ from dataclasses import dataclass
 import json
 import math
 import re
+import uuid
 from typing import Any, Mapping, Sequence
 
 if __package__:
-    from . import wglink_protocol
+    from . import wglink_author, wglink_protocol
 else:
+    import wglink_author
     import wglink_protocol
 
 
@@ -54,7 +56,8 @@ SURFACE_KINDS = wglink_protocol.FEM_SURFACE_KINDS
 CAPABILITY = "femRegions"
 UNAVAILABLE_MESSAGE = (
     "This Waveguide Generator does not offer FEM regions "
-    "(update it, or turn FEM regions on). Clear the declarations to send without them."
+    "(update it, or turn FEM regions on). Send or Solve again to clear the FEM "
+    "declarations and continue without them."
 )
 EXPERIMENTAL_NOTE = "Experimental: geometry-checked only and not yet acoustically qualified."
 GROUP_AREA_TOLERANCE = 0.01
@@ -102,7 +105,7 @@ def drive_channel_for_role(role: str) -> str:
         raise FemDeclarationError(
             f"A driver diaphragm needs a drive role ({', '.join(DRIVE_ROLES)})."
         )
-    return f"drive-{role}"
+    return wglink_author.source_ids(role, set())[1]
 
 
 def identifier(name: str, *, fallback: str) -> str:
@@ -146,6 +149,7 @@ class GroupDeclaration:
     drive_role: str | None
     face_keys: tuple[Any, ...]
     declared_area_mm2: float
+    face_ids: tuple[str, ...]
 
     def payload(self) -> dict[str, Any]:
         record: dict[str, Any] = {
@@ -154,6 +158,8 @@ class GroupDeclaration:
             "kind": self.kind,
             "mesh_size_mm": self.mesh_size_mm,
             "declared_area_mm2": self.declared_area_mm2,
+            "declared_face_count": len(self.face_keys),
+            "declared_face_ids": list(self.face_ids),
         }
         if self.drive_role is not None:
             record["drive_role"] = self.drive_role
@@ -184,10 +190,10 @@ class RegionDeclaration:
             separators=(",", ":"),
         )
 
-    def face_attribute(self, group: GroupDeclaration) -> str:
+    def face_attribute(self, group: GroupDeclaration, index: int = 0) -> str:
         """The JSON stored on each face of ``group``."""
 
-        return face_attribute(self.region_id, group.group_id)
+        return face_attribute(self.region_id, group.group_id, group.face_ids[index])
 
     @property
     def summary(self) -> str:
@@ -201,9 +207,10 @@ class RegionDeclaration:
         )
 
 
-def face_attribute(region_id: str, group_id: str) -> str:
+def face_attribute(region_id: str, group_id: str, face_id: str | None = None) -> str:
     return json.dumps(
-        {"schema": ATTRIBUTE_SCHEMA, "region_id": region_id, "group_id": group_id},
+        {"schema": ATTRIBUTE_SCHEMA, "region_id": region_id, "group_id": group_id,
+         **({"face_id": face_id} if face_id is not None else {})},
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -292,6 +299,7 @@ def plan_region_declaration(
                 drive_role=role,
                 face_keys=tuple(keys),
                 declared_area_mm2=math.fsum(areas),
+                face_ids=tuple(uuid.uuid4().hex for _ in keys),
             )
         )
     return RegionDeclaration(
@@ -333,9 +341,36 @@ def read_region_attribute(text: object) -> dict[str, Any] | None:
         value = json.loads(text)
     except ValueError:
         return None
-    if not isinstance(value, dict) or value.get("schema") != ATTRIBUTE_SCHEMA:
+    if not isinstance(value, dict) or type(value.get("schema")) is not int or value.get("schema") != ATTRIBUTE_SCHEMA:
         return None
     if not isinstance(value.get("region_id"), str) or not isinstance(value.get("groups"), list):
+        return None
+    try:
+        if (identifier(value["region_id"], fallback="") != value["region_id"]
+                or not value["region_id"] or not isinstance(value["name"], str)
+                or not value["name"].strip() or isinstance(value["mesh_size_mm"], bool)):
+            return None
+        _positive(value["mesh_size_mm"], "Region size")
+        medium = value["medium"]
+        medium_keys = {"sound_speed_m_per_s", "density_kg_per_m3", "bulk_loss_factor"}
+        if not isinstance(medium, dict) or set(medium) != medium_keys or any(isinstance(item, bool) for item in medium.values()):
+            return None
+        _medium(medium)
+        ids = set()
+        for group in value["groups"]:
+            if (not isinstance(group["group_id"], str) or not group["group_id"]
+                    or identifier(group["group_id"], fallback="") != group["group_id"]
+                    or group["group_id"] in ids or isinstance(group["mesh_size_mm"], bool)):
+                return None
+            ids.add(group["group_id"])
+            if not isinstance(group["name"], str) or not group["name"].strip():
+                return None
+            if group["kind"] not in SURFACE_KINDS:
+                return None
+            _positive(group["mesh_size_mm"], "Group size")
+            if group["kind"] == "moving":
+                drive_channel_for_role(group["drive_role"])
+    except (KeyError, TypeError, AttributeError, FemDeclarationError):
         return None
     return value
 
@@ -347,7 +382,7 @@ def read_face_attribute(text: object) -> tuple[str, str] | None:
         value = json.loads(text)
     except ValueError:
         return None
-    if not isinstance(value, dict) or value.get("schema") != ATTRIBUTE_SCHEMA:
+    if not isinstance(value, dict) or type(value.get("schema")) is not int or value.get("schema") != ATTRIBUTE_SCHEMA:
         return None
     region_id, group_id = value.get("region_id"), value.get("group_id")
     if not isinstance(region_id, str) or not isinstance(group_id, str):
@@ -409,12 +444,18 @@ class RegionExport:
     object_id: str
     declaration: Mapping[str, Any]
     faces_by_group: Mapping[str, Sequence[Mapping[str, Any]]]
+    face_ids_by_group: Mapping[str, Sequence[str | None]]
 
 
 def validate_group_areas(export: RegionExport) -> None:
-    """Refuse missing area baselines and total area drift after declaration."""
+    """Refuse changed membership first, then missing baselines or area drift."""
 
     declaration = export.declaration
+    group_ids = {group["group_id"] for group in declaration.get("groups") or ()}
+    if set(export.faces_by_group) - group_ids:
+        raise FemDeclarationError(
+            f"FEM region {declaration['name']!r} face membership changed; re-declare this region before sending."
+        )
     for group in declaration.get("groups") or ():
         group_id = str(group["group_id"])
         label = (
@@ -426,6 +467,21 @@ def validate_group_areas(export: RegionExport) -> None:
             raise FemDeclarationError(
                 f"{label} has no faces left. Reselect its faces and re-declare "
                 "this region with Declare FEM Region (Experimental)…."
+            )
+        count = group.get("declared_face_count")
+        ids = group.get("declared_face_ids")
+        current_ids = export.face_ids_by_group.get(group_id) or ()
+        if (type(count) is not int or not isinstance(ids, list) or len(ids) != count
+                or any(not isinstance(key, str) or not key for key in ids)
+                or len(set(ids)) != count):
+            raise FemDeclarationError(
+                f"{label} has no valid stored face membership; re-declare this region "
+                "with Declare FEM Region (Experimental)… before sending."
+            )
+        if len(faces) != count or sorted(key if isinstance(key, str) else "" for key in current_ids) != sorted(ids):
+            raise FemDeclarationError(
+                f"{label} face membership changed. Reselect its faces and re-declare this region "
+                "with Declare FEM Region (Experimental)… before sending."
             )
         try:
             declared = _positive(group.get("declared_area_mm2"), "The declared group area")
@@ -452,8 +508,8 @@ def validate_group_areas(export: RegionExport) -> None:
 def plan_fem_regions(exports: Sequence[RegionExport]) -> list[dict[str, Any]]:
     """Build ``scope.fem_regions`` from the declared bodies in scope.
 
-    A group whose total face area drifted by more than 1 % (or disappeared)
-    refuses the export rather than silently becoming a wall: a lost diaphragm
+    A group whose membership changed or total face area drifted by more than
+    1 % refuses the export rather than silently becoming a wall: a lost diaphragm
     would solve to silence and a lost interface would seal the chamber.
     """
 
