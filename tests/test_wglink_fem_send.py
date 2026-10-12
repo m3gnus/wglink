@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 import json
 import sys
@@ -76,7 +77,13 @@ def air_body(*, visible=False):
             return self.isLightBulbOn
 
     def copy_to(occurrence):
-        copy = _Copy(name="air copy", isSolid=True, isLightBulbOn=False, faces=Collection())
+        copy = _Copy(
+            name="air copy", isSolid=True, isLightBulbOn=False,
+            faces=deepcopy(value.faces), attributes=deepcopy(value.attributes),
+            boundingBox=value.boundingBox, volume=value.volume,
+            entityToken="token-air-copy", objectType=value.objectType,
+            parentComponent=occurrence.component,
+        )
         occurrence.component.bRepBodies.append(copy)
         return copy
 
@@ -464,6 +471,49 @@ def test_cleanup_failure_refuses_send_and_names_leftover(send_module, tmp_path, 
         send_module.send(app, {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True})
     assert len(root.occurrences) == 1
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("visible", [False, True], ids=["hidden-copy", "visible-copy"])
+def test_leftover_region_copy_refuses_next_send_before_export(
+    send_module, tmp_path, monkeypatch, visible
+):
+    air, cone, port = air_body()
+    _declare(send_module, air, cone, port, _fem(send_module))
+    root = component("Speaker", [body("cabinet", faces=[face("LF")]), air])
+    design, app = _design(send_module, monkeypatch, root)
+    original = root.occurrences.addNewComponent
+
+    def add(transform):
+        occurrence = original(transform)
+        occurrence.deleteMe = lambda: False
+        return occurrence
+
+    monkeypatch.setattr(root.occurrences, "addNewComponent", add)
+    options = {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True}
+    with pytest.raises(send_module.wglink_core.WgLinkError, match="Delete the leftover component"):
+        send_module.send(app, options)
+
+    (leftover,) = root.occurrences
+    (copy,) = leftover.component.bRepBodies
+    assert send_module.read_fem_region(copy) == send_module.read_fem_region(air)
+    copy.isLightBulbOn = visible
+    exports = []
+    monkeypatch.setattr(design.exportManager, "execute", lambda options: exports.append(options))
+
+    with pytest.raises(send_module.wglink_core.WgLinkError) as refusal:
+        send_module.send(app, options)
+    message = str(refusal.value)
+    if visible:
+        assert "Hide the FEM region body 'air copy'" in message
+        assert "would also be exported as exterior geometry" in message
+    else:
+        assert "Two bodies declare FEM region 'rear-chamber'" in message
+        assert "Speaker/air" in message
+        assert "WGLink FEM export:1/air copy" in message
+        assert "delete the leftover copy" in message.lower()
+    assert exports == []
+    assert list(tmp_path.iterdir()) == []
+    assert list(root.occurrences) == [leftover]
 
 
 @pytest.mark.parametrize("accept", [True, False])

@@ -505,6 +505,21 @@ def validate_group_areas(export: RegionExport) -> None:
             )
 
 
+def validate_region_ids(regions: Sequence[tuple[str, str]]) -> None:
+    """Refuse copied declarations, naming both bodies before geometry checks."""
+
+    used: dict[str, str] = {}
+    for region_id, body_name in regions:
+        if region_id in used:
+            raise FemDeclarationError(
+                f"Two bodies declare FEM region {region_id!r}: {used[region_id]!r} "
+                f"and {body_name!r}. A copied body keeps its declaration; delete "
+                "the leftover copy or redeclare one of them with "
+                "Declare FEM Region (Experimental)…."
+            )
+        used[region_id] = body_name
+
+
 def plan_fem_regions(exports: Sequence[RegionExport]) -> list[dict[str, Any]]:
     """Build ``scope.fem_regions`` from the declared bodies in scope.
 
@@ -513,17 +528,13 @@ def plan_fem_regions(exports: Sequence[RegionExport]) -> list[dict[str, Any]]:
     would solve to silence and a lost interface would seal the chamber.
     """
 
+    validate_region_ids([
+        (str(export.declaration["region_id"]), export.object_id) for export in exports
+    ])
     records: list[dict[str, Any]] = []
-    used: set[str] = set()
     for export in sorted(exports, key=lambda item: str(item.declaration.get("region_id"))):
         declaration = export.declaration
         region_id = str(declaration["region_id"])
-        if region_id in used:
-            raise FemDeclarationError(
-                f"Two bodies declare FEM region {region_id!r}. A copied body keeps its "
-                "declaration; redeclare one of them with Declare FEM Region (Experimental)…."
-            )
-        used.add(region_id)
         validate_group_areas(export)
         groups: list[dict[str, Any]] = []
         for group in declaration.get("groups") or ():

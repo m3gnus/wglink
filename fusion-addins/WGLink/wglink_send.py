@@ -3811,11 +3811,6 @@ def _fem_region_exports(walk: dict[str, Any]) -> list[tuple["wglink_fem.RegionEx
                 f"FEM region attribute on body {item['name']!r} is unreadable, malformed, "
                 "or uses an unsupported schema. Clear or re-declare this region before sending."
             )
-        if not item["direct_root_body"]:
-            raise wglink_core.WgLinkError(
-                f"FEM region body {item['name']!r} must belong directly to the root component. "
-                "Move the region to the root component and leave Assembly scope empty before sending."
-            )
     visible = sorted(item["name"] for item in regions if item["visible"])
     if visible:
         raise wglink_core.WgLinkError(
@@ -3825,6 +3820,20 @@ def _fem_region_exports(walk: dict[str, Any]) -> list[tuple["wglink_fem.RegionEx
             + " before sending: WGLink exports each region on its own, and a "
             "visible one would also be exported as exterior geometry."
         )
+    # A failed cleanup can leave a declared copy in the temporary component.
+    # Diagnose that copy before the root-only rule suggests moving it instead.
+    try:
+        wglink_fem.validate_region_ids([
+            (str(item["declaration"]["region_id"]), item["path"]) for item in regions
+        ])
+    except wglink_fem.FemDeclarationError as exc:
+        raise wglink_core.WgLinkError(str(exc)) from exc
+    for item in regions:
+        if not item["direct_root_body"]:
+            raise wglink_core.WgLinkError(
+                f"FEM region body {item['name']!r} must belong directly to the root component. "
+                "Move the region to the root component and leave Assembly scope empty before sending."
+            )
     exports = []
     for item in regions:
         if not item["solid"]:
