@@ -1500,7 +1500,8 @@ def _no_fem_export(
     """The deterministic design used to capture the e9f0dfb bundle goldens.
 
     Send, Solve and the returns after Insert/Update all use this exporter.
-    Freeze only the clock and return id; do not normalize any emitted bytes.
+    Freeze only the clock and return id. The golden comparison below normalizes
+    only the adapter version; the exporter still emits the current version.
     """
     painted = face("HF")
     painted.attributes = Attributes()
@@ -1547,7 +1548,20 @@ def test_no_declared_regions_keep_e9f0dfb_bundle_bytes(
         return {path.relative_to(folder).as_posix(): path.read_bytes()
                 for path in folder.rglob("*") if path.is_file()}
 
-    assert members(actual) == members(golden)
+    actual_members = members(actual)
+    golden_members = members(golden)
+    # Keep the e9f0dfb fixtures intact and compare every other byte, including
+    # manifest whitespace and the STEP members, across add-in version bumps.
+    current_version = report["manifest"]["generator"]["adapter_version"]
+    assert current_version == send_module.ADAPTER_VERSION
+    golden_version = json.loads(golden_members["wgreturn.json"])["generator"]["adapter_version"]
+    current_field = b'"adapter_version": ' + json.dumps(current_version).encode("utf-8")
+    golden_field = b'"adapter_version": ' + json.dumps(golden_version).encode("utf-8")
+    assert actual_members["wgreturn.json"].count(current_field) == 1
+    actual_members["wgreturn.json"] = actual_members["wgreturn.json"].replace(
+        current_field, golden_field, 1
+    )
+    assert actual_members == golden_members
     assert "fem_regions" not in report["manifest"]["scope"]
     assert "fem-regions-v1" not in report["manifest"]["required_features"]
 
