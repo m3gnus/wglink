@@ -1820,7 +1820,8 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             ipc = data_dir / wglink_workspace.IPC_SUBDIRECTORY
         argv = wglink_launcher.launcher_argv(ipc)
         if argv is None:
-            argv = wglink_launcher.installed_marker_argv(wglink_core.ADDIN_DIR)
+            # Keep the registered folder's spelling: a symlink is unmanaged.
+            argv = wglink_launcher.installed_marker_argv(Path(__file__).parent)
         try:
             if argv is None:
                 # Preserve the visible validation error for an advertised but

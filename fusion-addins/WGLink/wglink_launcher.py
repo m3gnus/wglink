@@ -88,7 +88,8 @@ def installed_marker_argv(addin_dir: Path) -> list[str] | None:
         if not isinstance(value, str) or not value or "\x00" in value:
             return None
         root = Path(value)
-        if not root.is_absolute() or root.name != "app" or not root.is_dir():
+        if (not root.is_absolute() or value != os.path.normpath(value)
+                or root.name != "app" or not root.is_dir()):
             return None
         if sys.platform == "win32":
             entry = root.parent / "Waveguide Generator.exe"
@@ -125,7 +126,12 @@ def _launcher_error(argv: object) -> str | None:
             return "expected the installed Waveguide Generator.exe entry"
         app = entry.parent / "app"
         try:
-            if (entry.parent / "Waveguide Generator.ensure-backend-v1").read_bytes() != b"WG_NATIVE_ENSURE_BACKEND_V1":
+            marker = entry.parent / "Waveguide Generator.ensure-backend-v1"
+            if marker.stat().st_size > len(_NATIVE_SIGNATURE):
+                return "the native ensure-backend marker has invalid contents"
+            with marker.open("rb") as stream:
+                signature = stream.read(len(_NATIVE_SIGNATURE) + 1)
+            if signature != _NATIVE_SIGNATURE:
                 return "the native ensure-backend marker has invalid contents"
         except OSError:
             return "the native ensure-backend marker is missing or unreadable"
