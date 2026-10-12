@@ -315,7 +315,8 @@ Region…** on it:
    name, a kind, a local mesh size and its faces:
    - **Driver diaphragm (moving)** with a drive role (LF, MF or HF). It joins
      the same drive channel as a painted source of that role. **Relative level
-     (dB)** sets its motion relative to the driver (default 0, must be ≤ 0).
+     (dB)** sets its motion relative to the driver (default 0, from −120 to 0
+     dB inclusive).
    - **Interface to exterior air** for each opening where the chamber meets
      the exterior: a port exit, a horn throat. WG makes the exterior mesh
      conform to it.
@@ -337,10 +338,13 @@ follows the faces through later edits. A group whose faces all disappeared
 (a face rebuilt by an edit) refuses the Send rather than silently becoming a
 wall: reopen the dialog and reselect its faces. A diaphragm in a FEM region
 drives the return on its own, so a compression driver needs no painted source.
-Several moving groups can share a drive role for front and rear surfaces in
-two regions, or dome and surround in one region. A role with several painted
-channels is ambiguous and refused. WG refuses ideal-source channels with FEM
-diaphragms in more than one region; choose an electrodynamic driver in WG.
+Several moving groups sharing one drive role mean **one physical driver**:
+front and rear surfaces of its shared diaphragm in two regions, or dome and
+surround in one region. A role with several painted channels is ambiguous and
+refused. WG refuses ideal-source channels with FEM diaphragms in more than one
+region. An electrodynamic channel alone does not prove a shared diaphragm.
+Two separate physical drivers must use separate drive channels (roles), then
+WG's **Combine**.
 
 Pre-flight lists each region as, for example, **FEM region: Rear chamber
 (8 mm; 1 interface, 1 moving)**. The return carries `fem-regions/<id>.step`
@@ -350,8 +354,11 @@ them to the meshed surfaces and keeps ownership of every mesh tag. Against a WG
 without `femRegions`, a design that declares regions is refused, and one that
 declares none sends exactly as before.
 `femRegions >= 1` accepts v1 with optional rigid-group `lining` and
-moving-group `relative_level_db`; WG converts the dB value to a linear motion
-weight. Changed lining or level invalidates the return-state hash.
+moving-group `relative_level_db`; WG converts the dB value to the linear motion
+weight `10 ** (relative_level_db / 20)` and rejects a converted weight that is
+zero or nonfinite. WG maps `lining` to BEAT
+`wall_impedance {model: "miki", thickness_m: thickness_mm/1000, flow_resistivity_pa_s_per_m2: unchanged}`.
+Changed lining or level invalidates the return-state hash.
 
 FEM regions are sent in the root frame only: leave Assembly scope empty, or
 select an occurrence placed at the assembly origin.

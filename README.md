@@ -25,9 +25,15 @@ WGLink's Send and Solve dialogs use an automatic model domain; there is no manua
 With WG's `femRegions >= 1` capability, **Declare FEM Region…** marks bounded
 air bodies and their surface groups. Rigid groups can carry Miki absorbing
 lining (default thickness 30 mm, flow resistivity 5000 Pa·s/m²); moving groups
-can set a relative level in dB (≤ 0, default 0). Several moving groups may share
-one drive role for a diaphragm's front/rear surfaces or dome/surround. WG refuses
-ideal-source channels with FEM diaphragms in more than one region. See the
+can set a relative level from −120 to 0 dB inclusive (default 0). WG converts
+it to the motion weight `10 ** (relative_level_db / 20)` and rejects a converted
+weight that is zero or nonfinite. WG maps `lining` to BEAT
+`wall_impedance {model: "miki", thickness_m: thickness_mm/1000, flow_resistivity_pa_s_per_m2: unchanged}`.
+Several moving groups sharing one drive role mean **one physical driver**:
+its shared diaphragm's front/rear surfaces or dome/surround. WG refuses
+ideal-source channels with FEM diaphragms in more than one region. An
+electrodynamic channel alone does not prove a shared diaphragm. Two separate
+physical drivers must use separate drive channels (roles), then WG's **Combine**. See the
 [protocol rules](fusion-addins/WGLink/README.md#fem-regions-fem-regions-v1).
 
 ## Install

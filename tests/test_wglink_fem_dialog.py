@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import types
 
@@ -336,10 +337,16 @@ def test_dialog_boundary_options_persist_and_clear(fixture):
 
 
 @pytest.mark.parametrize(("overrides", "message"), [
-    ({"fem_level_1": _value(0.1)}, "relative_level_db"),
-    ({"fem_level_1": _value(float("nan"))}, "relative_level_db"),
-    ({"fem_thickness_2": _value(0)}, "thickness_mm"),
-    ({"fem_resistivity_2": _value(-1)}, "flow_resistivity_pa_s_per_m2"),
+    *[({"fem_level_1": _value(value)},
+       "Relative level for 'Cone' must be between −120 and 0 dB.")
+      for value in (0.1, math.nextafter(-120, -math.inf), -6500,
+                    float("nan"), float("inf"), float("-inf"))],
+    *[({"fem_thickness_2": _value(value)},
+       "Lining thickness for 'Port' must be a positive finite number in mm.")
+      for value in (0, -1, float("nan"), float("inf"))],
+    *[({"fem_resistivity_2": _value(value)},
+       "Flow resistivity for 'Port' must be a positive finite number in Pa·s/m².")
+      for value in (0, -1, float("nan"), float("inf"))],
 ])
 def test_dialog_refuses_invalid_boundary_fields(fixture, overrides, message):
     module = fixture.module
@@ -348,10 +355,24 @@ def test_dialog_refuses_invalid_boundary_fields(fixture, overrides, message):
                     fem_lining_2=_value(True), fem_thickness_2=_value(3),
                     fem_resistivity_2=_value(5000))
     defaults.update(overrides)
-    assert message in module._fem_validation_error(
-        _inputs(module, air, faces, **defaults), _state(module, 1, 2)
-    )
+    inputs = _inputs(module, air, faces, **defaults)
+    state = _state(module, 1, 2)
+    assert module._fem_validation_error(inputs, state) == message
+    with pytest.raises(module.wglink_author.AuthorError, match=message):
+        module._apply_fem_region(inputs, state)
     assert air.attributes.values == {}
+
+
+@pytest.mark.parametrize("level", [-120, math.nextafter(-120, math.inf), 0])
+def test_dialog_accepts_relative_level_boundaries(fixture, level):
+    module = fixture.module
+    air, faces = _air(module)
+    inputs = _inputs(module, air, faces, fem_level_1=_value(level))
+    state = _state(module, 1, 2)
+    assert module._fem_validation_error(inputs, state) is None
+    module._apply_fem_region(inputs, state)
+    group = module.wglink_send.read_fem_region(air)["groups"][0]
+    assert group.get("relative_level_db", 0) == level
 
 
 def _building_inputs(module):

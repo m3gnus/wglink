@@ -1221,7 +1221,7 @@ def validate_fem_group_options(group: Mapping[str, Any], path: str) -> None:
         level_path = f'{path}.relative_level_db'
         if group.get('kind') != 'moving':
             _fem_fail(level_path, 'is accepted only on a moving group')
-        _fem_number(group['relative_level_db'], level_path, maximum=0.0)
+        _fem_number(group['relative_level_db'], level_path, minimum=-120.0, maximum=0.0)
 
 
 def _fem_face(value: Any, path: str) -> None:

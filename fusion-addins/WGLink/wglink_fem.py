@@ -275,7 +275,20 @@ def plan_region_declaration(
         try:
             wglink_protocol.validate_fem_group_options({"kind": kind, **options}, label)
         except wglink_protocol.ProtocolValidationError as exc:
-            raise FemDeclarationError(str(exc)) from exc
+            message = str(exc)
+            refusals = {
+                f"{label}.relative_level_db":
+                    f"Relative level for {label!r} must be between −120 and 0 dB.",
+                f"{label}.lining.thickness_mm":
+                    f"Lining thickness for {label!r} must be a positive finite number in mm.",
+                f"{label}.lining.flow_resistivity_pa_s_per_m2":
+                    f"Flow resistivity for {label!r} must be a positive finite number in Pa·s/m².",
+            }
+            if kind != "moving":
+                refusals.pop(f"{label}.relative_level_db")
+            friendly = next((text for field, text in refusals.items()
+                             if message.startswith(f"{field}: ")), message)
+            raise FemDeclarationError(friendly) from exc
         group_size = _positive(raw.get("mesh_size_mm"), f"The mesh size of {label!r}")
         role = raw.get("drive_role")
         if kind == "moving":

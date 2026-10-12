@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from pathlib import Path
 import sys
 
@@ -359,7 +360,7 @@ LINING = {"model": "miki", "thickness_mm": 30.0, "flow_resistivity_pa_s_per_m2":
 
 
 @pytest.mark.parametrize(("fixture", "profile"), PROFILES)
-@pytest.mark.parametrize("level", [0, -6.0, -120])
+@pytest.mark.parametrize("level", [0, -6.0, -120, math.nextafter(-120, math.inf)])
 def test_optional_boundary_physics_validate_in_both_profiles(fixture, profile, level):
     manifest = _with_regions(_base(fixture))
     moving, wall = manifest["scope"]["fem_regions"][0]["surface_groups"]
@@ -388,7 +389,8 @@ BAD_OPTIONS = [
     ("plane-wave-termination", "lining", LINING),
 ] + [
     ("moving", "relative_level_db", value)
-    for value in (None, True, "-6", [], 0.001, float("nan"), float("inf"), float("-inf"))
+    for value in (None, True, "-6", [], 0.001, math.nextafter(-120, -math.inf), -6500,
+                  float("nan"), float("inf"), float("-inf"))
 ] + [
     (kind, "relative_level_db", -6)
     for kind in ("rigid", "interface", "plane-wave-termination")
@@ -412,8 +414,13 @@ def test_optional_boundary_physics_refuse_invalid_values(fixture, profile, kind,
 def test_planner_and_attribute_reader_refuse_invalid_boundary_options(kind, key, value):
     raw = {"name": "Boundary", "kind": kind, "mesh_size_mm": 3, "drive_role": "LF",
            "faces": [_face("f1")], key: value}
-    with pytest.raises(fem.FemDeclarationError, match=key):
+    with pytest.raises(fem.FemDeclarationError) as refusal:
         _plan(groups=[raw])
+    message = str(refusal.value)
+    assert (key in message
+            or (kind == "moving" and key == "relative_level_db"
+                and message == "Relative level for 'Boundary' must be between −120 and 0 dB.")
+            or (key == "lining" and message.startswith(("Lining thickness", "Flow resistivity"))))
     raw.pop(key)
     stored = json.loads(_plan(groups=[raw]).body_attribute())
     stored["groups"][0][key] = value

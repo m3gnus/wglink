@@ -221,16 +221,18 @@ surface groups (moving diaphragm with a drive role, interface to the exterior,
 plane-wave termination, rigid wall), each with a local size and its faces.
 Rigid groups offer **Absorbing lining** with thickness (default 30 mm) and
 flow resistivity (default 5000 Pa·s/m²). Moving groups offer **Relative level
-(dB)**, default 0 dB, with values at or below zero.
+(dB)**, default 0 dB, with values from −120 to 0 dB inclusive.
 
 Protocol rules: `femRegions >= 1` means accepts `fem-regions-v1` with these
 optional surface-group keys:
 
 - `lining` is allowed only on `rigid` groups and is an object with exactly
   `model: "miki"`, positive finite `thickness_mm`, and positive finite
-  `flow_resistivity_pa_s_per_m2`.
+  `flow_resistivity_pa_s_per_m2`. WG maps `lining` to BEAT
+  `wall_impedance {model: "miki", thickness_m: thickness_mm/1000, flow_resistivity_pa_s_per_m2: unchanged}`.
 - `relative_level_db` is allowed only on `moving` groups and is a finite number
-  ≤ 0. WG converts it to the linear motion weight `10 ** (relative_level_db / 20)`.
+  from −120 to 0 inclusive. WG converts it to the linear motion weight
+  `10 ** (relative_level_db / 20)` and rejects a converted weight that is zero or nonfinite.
   Omission means 0 dB (weight 1); unlined walls omit `lining`.
 
 Existing declarations read with these defaults. Default dialog values add no
@@ -252,13 +254,15 @@ are included in the return-state hash, so changes invalidate an earlier return.
   It exports each region by
   copying the body into a temporary root component, which is deleted again,
   and gates the member to one solid.
-- Several moving groups may share one drive role: front and rear of one
-  diaphragm in two regions, or dome and surround in one region.
-  WG decides whether the channel is electrodynamic; **ideal-source channels
+- Several moving groups sharing one drive role mean **one physical driver**:
+  front and rear of its shared diaphragm in two regions, or dome and surround
+  in one region. An electrodynamic channel alone does not prove a shared diaphragm.
+  **Ideal-source channels
   with FEM diaphragms in more than one region are refused by WG**.
   A FEM diaphragm still refuses a role with more than one exterior source channel
   (for example, `drive-lf` and `drive-lf-2`); the refusal names the role and
-  conflicting sources. Use a different role for each driver.
+  conflicting sources. Two separate physical drivers must use separate drive
+  channels (roles), then WG's **Combine**.
   One painted exterior source and FEM diaphragms on the same role are allowed
   and share one drive channel as one driver.
 - No meshing happens in Fusion. Faces are described by geometry in the export
