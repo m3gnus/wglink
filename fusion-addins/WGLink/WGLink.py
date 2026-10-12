@@ -93,9 +93,9 @@ COMMANDS = {
     ),
     "fem": (
         "hornlab_wglink_declare_fem_region",
-        "Declare FEM Region (Experimental)…",
+        "Declare FEM Region…",
         "Mark a solid body of air as a FEM region and name its driver, interface "
-        "and termination faces for a coupled FEM/BEM solve. " + wglink_fem.EXPERIMENTAL_NOTE,
+        "and termination faces for a coupled FEM/BEM solve.",
     ),
     "solve": (
         "hornlab_wglink_solve",

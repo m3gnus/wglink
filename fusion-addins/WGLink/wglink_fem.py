@@ -59,7 +59,6 @@ UNAVAILABLE_MESSAGE = (
     "(update it, or turn FEM regions on). Send or Solve again to clear the FEM "
     "declarations and continue without them."
 )
-EXPERIMENTAL_NOTE = "Experimental: geometry-checked only and not yet acoustically qualified."
 GROUP_AREA_TOLERANCE = 0.01
 
 # Fusion's internal length unit is the centimetre.
@@ -466,7 +465,7 @@ def validate_group_areas(export: RegionExport) -> None:
         if not faces:
             raise FemDeclarationError(
                 f"{label} has no faces left. Reselect its faces and re-declare "
-                "this region with Declare FEM Region (Experimental)…."
+                "this region with Declare FEM Region…."
             )
         count = group.get("declared_face_count")
         ids = group.get("declared_face_ids")
@@ -476,19 +475,19 @@ def validate_group_areas(export: RegionExport) -> None:
                 or len(set(ids)) != count):
             raise FemDeclarationError(
                 f"{label} has no valid stored face membership; re-declare this region "
-                "with Declare FEM Region (Experimental)… before sending."
+                "with Declare FEM Region… before sending."
             )
         if len(faces) != count or sorted(key if isinstance(key, str) else "" for key in current_ids) != sorted(ids):
             raise FemDeclarationError(
                 f"{label} face membership changed. Reselect its faces and re-declare this region "
-                "with Declare FEM Region (Experimental)… before sending."
+                "with Declare FEM Region… before sending."
             )
         try:
             declared = _positive(group.get("declared_area_mm2"), "The declared group area")
         except FemDeclarationError:
             raise FemDeclarationError(
                 f"{label} has no valid stored total face area; re-declare this region "
-                "with Declare FEM Region (Experimental)… before sending."
+                "with Declare FEM Region… before sending."
             ) from None
         current = math.fsum(
             _positive(face.get("area_mm2"), f"The face area of {label}")
@@ -501,7 +500,7 @@ def validate_group_areas(export: RegionExport) -> None:
             raise FemDeclarationError(
                 f"{label} total face area changed by {100 * drift / declared:g} % "
                 f"({declared:g} to {current:g} mm²), more than 1 %. Reselect its "
-                "faces and re-declare this region with Declare FEM Region (Experimental)…."
+                "faces and re-declare this region with Declare FEM Region…."
             )
 
 
@@ -515,7 +514,7 @@ def validate_region_ids(regions: Sequence[tuple[str, str]]) -> None:
                 f"Two bodies declare FEM region {region_id!r}: {used[region_id]!r} "
                 f"and {body_name!r}. A copied body keeps its declaration; delete "
                 "the leftover copy or redeclare one of them with "
-                "Declare FEM Region (Experimental)…."
+                "Declare FEM Region…."
             )
         used[region_id] = body_name
 

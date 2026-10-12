@@ -124,8 +124,11 @@ def test_startup_registers_the_command_and_icon_only_under_the_capability(
             assert len(registered) == 7
         else:
             record = next(record for record in registered if record[0] == fem_id)
-            assert record[1] == "Declare FEM Region (Experimental)…"
-            assert "Experimental: geometry-checked only and not yet acoustically qualified." in record[2]
+            assert record[1] == "Declare FEM Region…"
+            assert record[2] == (
+                "Mark a solid body of air as a FEM region and name its driver, interface "
+                "and termination faces for a coupled FEM/BEM solve."
+            )
     finally:
         module.stop(None)
     assert fixture.ui.commandDefinitions.itemById(fem_id) is None

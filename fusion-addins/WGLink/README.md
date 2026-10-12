@@ -206,9 +206,8 @@ Relink remain full head-less APIs but are not panel commands.
 
 ## FEM regions (`fem-regions-v1`)
 
-**Declare FEM Region (Experimental)…** appears under Manage only when
-`wg-capabilities.json` advertises `femRegions` at add-in startup. The tooltip
-states: "Experimental: geometry-checked only and not yet acoustically qualified."
+**Declare FEM Region…** appears under Manage only when
+`wg-capabilities.json` advertises `femRegions` at add-in startup.
 WG may have this feature turned off. Restart the add-in after enabling it; there is no polling
 or toolbar refresh. Opening the command and executing it both re-check the
 capability and refuse if it has been withdrawn. Without the capability, no
