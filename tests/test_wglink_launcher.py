@@ -40,6 +40,8 @@ def _installed_entry(tmp_path, platform=None, basename=None):
     folder.mkdir(parents=True, exist_ok=True)
     entry = folder / (basename or name)
     entry.touch()
+    if platform == "win32":
+        entry.write_bytes(b"native image WG_NATIVE_ENSURE_BACKEND_V1")
     return entry
 
 
@@ -78,6 +80,12 @@ def _checked_fixture(monkeypatch, tmp_path, name, *, advertised=4):
     (ipc / "wg-capabilities.json").write_bytes((fixture.ipc / "wg-capabilities.json").read_bytes())
     fixture.ipc = ipc
     monkeypatch.setattr(fixture.module.wglink_workspace, "ipc_folder", lambda **kwargs: ipc)
+    real_data_dir = fixture.module.wglink_workspace.data_dir
+    monkeypatch.setattr(fixture.module.wglink_workspace, "data_dir",
+                        lambda **kwargs: real_data_dir(**kwargs) if kwargs else ipc.parent.parent)
+    addin = tmp_path / "WGLink"
+    addin.mkdir()
+    monkeypatch.setattr(fixture.module.wglink_core, "ADDIN_DIR", addin)
     main = threading.get_ident()
     app_type = type(fixture.app)
 
@@ -521,6 +529,217 @@ def test_windows_marker_is_required_exactly(monkeypatch, tmp_path, marker):
         path.write_bytes(marker)
     monkeypatch.setattr(wglink_launcher.sys, "platform", "win32")
     assert "marker" in wglink_launcher._launcher_error([str(entry)])
+
+
+def _install_marker(addin, entry, platform):
+    root = (entry.parent.parent / "Resources" / "app"
+            if platform == "darwin" else entry.parent / "app")
+    payload = {"schema": 1, "managedBy": "waveguide-generator",
+               "waveguideGeneratorRoot": str(root), "waveguideGeneratorVersion": "test",
+               "sourceCommit": "a" * 40, "addinVersion": "0.2.1"}
+    path = addin / wglink_launcher.INSTALL_MARKER
+    path.write_text(json.dumps(payload))
+    return path, payload
+
+
+@pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
+def test_install_marker_derives_only_fusion_platform_entries(monkeypatch, tmp_path, platform):
+    entry = _installed_entry(tmp_path, platform)
+    addin = tmp_path / "WGLink"
+    addin.mkdir()
+    _install_marker(addin, entry, platform)
+    monkeypatch.setattr(wglink_launcher.sys, "platform", platform)
+    assert wglink_launcher.installed_marker_argv(addin) == (
+        None if platform == "linux" else [str(entry)])
+
+
+@pytest.mark.parametrize("invalid", [
+    "absent", "malformed", "non-object", "extra-field", "missing-field", "schema", "bool-schema",
+    "owner", "relative", "non-string", "nul", "oversize", "encoding", "nested-json", "symlink",
+    "developer", "dangling-developer", "checkout", "missing-entry", "missing-root",
+    "wrong-shape", "missing-native-marker", "missing-signature", "non-dir-addin", "symlink-addin",
+])
+def test_invalid_install_marker_keeps_manual_start_message(monkeypatch, tmp_path, invalid):
+    fixture = _checked_fixture(monkeypatch, tmp_path, "WGLink_invalid_marker")
+    (fixture.ipc / "wg-capabilities.json").unlink()
+    addin = fixture.module.wglink_core.ADDIN_DIR
+    entry = _installed_entry(tmp_path, "win32")
+    marker, payload = _install_marker(addin, entry, "win32")
+    if invalid == "absent":
+        marker.unlink()
+    elif invalid in {"malformed", "non-object", "oversize", "encoding", "nested-json"}:
+        marker.write_bytes({"malformed": b"{", "non-object": b"[]",
+                            "oversize": b" " * 65537, "encoding": b"\xff",
+                            "nested-json": b"[" * 2000 + b"]" * 2000}[invalid])
+    elif invalid == "symlink":
+        target = tmp_path / "marker.json"
+        marker.rename(target)
+        marker.symlink_to(target)
+    elif invalid in {"developer", "dangling-developer"}:
+        developer = addin / wglink_launcher.DEVELOPER_MARKER
+        if invalid == "developer":
+            developer.write_text("{}")
+        else:
+            developer.symlink_to(tmp_path / "absent-dev-marker")
+    elif invalid == "missing-entry":
+        entry.unlink()
+    elif invalid == "missing-root":
+        (entry.parent / "app").rmdir()
+    elif invalid == "wrong-shape":
+        entry.rename(entry.with_name("other.exe"))
+    elif invalid == "missing-native-marker":
+        (entry.parent / "Waveguide Generator.ensure-backend-v1").unlink()
+    elif invalid == "missing-signature":
+        entry.write_bytes(b"older native image")
+    elif invalid == "non-dir-addin":
+        marker.unlink()
+        addin.rmdir()
+        addin.touch()
+    elif invalid == "symlink-addin":
+        target = tmp_path / "managed-addin"
+        addin.rename(target)
+        addin.symlink_to(target, target_is_directory=True)
+    else:
+        if invalid == "extra-field":
+            payload["launcher"] = str(entry)
+        elif invalid == "missing-field":
+            payload.pop("addinVersion")
+        elif invalid in {"schema", "bool-schema"}:
+            payload["schema"] = 2 if invalid == "schema" else True
+        elif invalid == "owner":
+            payload["managedBy"] = "external"
+        else:
+            value = {"relative": "installed/app", "non-string": 7, "nul": "bad\x00root",
+                     "checkout": str(tmp_path / "checkout")}[invalid]
+            if invalid == "checkout":
+                Path(value).mkdir()
+            payload["waveguideGeneratorRoot"] = value
+        marker.write_text(json.dumps(payload))
+    monkeypatch.setattr(wglink_launcher.sys, "platform", "win32")
+    monkeypatch.setattr(wglink_launcher.subprocess, "Popen", lambda *a, **k: pytest.fail("spawn"))
+    assert wglink_launcher.installed_marker_argv(addin) is None
+    _run(fixture.module, "send")
+    assert fixture.exports == [] and _inbox(fixture.ipc) == []
+    assert fixture.module._backend_admission.thread is None
+    assert "Start Waveguide Generator" in fixture.ui.messages[-1][1]
+
+
+@pytest.mark.parametrize("oversize", [False, True])
+def test_windows_exe_signature_guard_covers_advertisement_and_spawn(monkeypatch, tmp_path, oversize):
+    entry = _installed_entry(tmp_path, "win32")
+    if oversize:
+        with entry.open("ab") as stream:
+            stream.truncate(wglink_launcher._MAX_NATIVE_ENTRY_BYTES + 1)
+    else:
+        entry.write_bytes(b"old native image")
+    monkeypatch.setattr(wglink_launcher.sys, "platform", "win32")
+    (tmp_path / "wg-capabilities.json").write_text(json.dumps({
+        "schemaVersion": 1, "launcher": {"argv": [str(entry)], "ensureBackend": True}}))
+    reason = "64 MiB" if oversize else "signature"
+    assert wglink_launcher.launcher_argv(tmp_path) is None
+    with pytest.raises(wglink_launcher.LauncherError, match=reason):
+        wglink_launcher.launcher_argv(tmp_path, strict=True)
+    monkeypatch.setattr(wglink_launcher.subprocess, "Popen", lambda *a, **k: pytest.fail("spawn"))
+    with pytest.raises(wglink_launcher.LauncherError, match=reason):
+        wglink_launcher.ensure_backend([str(entry)], tmp_path, None, threading.Event())
+
+
+@pytest.mark.parametrize("advertisement", ["valid", "absent-launcher", "invalid"])
+def test_capabilities_precedence_and_marker_rescue(monkeypatch, tmp_path, advertisement):
+    fixture = _checked_fixture(monkeypatch, tmp_path, "WGLink_marker_precedence")
+    platform = "darwin"
+    entry = _installed_entry(tmp_path / "managed", platform)
+    _install_marker(fixture.module.wglink_core.ADDIN_DIR, entry, platform)
+    advertised_entry = _installed_entry(tmp_path / "advertised", platform)
+    if advertisement != "absent-launcher":
+        _advertise_launcher(fixture, [str(advertised_entry if advertisement == "valid"
+                                        else tmp_path / "moved-entry")])
+    monkeypatch.setattr(wglink_launcher.sys, "platform", platform)
+    calls = []
+    monkeypatch.setattr(fixture.module.wglink_launcher, "ensure_backend", lambda *args: calls.append(args))
+    _run(fixture.module, "send")
+    _finish(fixture)
+    assert len(calls) == 1
+    assert calls[0][0] == [str(advertised_entry if advertisement == "valid" else entry)]
+    assert len(fixture.exports) == 1 and len(_inbox(fixture.ipc)) == 1
+
+
+@pytest.mark.parametrize("platform", ["win32", "darwin"])
+@pytest.mark.parametrize("operation", ["send", "solve"])
+@pytest.mark.parametrize("fresh", ["compatible", "outdated", "missing-feature", "override", "override-no-root"])
+def test_marker_cold_start_without_ipc_resumes_only_after_fresh_gates(
+        monkeypatch, tmp_path, platform, operation, fresh):
+    fixture = _checked_fixture(monkeypatch, tmp_path, "WGLink_marker_cold_start")
+    entry = _installed_entry(tmp_path, platform)
+    _install_marker(fixture.module.wglink_core.ADDIN_DIR, entry, platform)
+    path = fixture.ipc / "wg-capabilities.json"
+    ready = json.loads(path.read_text())
+    if fresh == "outdated":
+        ready["solveCommandDelivery"] = 3
+    elif fresh == "missing-feature":
+        ready.pop("automaticDomain")
+    path.unlink()
+    fixture.ipc.rmdir()
+    fixture.ipc.parent.rmdir()
+    fixture.ipc.parent.parent.rmdir()
+    data = fixture.ipc.parent.parent
+    settings = data / "cadlink_settings.json"
+    monkeypatch.setattr(fixture.module.wglink_workspace, "workspace_root", lambda: (
+        Path(json.loads(settings.read_text())["cadLinkPath"]) if settings.exists() else None))
+    monkeypatch.setattr(fixture.module.wglink_workspace, "ipc_folder",
+                        lambda **kwargs: fixture.ipc if fixture.ipc.is_dir() else None)
+    monkeypatch.setattr(wglink_launcher.sys, "platform", platform)
+    if fresh.startswith("override"):
+        monkeypatch.setenv("WG2_DATA_DIR", str(data))
+    assert not wglink_launcher.collecting(fixture.ipc, data)
+    assert not data.exists()
+    calls = []
+
+    def popen(command, **kwargs):
+        assert fixture.exports == [] and not data.exists()
+        calls.append(command)
+        fixture.ipc.mkdir(parents=True)
+        path.write_text(json.dumps(ready))
+        if fresh != "override-no-root":
+            settings.write_text(json.dumps({"cadLinkPath": str(tmp_path / "workspace"),
+                                            "captureDocument": False}))
+        kwargs["stdout"].write(json.dumps(_success(data)).encode())
+        return types.SimpleNamespace(poll=lambda: 0, returncode=0)
+
+    monkeypatch.setattr(wglink_launcher.subprocess, "Popen", popen)
+    _run(fixture.module, operation)
+    fixture.module._backend_admission.thread.join(timeout=5)
+    assert fixture.exports == [] and _inbox(fixture.ipc) == []
+    _finish(fixture)
+    expected = [str(entry), "--ensure-backend"]
+    if fresh.startswith("override"):
+        expected += ["--data-dir", str(data)]
+    assert calls == [expected]
+    if fresh in {"outdated", "missing-feature", "override-no-root"}:
+        assert fixture.exports == [] and _inbox(fixture.ipc) == []
+        assert {"outdated": "Update Waveguide Generator", "missing-feature": "Update and restart WG",
+                "override-no-root": "no selected CAD Link workspace"}[fresh] in fixture.ui.messages[-1][1]
+    else:
+        assert len(fixture.exports) == 1
+        assert fixture.exports[0]["capture_document"] is False
+        assert fixture.exports[0]["output_folder"] == str(tmp_path / "workspace" / "wgreturn")
+        assert _inbox(fixture.ipc)[0]["kind"] == (
+            "receive_snapshot" if operation == "send" else "prepare_and_solve")
+
+
+def test_windows_without_appdata_cannot_admit_even_with_marker(monkeypatch, tmp_path):
+    fixture = _checked_fixture(monkeypatch, tmp_path, "WGLink_marker_no_appdata")
+    entry = _installed_entry(tmp_path, "win32")
+    _install_marker(fixture.module.wglink_core.ADDIN_DIR, entry, "win32")
+    monkeypatch.setattr(wglink_launcher.sys, "platform", "win32")
+    monkeypatch.delenv("APPDATA", raising=False)
+    assert wglink_workspace.data_dir(system="Windows") is None
+    monkeypatch.setattr(fixture.module.wglink_workspace, "data_dir", lambda: None)
+    monkeypatch.setattr(fixture.module.wglink_workspace, "ipc_folder", lambda: None)
+    monkeypatch.setattr(wglink_launcher.subprocess, "Popen", lambda *a, **k: pytest.fail("spawn"))
+    _run(fixture.module, "send")
+    assert fixture.module._backend_admission.thread is None and fixture.exports == []
+    assert "Start Waveguide Generator" in fixture.ui.messages[-1][1]
 
 
 @pytest.mark.parametrize("cancel", [False, True])

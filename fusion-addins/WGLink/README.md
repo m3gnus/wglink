@@ -534,6 +534,29 @@ stay on the main thread. Stop cancels the public launcher, whose contract owns
 cleanup of any unconfirmed backend child. Successful backends stay detached.
 Admission never retries another launcher or data folder.
 
+### Cold start before WG's first launch
+
+A valid capabilities launcher takes precedence. If that advertisement is missing
+or invalid, including when the IPC folder does not exist yet, WGLink falls back
+to the WG that installed this add-in: `wglink_install.json` already records the
+bundle's `waveguideGeneratorRoot`. Its unchanged marker schema supplies the
+Windows or macOS installed entry. WG creates the data and IPC folders at startup;
+WGLink only reads their paths. The fresh capabilities and delivery versions are
+checked before any export or request is written.
+
+Windows requires both the installer-owned `ensure-backend-v1` marker and the
+matching signature in the executable. Developer syncs, checkout installs,
+hand-copied add-ins and moved or missing bundles require a manual WG start when
+no valid capabilities launcher is available. Start a moved bundle manually once
+to refresh its advertisement. An invalid advertised launcher still reports its
+validation error if the install marker cannot provide a valid fallback.
+
+With `WG2_DATA_DIR`, Fusion must inherit the same override; a per-launch WG
+`--data-dir` choice is not discoverable by Fusion. A fresh override installation
+still needs a root chosen in WG before the resumed Send can export; otherwise
+the existing no-workspace message appears. `folders.json` changes the run and CAD
+exchange folders, not IPC discovery in the application data folder.
+
 The WG `dev` files `server/tests/test_wglink_packaged_pair.py`,
 `server/tests/test_wglink_shared_protocol.py` and
 `scripts/build_wglink_package.py` reference these add-in paths/symbols:

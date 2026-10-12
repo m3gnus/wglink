@@ -23,6 +23,14 @@ else:
 # one for reaping after kill: at most 76 seconds of bounded waits.
 ENSURE_TIMEOUT = 69.0
 DISCOVERY_TIMEOUT = 3.0
+INSTALL_MARKER = "wglink_install.json"
+DEVELOPER_MARKER = "wglink_dev.json"
+_INSTALL_MARKER_FIELDS = frozenset({
+    "schema", "managedBy", "waveguideGeneratorRoot",
+    "waveguideGeneratorVersion", "sourceCommit", "addinVersion",
+})
+_NATIVE_SIGNATURE = b"WG_NATIVE_ENSURE_BACKEND_V1"
+_MAX_NATIVE_ENTRY_BYTES = 64 * 1024 * 1024
 
 
 class LauncherError(RuntimeError):
@@ -55,6 +63,47 @@ def launcher_argv(ipc: Path, *, strict: bool = False) -> list[str] | None:
     return list(argv)
 
 
+def installed_marker_argv(addin_dir: Path) -> list[str] | None:
+    """Derive the managing bundle's entry without changing its install record."""
+
+    try:
+        if addin_dir.is_symlink() or not addin_dir.is_dir():
+            return None
+        developer = addin_dir / DEVELOPER_MARKER
+        if developer.exists() or developer.is_symlink():
+            return None
+        marker = addin_dir / INSTALL_MARKER
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size > 65536:
+            return None
+        with marker.open("rb") as stream:
+            raw = stream.read(65537)
+        if len(raw) > 65536:
+            return None
+        payload = json.loads(raw.decode("utf-8"))
+        if (not isinstance(payload, dict) or set(payload) != _INSTALL_MARKER_FIELDS
+                or type(payload.get("schema")) is not int or payload["schema"] != 1
+                or payload.get("managedBy") != "waveguide-generator"):
+            return None
+        value = payload.get("waveguideGeneratorRoot")
+        if not isinstance(value, str) or not value or "\x00" in value:
+            return None
+        root = Path(value)
+        if not root.is_absolute() or root.name != "app" or not root.is_dir():
+            return None
+        if sys.platform == "win32":
+            entry = root.parent / "Waveguide Generator.exe"
+        elif sys.platform == "darwin":
+            if root.parent.name != "Resources" or root.parent.parent.name != "Contents":
+                return None
+            entry = root.parent.parent / "MacOS" / "Waveguide Generator"
+        else:
+            return None  # Fusion has no Linux managed install.
+        argv = [str(entry)]
+        return argv if _launcher_error(argv) is None else None
+    except (OSError, ValueError, RecursionError):
+        return None
+
+
 def _launcher_error(argv: object) -> str | None:
     if not isinstance(argv, list) or len(argv) != 1:
         return "argv must contain exactly one installed entry, without extra arguments"
@@ -80,6 +129,17 @@ def _launcher_error(argv: object) -> str | None:
                 return "the native ensure-backend marker has invalid contents"
         except OSError:
             return "the native ensure-backend marker is missing or unreadable"
+        try:
+            if entry.stat().st_size > _MAX_NATIVE_ENTRY_BYTES:
+                return "the native installed entry exceeds 64 MiB"
+            with entry.open("rb") as stream:
+                image = stream.read(_MAX_NATIVE_ENTRY_BYTES + 1)
+            if len(image) > _MAX_NATIVE_ENTRY_BYTES:
+                return "the native installed entry exceeds 64 MiB"
+            if _NATIVE_SIGNATURE not in image:
+                return "the native ensure-backend signature is missing from the installed entry"
+        except OSError:
+            return "the native installed entry is unreadable"
     else:
         if entry.name not in {"waveguide-generator", "launch-wg.sh"}:
             return "expected the installed waveguide-generator or launch-wg.sh entry"
@@ -202,7 +262,7 @@ def parse_response(output: str, code: int, data_dir: Path) -> Mapping[str, objec
 
 def ensure_backend(argv: list[str], data_dir: Path, override: Path | None,
                    cancelled: threading.Event, *, timeout: float = ENSURE_TIMEOUT) -> None:
-    """Invoke only the advertised entry, once; cancellation addresses our child."""
+    """Invoke only the validated installed entry, once; cancel only our child."""
 
     command = list(argv) + ["--ensure-backend"]
     if cancelled.is_set():

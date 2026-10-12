@@ -835,7 +835,7 @@ def _no_workspace_text(action: str = "send again") -> str:
     )
 
 
-def _send_options(command_inputs: object) -> dict[str, object]:
+def _send_backend_options() -> dict[str, object]:
     # WG only ingests from its own workspace, so there is one correct
     # destination and the UI no longer asks. Collision-safe naming is kept:
     # a return WG has not ingested yet is not in content-addressed storage,
@@ -843,14 +843,21 @@ def _send_options(command_inputs: object) -> dict[str, object]:
     output = wglink_workspace.return_folder()
     if output is None:
         raise wglink_core.WgLinkError(_no_workspace_text())
-    options: dict[str, object] = {
-        "selection": _send_selection(command_inputs),
+    return {
         "output_folder": str(output),
-        "overwrite": False,
         "capture_document": wglink_workspace.capture_document(),
         "source_identity": _source_identity_enabled(),
         **_required_manifest_features(),
     }
+
+
+def _send_options(command_inputs: object, *, backend_ready: bool = True) -> dict[str, object]:
+    options: dict[str, object] = {
+        "selection": _send_selection(command_inputs),
+        "overwrite": False,
+    }
+    if backend_ready:
+        options.update(_send_backend_options())
     anchor_input = _input(command_inputs, "anchor_instance_id")
     try:
         if anchor_input.isVisible:
@@ -1805,15 +1812,27 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         choices survive; their Fusion entity references are accessed on main.
         """
 
+        data_dir = wglink_workspace.data_dir()
+        if data_dir is None:
+            return False
         ipc = wglink_workspace.ipc_folder()
+        if ipc is None:
+            ipc = data_dir / wglink_workspace.IPC_SUBDIRECTORY
+        argv = wglink_launcher.launcher_argv(ipc)
+        if argv is None:
+            argv = wglink_launcher.installed_marker_argv(wglink_core.ADDIN_DIR)
         try:
-            argv = wglink_launcher.launcher_argv(ipc, strict=True) if ipc is not None else None
+            if argv is None:
+                # Preserve the visible validation error for an advertised but
+                # invalid entry when the managed install cannot rescue it.
+                wglink_launcher.launcher_argv(ipc, strict=True)
         except wglink_launcher.LauncherError as exc:
             raise wglink_core.WgLinkError(str(exc)) from exc
         if argv is None:
             return False
         try:
-            wglink_inbox.require_wg_delivery(ipc)
+            if (ipc / wglink_inbox.CAPABILITIES_FILENAME).exists():
+                wglink_inbox.require_wg_delivery(ipc)
         except wglink_inbox.WgNotCollectingError:
             pass  # An installed launcher can start or adopt this same folder.
         except wglink_inbox.WgOutdatedError as exc:
@@ -1823,9 +1842,8 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         app = _app()
         document_id = _active_document_id()
         document = app.activeDocument
-        options = _send_options(args.command.commandInputs)
+        options = _send_options(args.command.commandInputs, backend_ready=False)
         # IPC comes exclusively from workspace.data_dir(), not the CAD workspace.
-        data_dir = ipc.parent.parent
         override = wglink_workspace.launcher_data_dir()
         admission = _backend_admission
 
@@ -1849,11 +1867,11 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                     or (document_id is None and app.activeDocument != document)):
                 _modal("The active Fusion document changed while WG was starting. Send or Solve again from the intended document.", "WGLink refused")
                 return
-            # Negotiate the freshly advertised manifest features before export.
+            # Read settings and negotiate capabilities after WG has created its
+            # first workspace and advertisement, before any export.
             try:
                 options.pop("fem_regions", None)
-                options.update(_required_manifest_features())
-                options["source_identity"] = _source_identity_enabled()
+                options.update(_send_backend_options())
             except wglink_core.WgLinkError as exc:
                 _modal(str(exc), "WGLink refused")
                 return
