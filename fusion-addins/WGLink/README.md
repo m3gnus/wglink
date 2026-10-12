@@ -219,6 +219,23 @@ coupled FEM/BEM solve, following the FEM export dialog of the Fusion-to-MSH
 add-in: one solid body, a region size and bulk loss, and any number of named
 surface groups (moving diaphragm with a drive role, interface to the exterior,
 plane-wave termination, rigid wall), each with a local size and its faces.
+Rigid groups offer **Absorbing lining** with thickness (default 30 mm) and
+flow resistivity (default 5000 Pa·s/m²). Moving groups offer **Relative level
+(dB)**, default 0 dB, with values at or below zero.
+
+Protocol rules: `femRegions >= 1` means accepts `fem-regions-v1` with these
+optional surface-group keys:
+
+- `lining` is allowed only on `rigid` groups and is an object with exactly
+  `model: "miki"`, positive finite `thickness_mm`, and positive finite
+  `flow_resistivity_pa_s_per_m2`.
+- `relative_level_db` is allowed only on `moving` groups and is a finite number
+  ≤ 0. WG converts it to the linear motion weight `10 ** (relative_level_db / 20)`.
+  Omission means 0 dB (weight 1); unlined walls omit `lining`.
+
+Existing declarations read with these defaults. Default dialog values add no
+keys to the return, preserving existing FEM bytes. Lining and relative level
+are included in the return-state hash, so changes invalidate an earlier return.
 
 - `wglink_fem.py` (no `adsk`) owns validation, the attribute payloads, face
   descriptors and the `scope.fem_regions` records.
@@ -235,11 +252,14 @@ plane-wave termination, rigid wall), each with a local size and its faces.
   It exports each region by
   copying the body into a temporary root component, which is deleted again,
   and gates the member to one solid.
-- Send allows only one moving group per drive role across all declared regions.
-  A FEM diaphragm also refuses a role with more than one exterior source channel
+- Several moving groups may share one drive role: front and rear of one
+  diaphragm in two regions, or dome and surround in one region.
+  WG decides whether the channel is electrodynamic; **ideal-source channels
+  with FEM diaphragms in more than one region are refused by WG**.
+  A FEM diaphragm still refuses a role with more than one exterior source channel
   (for example, `drive-lf` and `drive-lf-2`); the refusal names the role and
-  conflicting regions/groups or sources. Use a different role for each driver.
-  One painted exterior source and one FEM diaphragm on the same role are allowed
+  conflicting sources. Use a different role for each driver.
+  One painted exterior source and FEM diaphragms on the same role are allowed
   and share one drive channel as one driver.
 - No meshing happens in Fusion. Faces are described by geometry in the export
   frame and WG matches them to its own gmsh surfaces, so mesh tags stay WG's.

@@ -200,8 +200,9 @@ def test_a_fem_diaphragm_alone_drives_the_return(send_module, tmp_path, monkeypa
 
 @pytest.mark.parametrize("separate_regions", [False, True],
                          ids=["same-region", "across-regions"])
-def test_same_role_fem_moving_groups_refuse_before_export(
-    send_module, tmp_path, monkeypatch, separate_regions
+@pytest.mark.parametrize("painted", [False, True], ids=["fem-only", "shared-exterior"])
+def test_same_role_fem_moving_groups_share_a_drive_channel(
+    send_module, tmp_path, monkeypatch, separate_regions, painted
 ):
     fem = _fem(send_module)
     air, cone, port = air_body()
@@ -222,7 +223,7 @@ def test_same_role_fem_moving_groups_refuse_before_export(
             ],
         )
         send_module.declare_fem_region(air, plan, {"cone": [cone], "second-cone": [port]})
-    root = component("Speaker", [body("cabinet", faces=[face("LF")]), *regions])
+    root = component("Speaker", [body("cabinet", faces=[face("LF" if painted else "Steel")]), *regions])
     design, app = _design(send_module, monkeypatch, root)
     exports = []
     execute = design.exportManager.execute
@@ -230,19 +231,27 @@ def test_same_role_fem_moving_groups_refuse_before_export(
         exports.append(options)
         return execute(options)
     monkeypatch.setattr(design.exportManager, "execute", track_export)
-    with pytest.raises(send_module.wglink_core.WgLinkError) as refusal:
-        send_module.send(app, {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True})
-    message = str(refusal.value)
-    assert "Drive role 'LF' has more than one FEM moving group" in message
-    assert "'Cone' in region 'Rear chamber'" in message
-    assert ("'Cone' in region 'Front chamber'" if separate_regions
-            else "'Second cone' in region 'Rear chamber'") in message
-    assert exports == []
-    assert list(tmp_path.iterdir()) == []
+    report = send_module.send(app, {
+        "output_folder": str(tmp_path), "capture_document": False, "fem_regions": True,
+    })
+    manifest = report["manifest"]
+    moving = [group for region in manifest["scope"]["fem_regions"]
+              for group in region["surface_groups"] if group["kind"] == "moving"]
+    assert len(moving) == 2
+    assert {group["drive_channel_id"] for group in moving} == {"drive-lf"}
+    if painted:
+        assert manifest["sources"][0]["default_drive_channel_id"] == "drive-lf"
+    else:
+        assert manifest["sources"] == []
+    assert len(exports) == 1 + len(regions)
+    assert root.occurrences == []
+    for profile in (send_module.wglink_protocol.ADDIN_WRITER, send_module.wglink_protocol.WG_INGRESS):
+        send_module.wglink_protocol.validate_structure(manifest, profile)
 
 
+@pytest.mark.parametrize("shared", [False, True], ids=["one-diaphragm", "shared-diaphragm"])
 def test_fem_role_with_multiple_exterior_channels_refuses_before_export(
-    send_module, tmp_path, monkeypatch
+    send_module, tmp_path, monkeypatch, shared
 ):
     # A linked throat and unclaimed exterior paint allocate two HF channels.
     design, app = _linked_cut_design(
@@ -251,6 +260,10 @@ def test_fem_role_with_multiple_exterior_channels_refuses_before_export(
     root = design.rootComponent
     air, cone, port = air_body()
     _declare(send_module, air, cone, port, _fem(send_module), role="HF")
+    if shared:
+        declaration = send_module.read_fem_region(air)
+        declaration["groups"][1].update(kind="moving", drive_role="HF")
+        air.attributes.add("WGLink", _fem(send_module).REGION_ATTRIBUTE, json.dumps(declaration))
     root.bRepBodies.extend([body("second driver", faces=[face("HF")]), air])
     root.occurrences = Occurrences()
     send_module.adsk.core.Matrix3D = types.SimpleNamespace(create=lambda: object())
@@ -632,3 +645,65 @@ def test_clear_recovery_removes_malformed_body_and_face_attributes(send_module, 
     assert "fem_regions" not in report["manifest"]["scope"]
     assert air.attributes.values == {}
     assert all(item.attributes.values == {} for item in air.faces)
+
+
+@pytest.mark.parametrize(("key", "before_value", "after_value"), [
+    ("relative_level_db", None, -6.0),
+    ("relative_level_db", -6.0, -12.0),
+    ("lining", None, {"model": "miki", "thickness_mm": 30.0, "flow_resistivity_pa_s_per_m2": 5000.0}),
+    ("lining", {"model": "miki", "thickness_mm": 30.0, "flow_resistivity_pa_s_per_m2": 5000.0},
+     {"model": "miki", "thickness_mm": 40.0, "flow_resistivity_pa_s_per_m2": 5000.0}),
+    ("lining", {"model": "miki", "thickness_mm": 30.0, "flow_resistivity_pa_s_per_m2": 5000.0},
+     {"model": "miki", "thickness_mm": 30.0, "flow_resistivity_pa_s_per_m2": 6000.0}),
+])
+def test_boundary_physics_changes_return_hash_and_round_trips_send(
+    send_module, tmp_path, monkeypatch, key, before_value, after_value
+):
+    fem = _fem(send_module)
+    air, cone, port = air_body()
+    _declare(send_module, air, cone, port, fem)
+    declaration = send_module.read_fem_region(air)
+    index = 0 if key == "relative_level_db" else 1
+    if key == "lining":
+        declaration["groups"][index]["kind"] = "rigid"
+    if before_value is not None:
+        declaration["groups"][index][key] = before_value
+    air.attributes.add("WGLink", fem.REGION_ATTRIBUTE, json.dumps(declaration))
+    root = component("Speaker", [body("cabinet", faces=[face("LF")]), air])
+    _, app = _design(send_module, monkeypatch, root)
+    before = send_module.return_state(app)
+    declaration["groups"][index][key] = after_value
+    air.attributes.add("WGLink", fem.REGION_ATTRIBUTE, json.dumps(declaration))
+    after = send_module.return_state(app)
+    assert before["hash"] is not None and after["hash"] is not None
+    assert before["hash"] != after["hash"]
+    report = send_module.send(app, {
+        "output_folder": str(tmp_path), "capture_document": False, "fem_regions": True,
+    })
+    assert report["manifest"]["scope"]["fem_regions"][0]["surface_groups"][index][key] == after_value
+    # Removing the edit restores the exact optimistic-concurrency state.
+    if before_value is None:
+        del declaration["groups"][index][key]
+    else:
+        declaration["groups"][index][key] = before_value
+    air.attributes.add("WGLink", fem.REGION_ATTRIBUTE, json.dumps(declaration))
+    assert send_module.return_state(app)["hash"] == before["hash"]
+
+
+def test_fem_declarations_allow_a_declared_reduced_domain(send_module, tmp_path, monkeypatch):
+    from test_wglink_send import half_body
+
+    air, cone, port = air_body()
+    _declare(send_module, air, cone, port, _fem(send_module))
+    shell = half_body("cabinet", faces=[face("LF")])
+    root = component("Speaker", [shell, air])
+    _, app = _design(send_module, monkeypatch, root)
+    manifest = send_module.send(app, {
+        "output_folder": str(tmp_path), "capture_document": False,
+        "fem_regions": True, "domain": ["y0"],
+    })["manifest"]
+    assert manifest["assembly"]["domain"]["kind"] == "half"
+    assert manifest["assembly"]["domain"]["cut_planes"] == ["y0"]
+    assert "reduced-domain-v1" in manifest["required_features"]
+    assert "fem-regions-v1" in manifest["required_features"]
+    assert manifest["scope"]["fem_regions"]

@@ -1976,6 +1976,8 @@ def _add_fem_group(
     size_mm: float = wglink_fem.DEFAULT_GROUP_SIZE_MM,
     role: str = "LF",
     faces: list[object] | None = None,
+    lining: dict[str, object] | None = None,
+    relative_level_db: float = wglink_fem.DEFAULT_RELATIVE_LEVEL_DB,
 ) -> None:
     container = _input(inputs, "fem_groups")
     if container is None:
@@ -2002,6 +2004,24 @@ def _add_fem_group(
     for value in wglink_fem.DRIVE_ROLES:
         roles.listItems.add(value, value == role)
     roles.isVisible = kind == "moving"
+    children.addValueInput(
+        _fem_input_id("level", group_id), "Relative level (dB)", "",
+        adsk.core.ValueInput.createByReal(relative_level_db),
+    )
+    children.addBoolValueInput(
+        _fem_input_id("lining", group_id), "Absorbing lining", True, "", lining is not None,
+    )
+    children.addValueInput(
+        _fem_input_id("thickness", group_id), "Lining thickness", "mm",
+        _mm_input(float((lining or {}).get("thickness_mm", wglink_fem.DEFAULT_LINING_THICKNESS_MM))),
+    )
+    children.addValueInput(
+        _fem_input_id("resistivity", group_id), "Flow resistivity (Pa·s/m²)", "",
+        adsk.core.ValueInput.createByReal(float((lining or {}).get(
+            "flow_resistivity_pa_s_per_m2", wglink_fem.DEFAULT_FLOW_RESISTIVITY_PA_S_PER_M2,
+        ))),
+    )
+    _sync_fem_group_options(inputs, group_id)
     children.addValueInput(_fem_input_id("size", group_id), "Mesh size", "mm", _mm_input(size_mm))
     selection = children.addSelectionInput(
         _fem_input_id("faces", group_id), "Faces", "Select faces of the air body."
@@ -2016,6 +2036,18 @@ def _add_fem_group(
     remove = _input(inputs, "fem_remove_group")
     if remove is not None:
         remove.isEnabled = True
+
+
+def _sync_fem_group_options(inputs: object, group_id: int) -> None:
+    kind = wglink_fem.resolve_kind(
+        _selected_name(inputs, _fem_input_id("kind", group_id), "")
+    )
+    for prefix in ("role", "level", "lining", "thickness", "resistivity"):
+        item = _input(inputs, _fem_input_id(prefix, group_id))
+        if item is not None:
+            item.isVisible = kind == ("moving" if prefix in ("role", "level") else "rigid")
+            if prefix in ("thickness", "resistivity"):
+                item.isEnabled = bool(_input_value(inputs, _fem_input_id("lining", group_id)))
 
 
 def _remove_fem_group(inputs: object, state: FemDialogState, group_id: int) -> None:
@@ -2065,6 +2097,8 @@ def _restore_fem_region(inputs: object, state: FemDialogState, body: object) -> 
                 size_mm=float(group.get("mesh_size_mm") or wglink_fem.DEFAULT_GROUP_SIZE_MM),
                 role=str(group.get("drive_role") or "LF"),
                 faces=faces.get(str(group.get("group_id")), []),
+                lining=group.get("lining"),
+                relative_level_db=float(group.get("relative_level_db", wglink_fem.DEFAULT_RELATIVE_LEVEL_DB)),
             )
     finally:
         state.restoring = False
@@ -2087,13 +2121,25 @@ def _fem_group_rows(inputs: object, state: FemDialogState, body: object) -> list
                 "area_cm2": getattr(native, "area", None),
                 "face": face,
             })
-        rows.append({
+        row = {
             "name": str(_input_value(inputs, _fem_input_id("name", group_id)) or ""),
             "kind": _selected_name(inputs, _fem_input_id("kind", group_id), ""),
             "drive_role": _selected_name(inputs, _fem_input_id("role", group_id), ""),
             "mesh_size_mm": _mm_value(inputs, _fem_input_id("size", group_id)),
             "faces": faces,
-        })
+        }
+        kind = wglink_fem.resolve_kind(row["kind"])
+        if kind == "moving":
+            level = _input(inputs, _fem_input_id("level", group_id))
+            row["relative_level_db"] = (level.value if level is not None
+                                        else wglink_fem.DEFAULT_RELATIVE_LEVEL_DB)
+        if kind == "rigid" and _input_value(inputs, _fem_input_id("lining", group_id)):
+            row["lining"] = {
+                "model": "miki",
+                "thickness_mm": _mm_value(inputs, _fem_input_id("thickness", group_id)),
+                "flow_resistivity_pa_s_per_m2": _input_value(inputs, _fem_input_id("resistivity", group_id)),
+            }
+        rows.append(row)
     return rows
 
 
@@ -2206,13 +2252,9 @@ class FemInputChangedHandler(adsk.core.InputChangedEventHandler):
                 bodies = _selected_entities(inputs, "fem_body")
                 if bodies:
                     _restore_fem_region(inputs, self.state, bodies[0])
-            elif input_id.startswith("fem_kind_"):
+            elif input_id.startswith(("fem_kind_", "fem_lining_")):
                 group_id = int(input_id.rsplit("_", 1)[-1])
-                role = _input(inputs, _fem_input_id("role", group_id))
-                if role is not None:
-                    role.isVisible = wglink_fem.resolve_kind(
-                        _selected_name(inputs, input_id, "")
-                    ) == "moving"
+                _sync_fem_group_options(inputs, group_id)
             elif input_id.startswith("fem_name_"):
                 group_id = int(input_id.rsplit("_", 1)[-1])
                 group = _input(inputs, _fem_input_id("group", group_id))

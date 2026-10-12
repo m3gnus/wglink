@@ -3871,7 +3871,10 @@ def _refuse_ambiguous_fem_drivers(
     region_exports: list[tuple["wglink_fem.RegionExport", object]],
     sources: list[dict[str, Any]],
 ) -> None:
-    """One moving group per role can share one exterior source's channel."""
+    """Shared diaphragms need an unambiguous painted channel per role.
+
+    WG decides whether a channel can drive diaphragms across regions.
+    """
 
     moving: dict[str, list[str]] = {}
     for export, _body in region_exports:
@@ -3882,12 +3885,6 @@ def _refuse_ambiguous_fem_drivers(
                     f"{group['name']!r} in region {declaration['name']!r}"
                 )
     for role, groups in moving.items():
-        if len(groups) > 1:
-            raise wglink_core.WgLinkError(
-                f"Drive role {role!r} has more than one FEM moving group: "
-                + ", ".join(groups)
-                + ". Use a different drive role for each driver before sending."
-            )
         exterior = [source for source in sources if source["role"] == role]
         channels = {source["default_drive_channel_id"] for source in exterior}
         if len(channels) > 1:

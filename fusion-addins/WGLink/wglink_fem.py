@@ -69,6 +69,9 @@ DEFAULT_GROUP_SIZE_MM = 3.0
 DEFAULT_SOUND_SPEED_M_PER_S = 343.0
 DEFAULT_DENSITY_KG_PER_M3 = 1.21
 DEFAULT_BULK_LOSS_FACTOR = 0.0
+DEFAULT_LINING_THICKNESS_MM = 30.0
+DEFAULT_FLOW_RESISTIVITY_PA_S_PER_M2 = 5000.0
+DEFAULT_RELATIVE_LEVEL_DB = 0.0
 # The presets Boundary Lab offers for bulk loss (0 is lossless air).
 BULK_LOSS_PRESETS = (0.0, 0.002, 0.005, 0.01, 0.02, 0.05)
 
@@ -149,6 +152,8 @@ class GroupDeclaration:
     face_keys: tuple[Any, ...]
     declared_area_mm2: float
     face_ids: tuple[str, ...]
+    lining: Mapping[str, Any] | None = None
+    relative_level_db: float = DEFAULT_RELATIVE_LEVEL_DB
 
     def payload(self) -> dict[str, Any]:
         record: dict[str, Any] = {
@@ -162,6 +167,10 @@ class GroupDeclaration:
         }
         if self.drive_role is not None:
             record["drive_role"] = self.drive_role
+        if self.lining is not None:
+            record["lining"] = dict(self.lining)
+        if self.relative_level_db != DEFAULT_RELATIVE_LEVEL_DB:
+            record["relative_level_db"] = self.relative_level_db
         return record
 
 
@@ -262,6 +271,11 @@ def plan_region_declaration(
             raise FemDeclarationError(f"Surface group name {group_name!r} is used twice.")
         names.add(group_name.casefold())
         kind = resolve_kind(raw.get("kind"))
+        options = {key: raw[key] for key in ("lining", "relative_level_db") if key in raw}
+        try:
+            wglink_protocol.validate_fem_group_options({"kind": kind, **options}, label)
+        except wglink_protocol.ProtocolValidationError as exc:
+            raise FemDeclarationError(str(exc)) from exc
         group_size = _positive(raw.get("mesh_size_mm"), f"The mesh size of {label!r}")
         role = raw.get("drive_role")
         if kind == "moving":
@@ -299,6 +313,8 @@ def plan_region_declaration(
                 face_keys=tuple(keys),
                 declared_area_mm2=math.fsum(areas),
                 face_ids=tuple(uuid.uuid4().hex for _ in keys),
+                lining=dict(options["lining"]) if "lining" in options else None,
+                relative_level_db=float(options.get("relative_level_db", DEFAULT_RELATIVE_LEVEL_DB)),
             )
         )
     return RegionDeclaration(
@@ -369,7 +385,9 @@ def read_region_attribute(text: object) -> dict[str, Any] | None:
             _positive(group["mesh_size_mm"], "Group size")
             if group["kind"] == "moving":
                 drive_channel_for_role(group["drive_role"])
-    except (KeyError, TypeError, AttributeError, FemDeclarationError):
+            wglink_protocol.validate_fem_group_options(group, group["name"])
+    except (KeyError, TypeError, AttributeError, FemDeclarationError,
+            wglink_protocol.ProtocolValidationError):
         return None
     return value
 
@@ -548,6 +566,13 @@ def plan_fem_regions(exports: Sequence[RegionExport]) -> list[dict[str, Any]]:
             }
             if record["kind"] == "moving":
                 record["drive_channel_id"] = drive_channel_for_role(str(group.get("drive_role")))
+            try:
+                wglink_protocol.validate_fem_group_options(group, str(group["name"]))
+            except wglink_protocol.ProtocolValidationError as exc:
+                raise FemDeclarationError(str(exc)) from exc
+            for key in ("lining", "relative_level_db"):
+                if key in group:
+                    record[key] = dict(group[key]) if key == "lining" else group[key]
             groups.append(record)
         records.append(
             {

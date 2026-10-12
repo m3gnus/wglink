@@ -20,6 +20,16 @@ Send and Solve can start an installed WG backend through its advertised launcher
 
 WGLink's Send and Solve dialogs use an automatic model domain; there is no manual Model dropdown. With a current WG, explicit exports also record surviving Fusion origin-plane cut history and the Y-up/Z-up modelling orientation. Send/Solve also require WG to advertise those manifest capabilities before a return is exported.
 
+## FEM regions
+
+With WG's `femRegions >= 1` capability, **Declare FEM Region…** marks bounded
+air bodies and their surface groups. Rigid groups can carry Miki absorbing
+lining (default thickness 30 mm, flow resistivity 5000 Pa·s/m²); moving groups
+can set a relative level in dB (≤ 0, default 0). Several moving groups may share
+one drive role for a diaphragm's front/rear surfaces or dome/surround. WG refuses
+ideal-source channels with FEM diaphragms in more than one region. See the
+[protocol rules](fusion-addins/WGLink/README.md#fem-regions-fem-regions-v1).
+
 ## Install
 
 The WG platform installer installs the packaged add-in and connects it to WG's runtime. For development from this checkout:

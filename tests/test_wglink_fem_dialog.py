@@ -85,6 +85,7 @@ def _capabilities(fixture, payload):
     ({"schemaVersion": 2, "femRegions": 1}, False),
     ("unreadable", False),
     ({"schemaVersion": 1, "femRegions": 1}, True),
+    ({"schemaVersion": 1, "femRegions": 2}, True),
 ])
 def test_startup_registers_the_command_and_icon_only_under_the_capability(
     monkeypatch, tmp_path, payload, enabled
@@ -305,3 +306,154 @@ def test_send_and_solve_wire_the_clear_prompt_on_the_command_thread(fixture, mon
         command=types.SimpleNamespace(commandInputs=_dialog_inputs())
     ))
     assert calls == [(module._confirm_clear_fem, command_thread)]
+
+
+LINING = {"model": "miki", "thickness_mm": 30.0, "flow_resistivity_pa_s_per_m2": 5000.0}
+
+
+def test_dialog_boundary_options_persist_and_clear(fixture):
+    module = fixture.module
+    air, faces = _air(module)
+    inputs = _inputs(module, air, faces,
+        fem_level_1=_value(-6.0),
+        fem_kind_2=_chosen("Rigid wall (local size)"),
+        fem_lining_2=_value(True), fem_thickness_2=_value(3.0),
+        fem_resistivity_2=_value(5000.0),
+    )
+    module._apply_fem_region(inputs, _state(module, 1, 2))
+    groups = module.wglink_send.read_fem_region(air)["groups"]
+    assert groups[0]["relative_level_db"] == -6.0
+    assert groups[1]["lining"] == LINING
+    inputs = _inputs(module, air, faces,
+        fem_level_1=_value(0.0), fem_kind_2=_chosen("Rigid wall (local size)"),
+        fem_lining_2=_value(False), fem_thickness_2=_value(0.0),
+        fem_resistivity_2=_value(-1.0),
+    )
+    module._apply_fem_region(inputs, _state(module, 1, 2))
+    groups = module.wglink_send.read_fem_region(air)["groups"]
+    assert "relative_level_db" not in groups[0]
+    assert "lining" not in groups[1]
+
+
+@pytest.mark.parametrize(("overrides", "message"), [
+    ({"fem_level_1": _value(0.1)}, "relative_level_db"),
+    ({"fem_level_1": _value(float("nan"))}, "relative_level_db"),
+    ({"fem_thickness_2": _value(0)}, "thickness_mm"),
+    ({"fem_resistivity_2": _value(-1)}, "flow_resistivity_pa_s_per_m2"),
+])
+def test_dialog_refuses_invalid_boundary_fields(fixture, overrides, message):
+    module = fixture.module
+    air, faces = _air(module)
+    defaults = dict(fem_level_1=_value(0), fem_kind_2=_chosen("Rigid wall (local size)"),
+                    fem_lining_2=_value(True), fem_thickness_2=_value(3),
+                    fem_resistivity_2=_value(5000))
+    defaults.update(overrides)
+    assert message in module._fem_validation_error(
+        _inputs(module, air, faces, **defaults), _state(module, 1, 2)
+    )
+    assert air.attributes.values == {}
+
+
+def _building_inputs(module):
+    """Build real dialog code against a minimal Fusion command-input surface."""
+    items = {}
+
+    class Inputs:
+        def itemById(self, input_id):
+            return items.get(input_id)
+
+        def addGroupCommandInput(self, input_id, name):
+            item = types.SimpleNamespace(children=self, name=name, deleteMe=lambda: items.pop(input_id))
+            items[input_id] = item
+            return item
+
+        def addStringValueInput(self, input_id, name, value):
+            return self.addValueInput(input_id, name, "", value)
+
+        def addValueInput(self, input_id, name, units, value):
+            item = types.SimpleNamespace(id=input_id, name=name, value=value, unitType=units)
+            items[input_id] = item
+            return item
+
+        def addBoolValueInput(self, input_id, name, _checkbox, _resource, value):
+            return self.addValueInput(input_id, name, "", value)
+
+        def addDropDownCommandInput(self, input_id, name, _style):
+            entries = []
+            item = types.SimpleNamespace(id=input_id, name=name, selectedItem=None)
+            def add(label, selected):
+                entry = types.SimpleNamespace(name=label, isSelected=selected)
+                entries.append(entry)
+                if selected:
+                    item.selectedItem = entry
+            item.listItems = types.SimpleNamespace(add=add, item=lambda i: entries[i], count=0)
+            items[input_id] = item
+            return item
+
+        def addSelectionInput(self, input_id, _name, _prompt):
+            item = _SelectionInput([])
+            item.addSelection = lambda face: item._entities.append(face)
+            item.addSelectionFilter = lambda _filter: None
+            item.setSelectionLimits = lambda *_limits: None
+            items[input_id] = item
+            return item
+
+    module.adsk.core.ValueInput = types.SimpleNamespace(createByReal=lambda value: value)
+    module.adsk.core.DropDownStyles = types.SimpleNamespace(TextListDropDownStyle=1)
+    inputs = Inputs()
+    inputs.addGroupCommandInput("fem_groups", "Surface groups")
+    return inputs, items
+
+
+def test_dialog_builds_defaults_and_updates_kind_and_lining_visibility(fixture):
+    module = fixture.module
+    inputs, items = _building_inputs(module)
+    state = module.FemDialogState()
+    module._add_fem_group(inputs, state, kind="rigid")
+    assert items["fem_lining_1"].name == "Absorbing lining"
+    assert items["fem_lining_1"].value is False
+    assert items["fem_thickness_1"].value == 3.0  # cm internally
+    assert items["fem_resistivity_1"].value == 5000.0
+    assert items["fem_level_1"].name == "Relative level (dB)"
+    assert items["fem_level_1"].value == 0.0
+    assert items["fem_lining_1"].isVisible
+    assert not items["fem_thickness_1"].isEnabled
+    assert not items["fem_level_1"].isVisible
+    items["fem_lining_1"].value = True
+    module.FemInputChangedHandler(state)._changed(types.SimpleNamespace(
+        input=items["fem_lining_1"], inputs=inputs,
+    ))
+    assert items["fem_thickness_1"].isEnabled
+    assert items["fem_resistivity_1"].isEnabled
+    for kind in ("moving", "interface", "plane-wave-termination"):
+        label = next(label for label, value in module.wglink_fem.KIND_CHOICES if value == kind)
+        items["fem_kind_1"].selectedItem = types.SimpleNamespace(name=label)
+        module.FemInputChangedHandler(state)._changed(types.SimpleNamespace(
+            input=items["fem_kind_1"], inputs=inputs,
+        ))
+        assert items["fem_level_1"].isVisible == (kind == "moving")
+        assert items["fem_role_1"].isVisible == (kind == "moving")
+        assert not items["fem_lining_1"].isVisible
+        assert not items["fem_thickness_1"].isVisible
+        assert not items["fem_resistivity_1"].isVisible
+
+
+@pytest.mark.parametrize("new_options", [False, True])
+def test_restoring_dialog_reads_old_defaults_and_saved_boundary_options(fixture, new_options):
+    module = fixture.module
+    air, faces = _air(module)
+    overrides = dict(fem_kind_2=_chosen("Rigid wall (local size)"))
+    if new_options:
+        overrides.update(fem_level_1=_value(-9), fem_lining_2=_value(True),
+                         fem_thickness_2=_value(4), fem_resistivity_2=_value(6000))
+    module._apply_fem_region(_inputs(module, air, faces, **overrides), _state(module, 1, 2))
+    inputs, items = _building_inputs(module)
+    state = module.FemDialogState()
+    module._restore_fem_region(inputs, state, air)
+    assert items["fem_level_1"].value == (-9 if new_options else 0)
+    assert items["fem_lining_2"].value is new_options
+    assert items["fem_thickness_2"].value == (4 if new_options else 3)
+    assert items["fem_resistivity_2"].value == (6000 if new_options else 5000)
+    assert items["fem_faces_1"].selection(0).entity is faces[0]
+    assert items["fem_faces_2"].selection(0).entity is faces[1]
+    assert not state.restoring

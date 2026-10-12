@@ -353,3 +353,92 @@ def test_shared_source_allocator_keeps_exterior_collision_suffixes():
     assert fem.wglink_author.source_ids("LF", used) == ("source-lf", "drive-lf")
     assert fem.wglink_author.source_ids("LF", used) == ("source-lf-2", "drive-lf-2")
     assert fem.drive_channel_for_role("LF") == "drive-lf"
+
+
+LINING = {"model": "miki", "thickness_mm": 30.0, "flow_resistivity_pa_s_per_m2": 5000.0}
+
+
+@pytest.mark.parametrize(("fixture", "profile"), PROFILES)
+@pytest.mark.parametrize("level", [0, -6.0, -120])
+def test_optional_boundary_physics_validate_in_both_profiles(fixture, profile, level):
+    manifest = _with_regions(_base(fixture))
+    moving, wall = manifest["scope"]["fem_regions"][0]["surface_groups"]
+    moving["relative_level_db"] = level
+    wall["kind"] = "rigid"
+    wall["lining"] = dict(LINING)
+    protocol.validate_structure(manifest, profile)
+
+
+BAD_OPTIONS = [
+    ("rigid", "lining", value) for value in (None, True, 30, "miki", [])
+] + [
+    ("rigid", "lining", {**LINING, key: value})
+    for key in ("thickness_mm", "flow_resistivity_pa_s_per_m2")
+    for value in (None, True, "30", 0, -1, float("nan"), float("inf"), float("-inf"))
+] + [
+    ("rigid", "lining", {**LINING, "model": value})
+    for value in (None, True, 1, "other")
+] + [
+    ("rigid", "lining", {key: value for key, value in LINING.items() if key != missing})
+    for missing in LINING
+] + [
+    ("rigid", "lining", {**LINING, "extra": 1}),
+    ("moving", "lining", LINING),
+    ("interface", "lining", LINING),
+    ("plane-wave-termination", "lining", LINING),
+] + [
+    ("moving", "relative_level_db", value)
+    for value in (None, True, "-6", [], 0.001, float("nan"), float("inf"), float("-inf"))
+] + [
+    (kind, "relative_level_db", -6)
+    for kind in ("rigid", "interface", "plane-wave-termination")
+]
+
+
+@pytest.mark.parametrize(("fixture", "profile"), PROFILES)
+@pytest.mark.parametrize(("kind", "key", "value"), BAD_OPTIONS)
+def test_optional_boundary_physics_refuse_invalid_values(fixture, profile, kind, key, value):
+    manifest = _with_regions(_base(fixture))
+    group = manifest["scope"]["fem_regions"][0]["surface_groups"][0]
+    group["kind"] = kind
+    if kind != "moving":
+        del group["drive_channel_id"]
+    group[key] = value
+    with pytest.raises(protocol.ProtocolValidationError, match=key):
+        protocol.validate_structure(manifest, profile)
+
+
+@pytest.mark.parametrize(("kind", "key", "value"), BAD_OPTIONS)
+def test_planner_and_attribute_reader_refuse_invalid_boundary_options(kind, key, value):
+    raw = {"name": "Boundary", "kind": kind, "mesh_size_mm": 3, "drive_role": "LF",
+           "faces": [_face("f1")], key: value}
+    with pytest.raises(fem.FemDeclarationError, match=key):
+        _plan(groups=[raw])
+    raw.pop(key)
+    stored = json.loads(_plan(groups=[raw]).body_attribute())
+    stored["groups"][0][key] = value
+    assert fem.read_region_attribute(json.dumps(stored)) is None
+    with pytest.raises(fem.FemDeclarationError, match=key):
+        fem.plan_fem_regions([_export("b", stored, {"boundary": [_descriptor()]})])
+
+
+def test_boundary_options_persist_and_export_with_old_defaults_omitted():
+    groups = [
+        {"name": "Cone", "kind": "moving", "drive_role": "LF", "mesh_size_mm": 3,
+         "faces": [_face("f1")], "relative_level_db": -6.0},
+        {"name": "Wall", "kind": "rigid", "mesh_size_mm": 3,
+         "faces": [_face("f2")], "lining": dict(LINING)},
+    ]
+    stored = fem.read_region_attribute(_plan(groups=groups).body_attribute())
+    record = fem.plan_fem_regions([_export("b", stored, {
+        "cone": [_descriptor()], "wall": [_descriptor(2)],
+    })])[0]
+    assert record["surface_groups"][0]["relative_level_db"] == -6.0
+    assert record["surface_groups"][1]["lining"] == LINING
+    assert stored["groups"][0]["relative_level_db"] == -6.0
+    assert stored["groups"][1]["lining"] == LINING
+    groups[0]["relative_level_db"] = 0
+    del groups[1]["lining"]
+    defaults = fem.read_region_attribute(_plan(groups=groups).body_attribute())
+    assert "relative_level_db" not in defaults["groups"][0]
+    assert "lining" not in defaults["groups"][1]
