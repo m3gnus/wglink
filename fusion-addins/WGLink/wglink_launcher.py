@@ -19,10 +19,11 @@ else:
     import wglink_inbox
 
 
-# Three seconds for discovery, 69 for admission, three for graceful cancellation,
-# one for reaping after kill: at most 76 seconds of bounded waits.
+# Discovery and admission share 72 seconds, including dispatch acknowledgement.
+# Native cancellation/reaping may use four more: the bound remains 76 seconds.
 ENSURE_TIMEOUT = 69.0
 DISCOVERY_TIMEOUT = 3.0
+DISPATCH_TIMEOUT = 3.0
 INSTALL_MARKER = "wglink_install.json"
 DEVELOPER_MARKER = "wglink_dev.json"
 _INSTALL_MARKER_FIELDS = frozenset({
@@ -35,6 +36,49 @@ _MAX_NATIVE_ENTRY_BYTES = 64 * 1024 * 1024
 
 class LauncherError(RuntimeError):
     pass
+
+
+class DispatchReceipt:
+    """A main-thread job which can be cancelled until it is actually claimed.
+
+    Some Fusion builds return False from fireCustomEvent even when they queue
+    it. Actual receipt resolves that ambiguity; expiry prevents a late export.
+    """
+
+    def __init__(self, job: Callable) -> None:
+        self.job = job
+        self.received = threading.Event()
+        self._lock = threading.Lock()
+        self._claimed = False
+        self._cancelled = False
+
+    def __call__(self) -> None:
+        with self._lock:
+            if self._claimed or self._cancelled:
+                return
+            self._claimed = True
+            # Receipt precedes the job, which may display a modal on main.
+            self.received.set()
+        self.job()
+
+    def cancel(self) -> bool:
+        with self._lock:
+            if self._claimed:
+                return False
+            self._cancelled = True
+            return True
+
+    def wait(self, cancelled: Callable[[], bool], deadline: float) -> None:
+        while not self.received.is_set():
+            is_cancelled = cancelled()
+            remaining = deadline - time.monotonic()
+            if is_cancelled or remaining <= 0:
+                if not self.cancel():
+                    return  # Main claimed it while the worker checked expiry.
+                reason = ("WG startup dispatch was cancelled." if is_cancelled else
+                          "WGLink's main-thread event was not delivered before its deadline.")
+                raise LauncherError(reason)
+            self.received.wait(min(0.05, remaining))
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -322,12 +366,17 @@ class BackendAdmission:
         self._folder: Path | None = None
         self._cancelled = threading.Event()
         self.thread: threading.Thread | None = None
+        self.dispatch_deadline = 0.0
+        self._undelivered_error: str | None = None
 
     def request(self, ipc: Path, data_dir: Path, argv: list[str], override: Path | None,
                 callback: Callable, dispatch: Callable, starting: Callable | None = None) -> None:
         with self._lock:
             if self._cancelled.is_set():
                 raise LauncherError("WGLink is stopping; start WG manually.")
+            if self._undelivered_error is not None:
+                error, self._undelivered_error = self._undelivered_error, None
+                raise LauncherError(error)
             if self._callbacks:
                 if self._folder != data_dir.resolve():
                     raise LauncherError("WG startup is already waiting on another configured data folder.")
@@ -336,6 +385,8 @@ class BackendAdmission:
             self._folder = data_dir.resolve()
             self._callbacks.append(callback)
             pending = self._callbacks
+            deadline = time.monotonic() + DISCOVERY_TIMEOUT + ENSURE_TIMEOUT
+            self.dispatch_deadline = deadline
 
         def work() -> None:
             error = None
@@ -349,7 +400,13 @@ class BackendAdmission:
                             if not self.cancelled:
                                 starting()
                         dispatch(show_starting)
-                    ensure_backend(argv, data_dir, override, self._cancelled)
+                    # Reserve receipt time instead of extending the existing
+                    # startup envelope. The native timeout remains capped at 69s.
+                    remaining = deadline - time.monotonic() - DISPATCH_TIMEOUT
+                    if remaining <= 0:
+                        raise LauncherError("WG backend admission reached its deadline.")
+                    ensure_backend(argv, data_dir, override, self._cancelled,
+                                   timeout=min(ENSURE_TIMEOUT, remaining))
             except Exception as exc:  # worker boundary: all failures reach the UI
                 error = str(exc)
 
@@ -365,11 +422,20 @@ class BackendAdmission:
 
             try:
                 if not self.cancelled:
+                    # Native cancellation/reaping is already allowed four
+                    # seconds beyond admission; completion shares that bound.
+                    self.dispatch_deadline = deadline + 4.0
                     dispatch(deliver)
-            except Exception:  # the event bridge may disappear during shutdown
+            except Exception as exc:  # the event bridge may disappear during shutdown
                 with self._lock:
                     if self._callbacks is pending:
                         self._callbacks = []
+                        if not self.cancelled:
+                            self._undelivered_error = (
+                                "WG startup could not report its result on Fusion's main thread. "
+                                "No export was resumed. " + (error + " " if error else "")
+                                + str(exc) + " Try Send or Solve again."
+                            )
 
         self.thread = threading.Thread(target=work, name="WGLinkBackendAdmission", daemon=True)
         try:
@@ -387,3 +453,8 @@ class BackendAdmission:
     @property
     def cancelled(self) -> bool:
         return self._cancelled.is_set()
+
+    @property
+    def has_pending_callbacks(self) -> bool:
+        with self._lock:
+            return bool(self._callbacks)

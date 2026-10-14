@@ -1812,6 +1812,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         choices survive; their Fusion entity references are accessed on main.
         """
 
+        global _backend_progress
         data_dir = wglink_workspace.data_dir()
         if data_dir is None:
             return False
@@ -1886,22 +1887,32 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         def dispatch(job: object) -> None:
             # fireCustomEvent is Fusion's thread-safe bridge. Do not acquire an
             # Application, inspect a document, or use UI from this worker.
+            receipt = wglink_launcher.DispatchReceipt(job)
             with _followups_lock:
                 if _followup_event is not event:
-                    return
-                _followups.append(job)
+                    raise wglink_launcher.LauncherError("WGLink's main-thread event is stopping.")
+                _followups.append(receipt)
             try:
                 if app.fireCustomEvent(FOLLOWUP_EVENT_ID) is False:
-                    raise RuntimeError("WGLink's main-thread event could not be fired.")
+                    receipt.wait(lambda: admission.cancelled,
+                                 min(time.monotonic() + wglink_launcher.DISPATCH_TIMEOUT,
+                                     admission.dispatch_deadline))
             except Exception:
+                if not receipt.cancel():
+                    return  # Actual receipt wins over a misleading API result.
                 with _followups_lock:
-                    if job in _followups:
-                        _followups.remove(job)
+                    if receipt in _followups:
+                        _followups.remove(receipt)
                 raise
 
         try:
             admission.request(ipc, data_dir, argv, override, resume, dispatch, starting)
         except wglink_launcher.LauncherError as exc:
+            if not admission.has_pending_callbacks:
+                # A lost completion cannot hide its modeless status from a
+                # worker. The next command reports it and clears it on main.
+                _hide_export_progress(_backend_progress)
+                _backend_progress = None
             raise wglink_core.WgLinkError(str(exc)) from exc
         return True
 

@@ -202,7 +202,7 @@ def test_timeout_terminates_only_launcher_and_does_not_export(monkeypatch, tmp_p
         return child
 
     monkeypatch.setattr(launcher.subprocess, "Popen", popen)
-    monkeypatch.setattr(launcher, "ensure_backend", lambda *args: real_ensure(*args, timeout=0.1))
+    monkeypatch.setattr(launcher, "ensure_backend", lambda *args, **kwargs: real_ensure(*args, timeout=0.1))
     _run(fixture.module, "send")
     _finish(fixture)
     assert fixture.exports == [] and _inbox(fixture.ipc) == []
@@ -393,7 +393,7 @@ def test_insert_update_never_admit_backend(monkeypatch, tmp_path, operation):
     _advertise_launcher(fixture, _script(tmp_path, "raise AssertionError('must not launch')\n"))
     monkeypatch.setattr(fixture.module._backend_admission, "request", lambda *a, **k: pytest.fail("admission"))
     if operation == "insert":
-        monkeypatch.setattr(fixture.module, "_choose_bundle", lambda *a: None)
+        monkeypatch.setattr(fixture.module, "_choose_bundle", lambda *a, **k: None)
     else:
         monkeypatch.setattr(fixture.module.wglink_core, "update", lambda *a: {})
     _run(fixture.module, operation)
@@ -446,7 +446,7 @@ def test_launcher_timeout_leaves_foreign_process_alive(monkeypatch, tmp_path):
     launcher = fixture.module.wglink_launcher
     _advertise_launcher(fixture, _script(tmp_path, "time.sleep(30)\n"))
     real_ensure = launcher.ensure_backend
-    monkeypatch.setattr(launcher, "ensure_backend", lambda *args: real_ensure(*args, timeout=0.1))
+    monkeypatch.setattr(launcher, "ensure_backend", lambda *args, **kwargs: real_ensure(*args, timeout=0.1))
     foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
         _run(fixture.module, "solve")
@@ -680,7 +680,7 @@ def test_install_marker_uses_production_addin_folder(monkeypatch, tmp_path, syml
     capabilities.unlink()
     calls = []
 
-    def ensure_backend(*args):
+    def ensure_backend(*args, **kwargs):
         calls.append(args)
         capabilities.write_bytes(ready)
 
@@ -779,7 +779,7 @@ def test_capabilities_precedence_and_marker_rescue(monkeypatch, tmp_path, advert
                                         else tmp_path / "moved-entry")])
     monkeypatch.setattr(wglink_launcher.sys, "platform", platform)
     calls = []
-    monkeypatch.setattr(fixture.module.wglink_launcher, "ensure_backend", lambda *args: calls.append(args))
+    monkeypatch.setattr(fixture.module.wglink_launcher, "ensure_backend", lambda *args, **kwargs: calls.append(args))
     _run(fixture.module, "send")
     _finish(fixture)
     assert len(calls) == 1
@@ -877,7 +877,7 @@ def test_blocked_discovery_releases_admission_on_deadline_or_close(monkeypatch, 
 
     monkeypatch.setattr(wglink_launcher, "_collecting_probe", probe)
     monkeypatch.setattr(wglink_launcher, "DISCOVERY_TIMEOUT", 0.1)
-    monkeypatch.setattr(wglink_launcher, "ensure_backend", lambda *a: launched.append(True))
+    monkeypatch.setattr(wglink_launcher, "ensure_backend", lambda *a, **k: launched.append(True))
     admission = wglink_launcher.BackendAdmission()
     delivered = []
     admission.request(tmp_path, tmp_path, [], None, delivered.append, lambda job: job())
@@ -929,7 +929,7 @@ def test_trickling_health_has_overall_deadline_and_cancellation(monkeypatch, tmp
     locks.mkdir()
     (locks / "server.pid").write_text(json.dumps({"pid": 42, "port": server.server_port}))
     launched, delivered = [], []
-    monkeypatch.setattr(wglink_launcher, "ensure_backend", lambda *a: launched.append(True))
+    monkeypatch.setattr(wglink_launcher, "ensure_backend", lambda *a, **k: launched.append(True))
     admission = wglink_launcher.BackendAdmission()
     began = time.monotonic()
     try:
@@ -991,7 +991,7 @@ def test_close_during_resume_event_pumping_prevents_export_or_submit(monkeypatch
     assert _inbox(fixture.ipc) == []
 
 
-def test_dispatch_exception_settles_callbacks_and_next_press_starts_worker(monkeypatch, tmp_path):
+def test_dispatch_exception_is_reported_before_next_press_starts_worker(monkeypatch, tmp_path):
     monkeypatch.setattr(wglink_launcher, "collecting", lambda *a: True)
     admission = wglink_launcher.BackendAdmission()
     done = []
@@ -1003,6 +1003,9 @@ def test_dispatch_exception_settles_callbacks_and_next_press_starts_worker(monke
     first = admission.thread
     first.join(timeout=1)
     assert not first.is_alive() and admission._callbacks == [] and done == []
+    with pytest.raises(wglink_launcher.LauncherError, match="event bridge unavailable"):
+        admission.request(tmp_path, tmp_path, [], None, done.append, lambda job: job())
+    assert admission.thread is first
     admission.request(tmp_path, tmp_path, [], None, done.append, lambda job: job())
     admission.thread.join(timeout=1)
     assert admission.thread is not first and done == [None]
@@ -1010,7 +1013,7 @@ def test_dispatch_exception_settles_callbacks_and_next_press_starts_worker(monke
 
 def test_failed_completion_dispatch_drops_queued_start_status(monkeypatch, tmp_path):
     monkeypatch.setattr(wglink_launcher, "collecting", lambda *a: False)
-    monkeypatch.setattr(wglink_launcher, "ensure_backend", lambda *a: None)
+    monkeypatch.setattr(wglink_launcher, "ensure_backend", lambda *a, **k: None)
     admission = wglink_launcher.BackendAdmission()
     queued, shown = [], []
 
@@ -1032,7 +1035,7 @@ def test_launch_status_is_modeless_and_only_shown_on_main_event(monkeypatch, tmp
     _advertise_launcher(fixture, [str(_installed_entry(tmp_path))])
     launcher = fixture.module.wglink_launcher
     monkeypatch.setattr(launcher, "collecting", lambda *a: False)
-    monkeypatch.setattr(launcher, "ensure_backend", lambda *a: None)
+    monkeypatch.setattr(launcher, "ensure_backend", lambda *a, **k: None)
     main = threading.get_ident()
     real_factory = fixture.ui.createProgressDialog
 
@@ -1059,7 +1062,7 @@ def test_stop_hides_pending_launch_status(monkeypatch, tmp_path):
     entered = threading.Event()
     monkeypatch.setattr(launcher, "collecting", lambda *a: False)
 
-    def ensure(argv, data_dir, override, cancelled):
+    def ensure(argv, data_dir, override, cancelled, **kwargs):
         entered.set()
         cancelled.wait(2)
 
