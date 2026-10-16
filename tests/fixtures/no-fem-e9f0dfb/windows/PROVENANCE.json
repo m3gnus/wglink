@@ -1,0 +1,11 @@
+{
+  "source_commit": "e9f0dfbf29cd3f041c3c3860bfd4f70ee6e6d38d",
+  "capture": "Historical exporter with the deterministic design in test_wglink_send.py; Python default Windows text newline semantics emulated on POSIX. Native Windows CI verifies the result.",
+  "validation": "Historical POSIX capture equals existing fixtures byte-for-byte. Historical and current Windows captures equal after only adapter_version normalization. Production unchanged.",
+  "sha256": {
+    "windows/legacy/wgreturn.json": "a104e0f5f02fd95777a6f14b5bb02ec3045e530d4592b6c0d0c979b8179d1acb",
+    "windows/legacy/assembly.step": "5cfc749e05bd16322a14e33784b6f1f27ccfa2696932aadfc6ae52a29f9b9040",
+    "windows/modern/wgreturn.json": "fa8bb778c09b51fa5afb9c64cce95700afb37c6c123047a4d7c242e8ab938e29",
+    "windows/modern/assembly.step": "5cfc749e05bd16322a14e33784b6f1f27ccfa2696932aadfc6ae52a29f9b9040"
+  }
+}

@@ -19,3 +19,6 @@
 # AP214 file are the writer's own, and a fixture that is rewritten on checkout
 # is no longer the file that was measured.
 tests/fixtures/step/*.step -text -whitespace
+
+# Historical Windows bundle bytes include CRLF in JSON and mock STEP output.
+tests/fixtures/no-fem-e9f0dfb/windows/** -text -whitespace

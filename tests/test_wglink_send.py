@@ -1542,7 +1542,10 @@ def test_no_declared_regions_keep_e9f0dfb_bundle_bytes(
         attributes_unavailable=attributes_unavailable, **fem_options
     )
     actual = Path(report["bundle_path"])
-    golden = ROOT / "tests" / "fixtures" / "no-fem-e9f0dfb" / profile
+    golden_root = ROOT / "tests" / "fixtures" / "no-fem-e9f0dfb"
+    # Default text writes in e9f0dfb already used CRLF on Windows. Compare
+    # against that platform's captured bytes, including STEP size and digest.
+    golden = golden_root / "windows" / profile if os.name == "nt" else golden_root / profile
 
     def members(folder):
         return {path.relative_to(folder).as_posix(): path.read_bytes()
