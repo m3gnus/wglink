@@ -90,7 +90,7 @@ contains only **Declare Body…**, **Insert**, **Update**, and **Detach**.
 | **Send to WG** | Export the assembly as a validated `.wgreturn` bundle without asking for a solve. |
 | Declare Body… | Classify a body for the return: `exterior-shell` includes an open surface body, `exclude` leaves a body out, Clear restores automatic scoping. |
 | Insert | Insert a WG `.wglink` bundle as a managed link. Optionally give the link a **Link name** of your own; leave it empty to use WG's design name. Ordinarily unneeded: WG's Send to CAD offers the insert automatically. |
-| Update | Rebuild a managed link in place from its current bundle. If its stored bundle moved, Update finds the newest export of the same design in WG's current workspace and repairs the path automatically. |
+| Update | Rebuild a managed link in place from its design's latest locator, even if its stored bundle still exists. An invalid locator refuses. Without a locator, use the stored bundle; if it moved, find the newest export of the same design in WG's current workspace. |
 | Detach | Permanently remove WGLink identity without changing geometry. Fusion asks for confirmation because the only way back is to insert a fresh copy from WG. |
 
 Audit, Relink and renaming a link remain available through the headless
@@ -151,8 +151,32 @@ under its original id for the next startup.
    itself to CAD mode and shows progress; if the ingestion reports blocking
    findings, WG parks the request and shows what it is waiting on.
 
-Renaming the WG design is safe: the parameter namespace and bundle folder are
-fixed the first time a design is exported and never change afterwards.
+Renaming the WG design is safe: the parameter namespace stays fixed to its
+lineage. Each new export has its own immutable bundle folder; existing legacy
+folders remain readable.
+
+### Immutable exports and manual Update
+
+WG publishes one `<export-id>.wglink/` directory per export in the existing
+`wglink` exchange folder. Its contents keep the existing bundle format.
+`<design-id>.latest.json` selects the current export. Manual Update reads that
+locator in the current WG exchange folder (then beside the stored bundle)
+before accepting the stored path, validates its exact keys, schema,
+positive sequence, relative basename, manifest IDs and checksums, and refuses
+symlinks. A present but invalid locator never falls back to an older export.
+No locator means the legacy stored-path and workspace lookup still applies.
+
+An explicit WG handoff always opens its own `bundlePath`, never latest. Missing
+paths or bundle/export ID mismatches refuse before creating or changing a
+Fusion document. The optional `bundleLayout: "immutable-v1"` is additive to the
+existing handoff fields. Document attribute names, schema and parameter slugs
+stay the same; `bundle_path` records the immutable export actually applied.
+
+The add-in advertises `immutableBundles: 1` in its existing Fusion heartbeat.
+An older WG ignores that extra field and its stable-folder exports still work.
+Older add-ins still accept automatic Sends to immutable paths; their manual
+Update stays on the applied export until the add-in is updated through WG's
+add-in update action and Fusion is restarted. There is no mutable mirror.
 
 ### The three names a link has
 
@@ -166,15 +190,15 @@ Nothing is wrong when they do.
 | **Link name** | You, optionally, in the Insert dialog | The link's label in WGLink's menus, in the timeline group, and in what WG shows for the placement. Nothing else. |
 
 The `wg_<name>_*` user parameters are a **fourth** thing, and no name above
-moves them. That namespace and the `.wglink` folder name are minted from the
-design's name the first time it is exported, and then frozen to the design's
-lineage for good — your Fusion datums, enclosure expressions and your own
-features all reference it by name, and Fusion cannot retarget an expression to
+moves them. That namespace is minted from the design's name the first time it
+is exported, and then frozen to the design's lineage for good. Fusion datums,
+enclosure expressions and your own features all reference it by name, and
+Fusion cannot retarget an expression to
 a different parameter. So a design first exported as `260308Tritonia-M` keeps
-`wg_260308tritonia_m_*` and `260308Tritonia-M.wglink` even after it is renamed
-in WG, and even in a document you called something else. That is deliberate:
-the alternative is that renaming a design breaks every document already linked
-to it.
+`wg_260308tritonia_m_*` even after it is renamed in WG, and even in a document
+you called something else. New bundle folders use the export ID; old stable
+folder paths remain readable. Keeping the namespace preserves every existing
+linked document through design renames.
 
 Rename a link at any time — it changes a label and nothing a rebuild or a
 return reads:

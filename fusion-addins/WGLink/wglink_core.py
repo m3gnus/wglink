@@ -30,7 +30,7 @@ if __package__:
 else:
     import wglink_protocol
 if __package__:
-    from . import wglink_activity, wglink_workspace
+    from . import wglink_activity, wglink_locator, wglink_workspace
     from .wglink_bundle import (
         IDENTITY_MATRIX,
         TAG_AREA_TOLERANCE,
@@ -56,6 +56,7 @@ if __package__:
     )
 else:
     import wglink_activity
+    import wglink_locator
     import wglink_workspace
     from wglink_bundle import (
         IDENTITY_MATRIX,
@@ -201,6 +202,25 @@ def _read_owned_bundle(path: str | os.PathLike[str]) -> object:
 
     bundle = read_bundle(path)
     bundle.close()
+    return bundle
+
+
+def _handoff_bundle(path: object, options: dict[str, Any]) -> object:
+    """Bind an explicit handoff to its own on-disk export before any write."""
+
+    expected_bundle = options.get("expected_bundle_id")
+    expected_export = options.get("expected_export_id")
+    if not expected_bundle or not expected_export or not path:
+        raise WgLinkError("WG handoff is missing its bundle path or identity. Send again from WG.")
+    bundle = _read_owned_bundle(path)
+    manifest_bundle = bundle.manifest.get("bundle")
+    actual_bundle = manifest_bundle.get("id") if isinstance(manifest_bundle, dict) else None
+    if actual_bundle != expected_bundle or bundle.identity.export_id != expected_export:
+        raise WgLinkError(
+            f"WG handoff bundle identity mismatch: expected {expected_bundle!r}/{expected_export!r}, "
+            f"found {actual_bundle!r}/{bundle.identity.export_id!r}. "
+            "Nothing in the document was changed. Send again from WG."
+        )
     return bundle
 
 
@@ -3395,7 +3415,11 @@ def insert(
     precondition = opts.pop("precondition", None)
     operation_id = str(opts.get("operation_id") or "")
     design = _design(app)
-    bundle = _read_owned_bundle(bundle_path)
+    bundle = (
+        _handoff_bundle(bundle_path, opts)
+        if "expected_bundle_id" in opts or "expected_export_id" in opts
+        else _read_owned_bundle(bundle_path)
+    )
     mode = bundle.manifest["design"]["build_mode"]
     _validate_enclosure_placement(bundle)
     _validate_mouth_outline(bundle)
@@ -3774,7 +3798,7 @@ def _bundle_for_update(
     record: dict[str, Any],
     bundle_path: object,
 ) -> tuple[Path, object]:
-    """Resolve Update's bundle, repairing a stale stored path by design id."""
+    """Follow latest for manual Update; without a locator retain legacy lookup."""
 
     raw = (
         bundle_path
@@ -3782,10 +3806,19 @@ def _bundle_for_update(
         else record.get("payload", {}).get("bundle_path")
     )
     path = Path(str(raw)).expanduser() if raw else None
+    design_id = str(record.get("payload", {}).get("design_id") or "")
+    current_folder = wglink_workspace.bundle_folder()
+    folders = [current_folder] if current_folder is not None else []
+    if path is not None and path.parent not in folders:
+        folders.append(path.parent)
+    if design_id:
+        for folder in folders:
+            latest = wglink_locator.latest_bundle(folder, design_id)
+            if latest is not None:
+                return latest
     if path is not None and path.exists():
         return path, _read_owned_bundle(path)
 
-    design_id = str(record.get("payload", {}).get("design_id") or "")
     matches: list[tuple[int, float, Path, object]] = []
     try:
         discovered = wglink_workspace.discover_bundles()
@@ -3809,13 +3842,6 @@ def _bundle_for_update(
     if matches:
         _sequence, _modified, resolved_path, resolved_bundle = max(
             matches, key=lambda item: (item[0], item[1])
-        )
-        _relink_record(
-            design,
-            record,
-            resolved_path,
-            resolved_bundle,
-            force=False,
         )
         return resolved_path, resolved_bundle
 
@@ -3901,7 +3927,11 @@ def update(
     record = _resolve_link(design, opts)
     link_frame = _link_frame_report(design, record)
     _refuse_bad_link_frame(link_frame, force=bool(opts.get("force")))
-    source_path, bundle = _bundle_for_update(design, record, bundle_path)
+    if "expected_bundle_id" in opts or "expected_export_id" in opts:
+        bundle = _handoff_bundle(bundle_path, opts)
+        source_path = Path(bundle_path).expanduser()
+    else:
+        source_path, bundle = _bundle_for_update(design, record, bundle_path)
     state = link_state(record["payload"], bundle)
     stored_mode = record["payload"].get("build_mode")
     incoming_mode = bundle.manifest["design"]["build_mode"]
@@ -3977,6 +4007,10 @@ def update(
         # the hide only happened on the rebuild path, the remedy the guide
         # gives would silently do nothing for them.
         _hide_link_helpers(record, no_op_report)
+        if record["payload"].get("bundle_path") != str(source_path.resolve()):
+            _update_payload_attributes(
+                design, record["instance_id"], {"bundle_path": str(source_path.resolve())}
+            )
         return no_op_report
 
     _expand_groups(design.timeline)

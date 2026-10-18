@@ -188,6 +188,8 @@ def test_handoffs_apply_and_are_consumed_without_wgs_solve_consumer(
     assert module._apply_pending_handoff({"document_id": "fusion:doc-a", "links": links}) == module.HANDLED
 
     assert len(calls) == 1 and Path(calls[0][0]) == bundle
+    assert calls[0][1]["expected_bundle_id"] == "wgb"
+    assert calls[0][1]["expected_export_id"] == "wge"
     assert module._request_trace["outcome"] == "applied"
     assert list((fixture.ipc / ".fusion-handoffs").iterdir()) == []
     assert fixture.ui.messages == [] and _inbox(fixture.ipc) == []

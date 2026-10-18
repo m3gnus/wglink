@@ -2,6 +2,12 @@
 
 *Investigation and recommendation, 2026-09-06.*
 
+This is a historical snapshot. Immutable publication now gives each export an
+`<export-id>.wglink` folder and follows `<design-id>.latest.json` on manual
+Update, even when the stored path exists. The stable-folder and missing-path-only
+lookup descriptions below apply to legacy layouts. Parameter namespaces remain
+fixed to lineage. See [the current guide](WGLINK-GUIDE.md#immutable-exports-and-manual-update).
+
 ## The report
 
 > Why is it called `260308Tritonia-M`? I never named it that in Fusion 360. I

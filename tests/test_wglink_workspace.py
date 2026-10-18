@@ -189,3 +189,15 @@ def test_a_bundle_without_a_design_name_still_offers_a_label(tmp_path: Path) -> 
 
     found = ws.discover_bundles(environ={ws.DATA_DIR_ENV: str(data)})
     assert found[0].label() == "unnamed"
+
+
+def test_discovery_offers_latest_per_design_and_legacy_bundles(tmp_path):
+    from test_wglink_core import _latest_exports
+
+    a, b, locator, _payload = _latest_exports(tmp_path / "project" / "wglink")
+    legacy = _bundle(a.parent, "legacy-stable", 3)
+    data = _wg_data_dir(tmp_path, a.parent.parent)
+    found = ws.discover_bundles(environ={ws.DATA_DIR_ENV: str(data)})
+    assert {item.path for item in found} == {b, legacy}
+    locator.write_text("invalid json")
+    assert [item.path for item in ws.discover_bundles(environ={ws.DATA_DIR_ENV: str(data)})] == [legacy]

@@ -711,6 +711,7 @@ def test_new_marker_fields_are_additive_to_the_v3_reader_contract(
     payload.update({
         "destination": {"kind": "document", "value": "fusion:doc-a"},
         "phase": "prepared",
+        "bundleLayout": "immutable-v1",
     })
     _write(path, payload)
 
@@ -762,6 +763,7 @@ def test_the_heartbeat_states_its_delivery_version_and_an_interrupted_operation(
 
     status = json.loads(marker.read_text(encoding="utf-8"))
     assert status["deliveryVersion"] == 3
+    assert status["immutableBundles"] == 1
     assert status["document"]["applyingOperation"] == {
         "operationId": "req-9", "kind": "update",
         "instanceId": "instance-a", "exportId": "wge_4",
@@ -774,3 +776,4 @@ def test_the_heartbeat_states_its_delivery_version_and_an_interrupted_operation(
         ).read_text(encoding="utf-8")
     )
     assert "applyingOperation" not in quiet["document"]
+    assert quiet["immutableBundles"] == 1

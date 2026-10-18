@@ -43,6 +43,7 @@ def _load_registration_package() -> dict[str, types.ModuleType]:
     loaded: dict[str, types.ModuleType] = {}
     for name in (
         "wglink_activity",
+        "wglink_locator",
         "wglink_workspace",
         "wglink_author",
         "wglink_fem",
@@ -3799,6 +3800,12 @@ def _apply_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
         return HANDLED
     try:
         _require_compatible_wg()
+        # Read before _ensure_design_ready can create a destination document.
+        # Core checks again at insert/update, immediately before using it.
+        wglink_core._handoff_bundle(handoff.bundle_path, {
+            "expected_bundle_id": handoff.bundle_id,
+            "expected_export_id": handoff.export_id,
+        })
         ready = _ensure_design_ready()
     except wglink_core.WgLinkError as exc:
         wglink_handoff.acknowledge_handoff(handoff)
@@ -3901,6 +3908,8 @@ def _execute_handoff(
                         # Stamped beside the export identity as Update's last
                         # write: the evidence a redelivery is reconciled against.
                         "operation_id": handoff.operation_id,
+                        "expected_bundle_id": handoff.bundle_id,
+                        "expected_export_id": handoff.export_id,
                         # Measured live, not read off ``link``: the snapshot's
                         # token comes from the heartbeat cache and can equal the
                         # stale token WG holds while the model has moved. The
@@ -3928,6 +3937,8 @@ def _execute_handoff(
                 {
                     "allow_root_fallback": True,
                     "operation_id": handoff.operation_id,
+                    "expected_bundle_id": handoff.bundle_id,
+                    "expected_export_id": handoff.export_id,
                     # The document and "no link of this design yet", read live
                     # again immediately before the insert's first write.
                     "precondition": lambda: _require_insert_target(handoff, new_document_id),

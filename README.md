@@ -4,6 +4,8 @@ WGLink 0.3.0 is the maintained Fusion add-in for sending Fusion geometry to Wave
 
 Send, Solve, Insert/Update handoffs, acknowledgements and status exchange use files in WG's IPC folder. Send imports a snapshot; Solve also requests a solve. Each explicit command has its own request id. Exports are no longer watched: the user presses Send, or explicitly requests Insert/Update. A new export alone never prompts Fusion.
 
+WG exports immutable `<export-id>.wglink/` bundles and a `<design-id>.latest.json` locator in its existing exchange folder. Manual **Update** follows the locator even when the previously applied bundle still exists; invalid locators refuse without changing the document. Explicit handoffs apply only their named export and verify both bundle and export IDs. Without a locator, older WG layouts keep their existing behavior. The heartbeat advertises `immutableBundles: 1`; older add-ins can still receive automatic Sends but need the add-in update offered by WG for manual Update to follow newer exports.
+
 File delivery is split into `wglink_inbox.py` (capabilities, requests and acknowledgements), `wglink_handoff.py` (Insert/Update and return requests) and `wglink_status.py` (Fusion status). Insert, Update, WG handoffs and return requests require capability schema 1 and Fusion delivery 3. Send and Solve additionally require WG request inbox 4. Unsupported schemas or delivery versions ask for "Update Waveguide Generator"; an unavailable inbox asks you to start WG and check its CAD Link folder. See the implementation guide for the WG packaged-pair references and R-2 re-pin changes.
 
 The former WG Metal pipeline is maintained separately as a frozen fallback. It is not part of this repository or WGLink's updater.

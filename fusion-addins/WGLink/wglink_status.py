@@ -20,6 +20,7 @@ else:
 
 FUSION_STATUS_FILENAME = ".fusion-status.json"
 DELIVERY_VERSION = wglink_protocol.FUSION_REQUEST_DELIVERY_VERSION
+IMMUTABLE_BUNDLES = 1
 
 
 def write_fusion_status(
@@ -180,6 +181,7 @@ def fusion_status_payload(
         "sessionId": str(session_id),
         "adapterVersion": str(adapter_version or "") or None,
         "deliveryVersion": DELIVERY_VERSION,
+        "immutableBundles": IMMUTABLE_BUNDLES,
         "workspaceRoot": (
             str(workspace_root.expanduser().resolve())
             if workspace_root is not None

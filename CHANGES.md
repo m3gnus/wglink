@@ -1,5 +1,19 @@
 # Changes
 
+## Unreleased
+
+- Follow the design's latest immutable export on manual Update, even when the
+  previously applied bundle still exists. Validate locator keys, schema,
+  sequence, confined paths, manifest identities and bundle checksums; refuse
+  invalid locators without fallback. Older layouts without locators keep the
+  existing stored-path and discovery behavior.
+- Bind automatic Insert/Update handoffs to their exact bundle and export IDs
+  before creating or changing a Fusion document. Missing paths and mismatches
+  refuse instead of discovering a replacement.
+- Advertise `immutableBundles: 1` in the Fusion heartbeat. Bundle discovery
+  offers each design's latest export alongside legacy stable-folder bundles.
+  Document attributes and lineage parameter namespaces remain compatible.
+
 ## 0.3.0 — 2026-10-12
 
 - **Declare FEM Region…** appears under Manage when WG advertises `femRegions`.

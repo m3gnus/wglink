@@ -25,6 +25,11 @@ from pathlib import Path
 import platform
 from typing import Any, Mapping
 
+if __package__:
+    from . import wglink_locator
+else:
+    import wglink_locator
+
 
 DATA_DIR_ENV = "WG2_DATA_DIR"
 APP_DIRECTORY = "WaveguideGenerator"
@@ -214,7 +219,7 @@ def ipc_folder(*, create: bool = False, **kwargs: Any) -> Path | None:
     return folder if folder.is_dir() else None
 
 
-def _describe(bundle: Path) -> DiscoveredBundle | None:
+def _describe(bundle: Path, *, located_designs: frozenset[str] = frozenset()) -> DiscoveredBundle | None:
     manifest_path = bundle / "wglink.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -225,6 +230,13 @@ def _describe(bundle: Path) -> DiscoveredBundle | None:
         return None
     design = manifest.get("design")
     export = manifest.get("export")
+    if (
+        isinstance(design, Mapping) and isinstance(design.get("id"), str)
+        and design["id"] in located_designs
+        and isinstance(export, Mapping)
+        and bundle.name == str(export.get("id")) + BUNDLE_SUFFIX
+    ):
+        return None
     name = ""
     if isinstance(design, Mapping):
         name = str(design.get("name") or "")
@@ -240,7 +252,7 @@ def _describe(bundle: Path) -> DiscoveredBundle | None:
 
 
 def discover_bundles(**kwargs: Any) -> list[DiscoveredBundle]:
-    """Readable bundles in WG's workspace, newest first."""
+    """Offer each design's latest immutable export and all legacy bundles."""
 
     folder = bundle_folder(**kwargs)
     if folder is None:
@@ -250,12 +262,27 @@ def discover_bundles(**kwargs: Any) -> list[DiscoveredBundle]:
     except OSError:
         return []
     found = []
+    located_designs = frozenset(
+        candidate.name[:-len(wglink_locator.LATEST_SUFFIX)]
+        for candidate in candidates if candidate.name.endswith(wglink_locator.LATEST_SUFFIX)
+    )
     for candidate in candidates:
+        if candidate.name.endswith(wglink_locator.LATEST_SUFFIX):
+            design_id = candidate.name[:-len(wglink_locator.LATEST_SUFFIX)]
+            try:
+                latest = wglink_locator.latest_bundle(folder, design_id)
+            except wglink_locator.WgLinkError:
+                continue
+            if latest is not None:
+                described = _describe(latest[0])
+                if described is not None:
+                    found.append(described)
+            continue
         if candidate.is_symlink() or not candidate.is_dir():
             continue
         if candidate.suffix != BUNDLE_SUFFIX:
             continue
-        described = _describe(candidate)
+        described = _describe(candidate, located_designs=located_designs)
         if described is not None:
             found.append(described)
     return sorted(found, key=lambda item: item.modified_at, reverse=True)

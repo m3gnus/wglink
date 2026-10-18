@@ -308,7 +308,8 @@ class _UI:
         return dialog
 
 
-def _load_instance(monkeypatch, name: str, ui: _UI, app: _Application | None = None):
+def _load_instance(monkeypatch, name: str, ui: _UI, app: _Application | None = None,
+                   *, validate_bundles: bool = False):
     adsk = types.ModuleType("adsk")
     adsk.__path__ = []  # type: ignore[attr-defined]
     core = types.ModuleType("adsk.core")
@@ -345,6 +346,10 @@ def _load_instance(monkeypatch, name: str, ui: _UI, app: _Application | None = N
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, name, module)
     spec.loader.exec_module(module)
+    if not validate_bundles:
+        # Dispatch tests replace Insert/Update and carry inert bundle folders.
+        # Real preflight/identity coverage opts in below and in core tests.
+        monkeypatch.setattr(module.wglink_core, "_handoff_bundle", lambda *_a: None)
     # Lifecycle tests should never publish presence into the user's real WG
     # workspace. Individual handoff tests replace this with their temp folder.
     monkeypatch.setattr(module.wglink_workspace, "bundle_folder", lambda: None)
@@ -1509,6 +1514,7 @@ def test_every_helper_loads_under_a_registration_unique_package(
     ).resolve()
     assert first._registration_package_name != second._registration_package_name
     for name in (
+        "wglink_locator",
         "wglink_workspace",
         "wglink_author",
         "wglink_bundle",
@@ -2353,6 +2359,7 @@ def _pending_update(fixture, monkeypatch, tmp_path, **overrides):
     published = fixture.published[0]
     fields = {
         "export_id": "wge_2",
+        "bundle_id": "wgb_2",
         "bundle_path": str(tmp_path / "horn.wglink"),
         "design_id": published["design_id"],
         "expected_document_id": "fusion:doc-a",
@@ -3343,7 +3350,8 @@ def test_an_unchanged_exact_target_still_completes_its_guarded_operation(
         effects = _pending_update(fixture, monkeypatch, tmp_path)
         assert module._apply_pending_handoff(snapshot) == module.HANDLED
         assert effects == [
-            {"instance_id": fixture.published[0]["instance_id"], "operation_id": "req-u"}
+            {"instance_id": fixture.published[0]["instance_id"], "operation_id": "req-u",
+             "expected_bundle_id": "wgb_2", "expected_export_id": "wge_2"}
         ]
 
     assert fixture.ui.messages == []
@@ -3972,7 +3980,8 @@ def test_a_pending_new_bundle_is_inserted_once_and_acknowledged(
     module._on_watch_tick()
 
     assert inserted == [
-        (app, str(bundle), {"allow_root_fallback": True, "operation_id": "req-1"})
+        (app, str(bundle), {"allow_root_fallback": True, "operation_id": "req-1",
+                            "expected_bundle_id": "wgb_2", "expected_export_id": "wge_2"})
     ]
     assert not marker.exists()
     assert ui.messages == []
@@ -4109,7 +4118,8 @@ def test_a_pending_update_targets_design_identity_after_bundle_move(
     module._on_watch_tick()
 
     assert updated == [
-        (str(bundle), {"instance_id": "instance-a", "operation_id": "req-1"})
+        (str(bundle), {"instance_id": "instance-a", "operation_id": "req-1",
+                       "expected_bundle_id": "wgb_4", "expected_export_id": "wge_4"})
     ]
     assert not marker.exists()
 
@@ -4165,7 +4175,8 @@ def test_a_pending_update_targets_the_exact_selected_duplicate_instance(
     assert module._apply_pending_handoff(snapshot) == module.HANDLED
 
     assert updated == [
-        (str(bundle), {"instance_id": "instance-b", "operation_id": "req-1"})
+        (str(bundle), {"instance_id": "instance-b", "operation_id": "req-1",
+                       "expected_bundle_id": "wgb_5", "expected_export_id": "wge_5"})
     ]
     assert not marker.exists()
     assert ui.messages == []
@@ -4792,7 +4803,8 @@ def test_a_per_request_handoff_updates_once_with_its_operation_id(
 
     assert module._apply_pending_handoff(snapshot) == module.HANDLED
 
-    assert updated == [(str(bundle), {"instance_id": "instance-b", "operation_id": "req-1"})]
+    assert updated == [(str(bundle), {"instance_id": "instance-b", "operation_id": "req-1",
+                                     "expected_bundle_id": "wgb_5", "expected_export_id": "wge_5"})]
     # The request's file is consumed and its claim deleted; nothing is left.
     assert list((ipc / ".fusion-handoffs").iterdir()) == []
     assert not (ipc / ".fusion-handoff.json").exists()
@@ -5645,3 +5657,34 @@ def test_file_handoff_waits_when_no_workspace_is_selected(monkeypatch, tmp_path:
     assert module._apply_pending_handoff(_shared_snapshot()) == module.IDLE
     assert (ipc / ".fusion-handoffs" / "req-1.json").exists()
     assert writes == []
+
+
+@pytest.mark.parametrize("defect", ["bundle-id", "export-id", "missing-path", "symlink"])
+def test_handoff_preflight_refuses_before_creating_a_document(monkeypatch, tmp_path, defect):
+    from test_wglink_core import _write_swappable_bundle
+
+    ui = _UI(_Panels(), _Definitions(reserve_ids=False))
+    module = _load_instance(monkeypatch, "WGLink_real_bundle_preflight", ui, validate_bundles=True)
+    ipc, bundles = _per_request_folders(monkeypatch, module, tmp_path)
+    path = _write_swappable_bundle(bundles / "wge_a.wglink")
+    payload = {
+        "target": "fusion360", "bundlePath": str(path), "bundleId": "wgb_wge_a",
+        "exportId": "wge_a", "bundleLayout": "immutable-v1",
+    }
+    if defect == "bundle-id":
+        payload["bundleId"] = "wgb_wrong"
+    elif defect == "export-id":
+        payload["exportId"] = "wge_wrong"
+    else:
+        moved = path.rename(bundles / "moved.wglink")
+        if defect == "symlink":
+            path.symlink_to(moved, target_is_directory=True)
+    _publish_like_wg(ipc, "", ".fusion-handoffs", "bad-bundle", 1, payload)
+    writes = []
+    monkeypatch.setattr(module, "_ensure_design_ready", lambda: writes.append("create"))
+    monkeypatch.setattr(module.wglink_core, "insert", lambda *_a: writes.append("insert"))
+    assert module._apply_pending_handoff({"document_id": "fusion:doc-a", "links": []}) == module.HANDLED
+    assert writes == []
+    assert module._request_trace["outcome"] == "refused"
+    assert any(term in ui.messages[-1][1] for term in ("identity mismatch", "does not exist", "symlink"))
+    assert list((ipc / ".fusion-handoffs").iterdir()) == []

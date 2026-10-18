@@ -175,13 +175,14 @@ def handoff_from_document(
         return None
     try:
         allowed_bundle_root = (bundle_root or marker_path.parent).resolve()
-        bundle_path = Path(str(bundle_value)).expanduser().resolve()
+        bundle_path = Path(str(bundle_value)).expanduser().absolute()
     except OSError:
         return None
-    if bundle_path.parent != allowed_bundle_root:
+    if bundle_path.parent.resolve() != allowed_bundle_root:
         return None
-    if bundle_path.is_symlink() or not bundle_path.is_dir():
-        return None
+    # Keep the explicit basename (including a missing path) for core to refuse
+    # visibly. Resolving it here would erase a symlink before the bundle reader
+    # can reject it. Never substitute a discovered or latest bundle.
     sequence = payload.get("sequence")
     raw_destination = payload.get("destination")
     destination = None

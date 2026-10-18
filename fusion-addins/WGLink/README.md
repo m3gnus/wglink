@@ -154,7 +154,8 @@ Relink remain full head-less APIs but are not panel commands.
   a stale id, a duplicated id, or an instance target without its document target
   leaves the handoff unacknowledged and changes no geometry. Legacy and current
   single-instance handoffs still resolve automatically.
-- **Update** reads the stored bundle path, resamples the new grid outside
+- **Update** resolves `<design-id>.latest.json` before the stored bundle path,
+  even when that path still exists, and resamples the selected grid outside
   Fusion, validates the existing sketch topology, rolls the timeline back, and
   moves fit points in place. On macOS and Linux the resampler runs in its own
   session, and its timeout kills that whole process group. On Windows it is
@@ -165,10 +166,13 @@ Relink remain full head-less APIs but are not panel commands.
   resampler itself, as before. Either way the wait for its output is bounded,
   and WGLink never signals a process it did not start. Before its first mutation it also verifies that
   the tagged throat face remains in the component-local link frame. It creates
-  and deletes no document features. If the stored path is missing, Update
-  searches WG's current workspace for the same design id, selects its highest
-  export sequence, records that path using the same identity guard as Relink,
-  and continues. A manually moved bundle outside the workspace can still be
+  and deletes no document features. The locator must have exactly the immutable
+  schema keys, a positive integer sequence, a confined non-symlink export
+  basename, and IDs matching the checksummed bundle. Invalid locators refuse.
+  With no locator, the legacy stored-path behavior remains: if that path is
+  missing, Update searches WG's current workspace for the same design id and
+  selects its highest export sequence. A successful Update records the actual
+  applied bundle path, including on a no-op after migration. A manually moved bundle outside the workspace can still be
   selected through the head-less `wglink_core.relink` API.
 - The head-less **`audit` API** reports bundle/link state, pushed-parameter
   drift, source tag state, feature health, the measured link-frame offset, and
@@ -203,6 +207,18 @@ Relink remain full head-less APIs but are not panel commands.
   appearances remain in the document. The panel command requires confirmation:
   identity removal is permanent, and inserting a fresh WG copy is the only way
   to obtain a managed link again.
+
+Immutable publication uses `<export-id>.wglink/` and
+`<design-id>.latest.json` in the existing exchange folder; legacy stable folders
+remain readable. Handoffs pass `expected_bundle_id` and `expected_export_id`
+into Insert/Update and validate the named bundle before document creation or
+model mutation. They never resolve latest or discover a replacement. The
+optional `bundleLayout: "immutable-v1"` field leaves all existing handoff fields
+intact. Fusion's heartbeat adds top-level `immutableBundles: 1` beside
+`deliveryVersion`; older WG readers ignore it. Older add-ins can consume exact
+immutable Send paths but need WG's add-in update action and a Fusion restart
+for manual Update to follow the locator. Attribute names/schema and lineage
+parameter slugs are unchanged.
 
 ## FEM regions (`fem-regions-v1`)
 

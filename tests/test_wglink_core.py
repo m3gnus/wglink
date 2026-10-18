@@ -1862,6 +1862,7 @@ def _write_swappable_bundle(
         return "sha256:" + hashlib.sha256(data).hexdigest()
 
     manifest = {
+        "bundle": {"id": "wgb_" + export_id},
         "coordinate_system": {
             "handedness": "right",
             "length_unit": "mm",
@@ -3242,3 +3243,172 @@ def test_a_recorded_token_naming_several_datums_is_refused(core, monkeypatch):
         core.WgLinkError, match=r"'wg-a'.*2 datums answer to its recorded WG_THROAT_PLANE"
     ):
         send._source_contract(design, record)
+
+
+def _latest_exports(tmp_path):
+    a = _write_swappable_bundle(tmp_path / "wge_a.wglink", export_id="wge_a", sequence=4)
+    b = _write_swappable_bundle(tmp_path / "wge_b.wglink", export_id="wge_b", sequence=5)
+    locator = tmp_path / "wgd_swap.latest.json"
+    payload = {
+        "schemaVersion": 1, "designId": "wgd_swap", "exportId": "wge_b",
+        "bundleId": "wgb_wge_b", "sequence": 5, "bundlePath": b.name,
+    }
+    locator.write_text(json.dumps(payload), encoding="utf-8")
+    return a, b, locator, payload
+
+
+def test_handoff_applies_a_but_manual_update_follows_latest_b(core, monkeypatch, tmp_path):
+    a, b, _locator, _payload = _latest_exports(tmp_path)
+    record = {"instance_id": "probe", "payload": {
+        "bundle_path": str(a), "design_id": "wgd_swap", "slug": "horn",
+        "build_mode": "enclosure", "topology": "{}",
+    }}
+    observed = []
+    _stub_no_op_update(core, monkeypatch, record, observed)
+    recorded_paths = []
+    monkeypatch.setattr(core, "_update_payload_attributes", lambda _d, _i, data: recorded_paths.append(data["bundle_path"]))
+    core.update(object(), a, {
+        "expected_bundle_id": "wgb_wge_a", "expected_export_id": "wge_a",
+    })
+    core.update(object(), None)
+    assert observed == [a, b]
+    assert recorded_paths == [str(b)]
+
+
+@pytest.mark.parametrize("operation", ["insert", "update"])
+@pytest.mark.parametrize("defect", ["bundle-id", "export-id", "missing-path", "missing-id"])
+def test_handoff_refuses_wrong_or_missing_bundle_before_mutation(
+    core, monkeypatch, tmp_path, operation, defect
+):
+    a, b, _locator, _payload = _latest_exports(tmp_path)
+    record = {"instance_id": "probe", "payload": {
+        "bundle_path": str(a), "design_id": "wgd_swap", "build_mode": "enclosure",
+    }}
+    writes = []
+    monkeypatch.setattr(core, "_design", lambda _app: object())
+    monkeypatch.setattr(core, "_resolve_link", lambda *_a: record)
+    monkeypatch.setattr(core, "_link_frame_report", lambda *_a: {})
+    monkeypatch.setattr(core, "_refuse_bad_link_frame", lambda *_a, **_k: None)
+    for name in ("_push_parameters", "_mark_applying", "_update_payload_attributes", "_resample_payload"):
+        monkeypatch.setattr(core, name, lambda *_a, **_k: writes.append(1))
+    options = {
+        "expected_bundle_id": "wgb_wge_a", "expected_export_id": "wge_a",
+        "precondition": lambda: writes.append(1),
+    }
+    path = a
+    if defect == "bundle-id":
+        options["expected_bundle_id"] = "wgb_wrong"
+    elif defect == "export-id":
+        options["expected_export_id"] = "wge_wrong"
+    elif defect == "missing-id":
+        del options["expected_export_id"]
+    else:
+        a.rename(tmp_path / "moved.wglink")
+    with pytest.raises(core.WgLinkError, match="identity|does not exist"):
+        getattr(core, operation)(object(), path, options)
+    assert writes == []
+    assert b.is_dir()  # Neither discovery nor latest substitutes B for A.
+
+
+@pytest.mark.parametrize("defect", [
+    "extra-key", "missing-key", "schema", "schema-bool", "schema-float", "sequence-bool",
+    "sequence-zero", "sequence-float", "sequence-mismatch", "traversal", "absolute",
+    "windows-separator", "drive-relative", "symlink-bundle", "symlink-locator",
+    "dangling-locator", "bundle-id", "export-id", "design-id", "checksum", "missing-bundle",
+    "invalid-json", "non-object", "duplicate-key", "invalid-utf8",
+])
+def test_manual_update_refuses_invalid_locator_without_legacy_fallback(
+    core, monkeypatch, tmp_path, defect
+):
+    a, b, locator, payload = _latest_exports(tmp_path)
+    record = {"instance_id": "probe", "payload": {
+        "bundle_path": str(a), "design_id": "wgd_swap", "build_mode": "enclosure",
+    }}
+    writes = []
+    _stub_no_op_update(core, monkeypatch, record, writes)
+    monkeypatch.setattr(core, "_update_payload_attributes", lambda *_a: writes.append(1))
+    if defect == "extra-key":
+        payload["extra"] = 1
+    elif defect == "missing-key":
+        del payload["bundleId"]
+    elif defect.startswith("schema"):
+        payload["schemaVersion"] = {"schema": 2, "schema-bool": True, "schema-float": 1.0}[defect]
+    elif defect.startswith("sequence"):
+        payload["sequence"] = {"sequence-bool": True, "sequence-zero": 0,
+                               "sequence-float": 5.0, "sequence-mismatch": 6}[defect]
+    elif defect in {"traversal", "absolute", "windows-separator", "drive-relative"}:
+        payload["bundlePath"] = {"traversal": "../wge_b.wglink", "absolute": str(b),
+                                 "windows-separator": "sub\\wge_b.wglink",
+                                 "drive-relative": "C:wge_b.wglink"}[defect]
+    elif defect == "symlink-bundle":
+        target = b.rename(tmp_path / "elsewhere.wglink")
+        b.symlink_to(target, target_is_directory=True)
+    elif defect == "bundle-id":
+        payload["bundleId"] = "wrong"
+    elif defect == "export-id":
+        manifest = json.loads((b / "wglink.json").read_text())
+        manifest["export"]["id"] = "wge_wrong"
+        (b / "wglink.json").write_text(json.dumps(manifest))
+    elif defect == "design-id":
+        payload["designId"] = "wgd_other"
+    elif defect == "checksum":
+        (b / "waveguide.step").write_text("corrupt")
+    elif defect == "missing-bundle":
+        b.rename(tmp_path / "missing.wglink")
+    locator.write_text(json.dumps(payload), encoding="utf-8")
+    if defect in {"symlink-locator", "dangling-locator"}:
+        target = locator.rename(tmp_path / "other.json")
+        if defect == "dangling-locator":
+            target.unlink()
+        locator.symlink_to(target)
+    elif defect == "invalid-json":
+        locator.write_text("{")
+    elif defect == "non-object":
+        locator.write_text("[]")
+    elif defect == "duplicate-key":
+        locator.write_text(json.dumps(payload)[:-1] + ', "sequence": 5}')
+    elif defect == "invalid-utf8":
+        locator.write_bytes(b"\xff")
+    with pytest.raises(core.WgLinkError, match="Invalid latest locator"):
+        core.update(object(), None)
+    assert writes == []
+
+
+def test_old_wg_without_locator_keeps_existing_bundle(core, monkeypatch, tmp_path):
+    a, _b, locator, _payload = _latest_exports(tmp_path)
+    locator.unlink()
+    record = {"payload": {"bundle_path": str(a), "design_id": "wgd_swap"}}
+    monkeypatch.setattr(core.wglink_workspace, "discover_bundles", lambda: pytest.fail("legacy path exists"))
+    path, bundle = core._bundle_for_update(object(), record, None)
+    assert path == a and bundle.identity.export_id == "wge_a"
+
+
+def test_manual_no_op_records_the_immutable_path_after_migration(core, monkeypatch, tmp_path):
+    a, b, locator, payload = _latest_exports(tmp_path)
+    legacy = a.rename(tmp_path / "legacy-stable.wglink")
+    # The same export is republished under its immutable name during migration.
+    _write_swappable_bundle(a)
+    payload.update(exportId="wge_a", bundleId="wgb_wge_a", sequence=4, bundlePath=a.name)
+    locator.write_text(json.dumps(payload))
+    record = {"instance_id": "probe", "payload": {
+        "bundle_path": str(legacy), "design_id": "wgd_swap", "slug": "horn",
+        "build_mode": "enclosure", "topology": "{}",
+    }}
+    observed = []
+    _stub_no_op_update(core, monkeypatch, record, observed)
+    changes = []
+    monkeypatch.setattr(core, "_update_payload_attributes", lambda _d, _i, data: changes.append(data))
+    core.update(object(), None)
+    assert observed == [a]
+    assert changes == [{"bundle_path": str(a)}]
+
+
+def test_manual_update_prefers_the_current_workspace_locator(core, monkeypatch, tmp_path):
+    old_a, _old_b, old_locator, old_payload = _latest_exports(tmp_path / "old")
+    _new_a, new_b, _new_locator, _new_payload = _latest_exports(tmp_path / "current")
+    old_payload.update(exportId="wge_a", bundleId="wgb_wge_a", sequence=4, bundlePath=old_a.name)
+    old_locator.write_text(json.dumps(old_payload))
+    monkeypatch.setattr(core.wglink_workspace, "bundle_folder", lambda: new_b.parent)
+    record = {"payload": {"bundle_path": str(old_a), "design_id": "wgd_swap"}}
+    path, bundle = core._bundle_for_update(object(), record, None)
+    assert path == new_b and bundle.identity.export_id == "wge_b"
