@@ -75,12 +75,6 @@ def draw_update(draw: ImageDraw.ImageDraw) -> None:
     draw.polygon([(_s(44), _s(2)), (_s(50), _s(13)), (_s(38), _s(12))], fill=ACCENT)
 
 
-def draw_audit(draw: ImageDraw.ImageDraw) -> None:
-    _mouth(draw)
-    draw.ellipse(_box(20, 0, 42, 22), outline=ACCENT, width=_w(4.2))
-    draw.line([(_s(40), _s(19)), (_s(50), _s(28))], fill=ACCENT, width=_w(4.6))
-
-
 def draw_send(draw: ImageDraw.ImageDraw) -> None:
     _mouth(draw)
     _arrow_up(draw, POSITIVE)
@@ -92,13 +86,6 @@ def draw_solve(draw: ImageDraw.ImageDraw) -> None:
     _mouth(draw)
     _arrow_up(draw, POSITIVE)
     draw.polygon([(_s(44), _s(2)), (_s(44), _s(22)), (_s(60), _s(12))], fill=ACCENT)
-
-
-def draw_relink(draw: ImageDraw.ImageDraw) -> None:
-    _mouth(draw)
-    # Two interlocking links, drawn as capsules that overlap at the centre.
-    draw.rounded_rectangle(_box(16, 4, 36, 20), radius=_s(8), outline=ACCENT, width=_w(4.0))
-    draw.rounded_rectangle(_box(30, 4, 50, 20), radius=_s(8), outline=ACCENT, width=_w(4.0))
 
 
 def draw_detach(draw: ImageDraw.ImageDraw) -> None:
@@ -165,12 +152,6 @@ def compact_update(draw: ImageDraw.ImageDraw) -> None:
     draw.polygon([(_s(48), _s(0)), (_s(60), _s(20)), (_s(36), _s(19))], fill=ACCENT)
 
 
-def compact_audit(draw: ImageDraw.ImageDraw) -> None:
-    _bar(draw)
-    draw.ellipse(_box(12, 2, 44, 34), outline=ACCENT, width=_w(7))
-    draw.line([(_s(40), _s(30)), (_s(56), _s(44))], fill=ACCENT, width=_w(8))
-
-
 def compact_send(draw: ImageDraw.ImageDraw) -> None:
     _bar(draw)
     draw.line([(_s(32), _s(20)), (_s(32), _s(40))], fill=POSITIVE, width=_w(7))
@@ -181,12 +162,6 @@ def compact_solve(draw: ImageDraw.ImageDraw) -> None:
     _bar(draw)
     draw.polygon([(_s(6), _s(4)), (_s(6), _s(40)), (_s(34), _s(22))], fill=POSITIVE)
     draw.polygon([(_s(36), _s(4)), (_s(36), _s(40)), (_s(62), _s(22))], fill=ACCENT)
-
-
-def compact_relink(draw: ImageDraw.ImageDraw) -> None:
-    _bar(draw)
-    draw.rounded_rectangle(_box(4, 10, 36, 38), radius=_s(14), outline=ACCENT, width=_w(7))
-    draw.rounded_rectangle(_box(28, 10, 60, 38), radius=_s(14), outline=ACCENT, width=_w(7))
 
 
 def compact_detach(draw: ImageDraw.ImageDraw) -> None:
@@ -233,9 +208,7 @@ GLYPHS = {
     "solve": (draw_solve, compact_solve),
     "insert": (draw_insert, compact_insert),
     "update": (draw_update, compact_update),
-    "audit": (draw_audit, compact_audit),
     "send": (draw_send, compact_send),
-    "relink": (draw_relink, compact_relink),
     "detach": (draw_detach, compact_detach),
     "manage": (draw_manage, compact_manage),
 }
