@@ -143,6 +143,36 @@ class Bundle:
         self.close()
 
 
+def bundle_identity(bundle: Bundle) -> dict[str, Any]:
+    """Identify the export bytes validated by the add-in or resampler.
+
+    The resampler reads the bundle independently. The add-in compares this
+    mapping before changing the document to detect replacement between reads.
+    File digests come from the manifest table verified by ``read_bundle``.
+    """
+
+    manifest = getattr(bundle, "manifest", None) or {}
+    export = manifest.get("export", {})
+    files = manifest.get("files", {})
+    identity = bundle.identity
+    return {
+        "design_id": identity.design_id,
+        "export_id": identity.export_id,
+        "export_sequence": int(identity.export_sequence),
+        "file_hashes": {
+            str(name): str(record.get("sha256", ""))
+            for name, record in sorted(files.items())
+            if isinstance(record, Mapping)
+        }
+        if isinstance(files, Mapping)
+        else {},
+        "geometry_hash": (
+            str(export.get("geometry_hash", "")) if isinstance(export, Mapping) else ""
+        ),
+        "lineage_id": identity.lineage_id,
+    }
+
+
 @dataclass(frozen=True)
 class Parameter:
     """A realized document-global interface parameter from Waveguide Generator."""
@@ -1843,6 +1873,7 @@ __all__ = [
     "TagVerdict",
     "WgLinkError",
     "attribute_payload",
+    "bundle_identity",
     "effective_parameters",
     "enclosure_plan",
     "expressions_equivalent",

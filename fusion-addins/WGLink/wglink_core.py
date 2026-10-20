@@ -36,6 +36,7 @@ if __package__:
         TAG_AREA_TOLERANCE,
         WgLinkError,
         attribute_payload,
+        bundle_identity,
         effective_parameters,
         enclosure_plan,
         expressions_equivalent,
@@ -63,6 +64,7 @@ else:
         TAG_AREA_TOLERANCE,
         WgLinkError,
         attribute_payload,
+        bundle_identity,
         effective_parameters,
         enclosure_plan,
         expressions_equivalent,
@@ -2611,37 +2613,6 @@ _RESAMPLE_IDENTITY_LABELS = {
 }
 
 
-def _resample_identity(bundle: object) -> dict[str, Any]:
-    """The identity of the bundle bytes one reader validated.
-
-    Counterpart of ``scripts/wglink_resample.py``'s ``bundle_identity``; the
-    two must produce the same mapping for the same bytes, so change them
-    together. ``file_hashes`` comes from the manifest files table, whose
-    digests ``read_bundle`` has already verified against the bytes on disk.
-    """
-
-    manifest = getattr(bundle, "manifest", None) or {}
-    export = manifest.get("export", {})
-    files = manifest.get("files", {})
-    identity = bundle.identity
-    return {
-        "design_id": identity.design_id,
-        "export_id": identity.export_id,
-        "export_sequence": int(identity.export_sequence),
-        "file_hashes": {
-            str(name): str(record.get("sha256", ""))
-            for name, record in sorted(files.items())
-            if isinstance(record, Mapping)
-        }
-        if isinstance(files, Mapping)
-        else {},
-        "geometry_hash": (
-            str(export.get("geometry_hash", "")) if isinstance(export, Mapping) else ""
-        ),
-        "lineage_id": identity.lineage_id,
-    }
-
-
 def _verify_resample_identity(bundle: object, payload: Mapping[str, Any]) -> None:
     """Refuse geometry that came from different bytes than the validated ones.
 
@@ -2662,7 +2633,7 @@ def _verify_resample_identity(bundle: object, payload: Mapping[str, Any]) -> Non
     half-applied update is worse than a refused one.
     """
 
-    expected = _resample_identity(bundle)
+    expected = bundle_identity(bundle)
     observed = payload.get("bundle_identity")
     if not isinstance(observed, Mapping):
         raise WgLinkError(
