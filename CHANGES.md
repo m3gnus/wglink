@@ -1,6 +1,6 @@
 # Changes
 
-## Unreleased
+## 0.3.1 — 2026-10-21
 
 - Follow the design's latest immutable export on manual Update, even when the
   previously applied bundle still exists. Validate locator keys, schema,
@@ -13,6 +13,9 @@
 - Advertise `immutableBundles: 1` in the Fusion heartbeat. Bundle discovery
   offers each design's latest export alongside legacy stable-folder bundles.
   Document attributes and lineage parameter namespaces remain compatible.
+- Internal: one shared bundle-identity serializer for the verifier and the
+  resample subprocess (output unchanged); retired Audit/Relink toolbar artwork
+  removed (the `audit()`/`relink()` APIs remain).
 
 ## 0.3.0 — 2026-10-12
 
