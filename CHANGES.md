@@ -50,7 +50,7 @@
   return requests require capability schema 1 and `fusionRequestDelivery >= 3`;
   Send and Solve additionally require `solveCommandDelivery >= 4`. An older WG
   receives an update instruction; an unavailable inbox asks for WG to be started
-  and its CAD Link folder checked. Product version strings do not gate delivery.
+  and its WGLink folder checked. Product version strings do not gate delivery.
 - Commands, acknowledgements and status use files; the live HTTP session and
   export watcher are removed. A new export alone no longer prompts Fusion.
   Earlier HTTP claims are settled from file and document evidence without

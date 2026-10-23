@@ -841,7 +841,7 @@ def test_marker_cold_start_without_ipc_resumes_only_after_fresh_gates(
     if fresh in {"outdated", "missing-feature", "override-no-root"}:
         assert fixture.exports == [] and _inbox(fixture.ipc) == []
         assert {"outdated": "Update Waveguide Generator", "missing-feature": "Update and restart WG",
-                "override-no-root": "no selected CAD Link workspace"}[fresh] in fixture.ui.messages[-1][1]
+                "override-no-root": "no selected WGLink folder"}[fresh] in fixture.ui.messages[-1][1]
     else:
         assert len(fixture.exports) == 1
         assert fixture.exports[0]["capture_document"] is False

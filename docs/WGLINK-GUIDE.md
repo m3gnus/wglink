@@ -40,7 +40,7 @@ loads a second module instance. Waveguide Generator elects one active copy and k
 others as recovery standbys, but duplicate installations still make upgrades
 and support needlessly ambiguous.
 
-One-time setup on the WG side: choose a **CAD Link folder** in WG under
+One-time setup on the WG side: choose a **WGLink folder** in WG under
 **Settings → CAD Link**. The add-in reads the same setting, so Insert and
 Send need no folder dialogs afterwards.
 
@@ -62,7 +62,7 @@ WG's CAD Link request consumer is off. Send and Solve additionally require
 integer `solveCommandDelivery >= 4`. An unsupported schema or delivery version
 asks you to **Update Waveguide Generator** before export or model mutation.
 A missing advertisement or disabled Send/Solve consumer asks you to start WG
-and check its CAD Link folder.
+and check its WGLink folder.
 
 Return requests publish a `.wgreturn` bundle for WG to read directly; they do
 not write WG's Send/Solve inbox. Like Send and Solve, they still require WG's
@@ -396,9 +396,9 @@ select an occurrence placed at the assembly origin.
   has* in section 3. Give the link your own **Link name** at Insert, or rename
   it afterwards with `wglink_core.set_link_name`. The `wg_<name>_*` parameters
   keep the bundle's namespace either way, on purpose.
-- **"Waveguide Generator has no selected CAD Link workspace"** — choose the
-  CAD Link folder in WG under Settings → CAD Link, then send again.
-- **"The CAD Link folder Waveguide Generator is set to no longer exists"** — the
+- **"Waveguide Generator has no selected WGLink folder"** — choose the
+  WGLink folder in WG under Settings → CAD Link, then send again.
+- **"The WGLink folder Waveguide Generator is set to no longer exists"** — the
   folder WG remembers was moved, renamed or deleted. The message names it.
   Choose the folder again in WG under Settings → CAD Link, then send again.
 - **"The Waveguide Generator add-in cannot find the component that holds the WG waveguide …"** — Send

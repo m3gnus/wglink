@@ -37,6 +37,9 @@ def test_panel_commands_and_manifest_use_the_display_name():
     manifest = json.loads((ADDIN / "WGLink.manifest").read_text(encoding="utf-8"))
     assert "Waveguide Generator" in manifest["description"][""]
     assert "WGLink" not in str(manifest["description"])
+    assert "the waveguide generator add-in" in manifest["description"][""].lower()
+    assert "audit" not in manifest["description"][""]
+    assert "relink" not in manifest["description"][""]
     assert manifest["id"] == "0cdbb593-fc6c-4615-96b5-1f05a5e18d3a"
     assert manifest["version"] == "0.3.1"
 
@@ -72,8 +75,9 @@ def test_registration_command_and_attribute_ids_stay_compatible():
 def test_dialogs_notifications_and_error_literals_have_no_old_display_name():
     # Scan all executable string literals, including f-string portions. This
     # covers dialog/file-picker titles, message boxes, logs, errors and labels.
-    # Only these exact internal strings may retain WGLink. Counts also prevent
-    # a new bare "WGLink" dialog title from hiding behind an allowed value.
+    # WGLink names the exchange folder and the Scripts and Add-Ins entry.
+    # Apart from those contexts, only these internal strings may retain it.
+    # Counts also prevent a new bare "WGLink" dialog title from hiding behind an allowed value.
     expected = Counter({
         ("WGLink.py", "WGLink"): 1,  # settings directory
         ("WGLink.py", "WGLinkPickupCheck"): 1,
@@ -100,6 +104,42 @@ def test_dialogs_notifications_and_error_literals_have_no_old_display_name():
             if id(node) in docstrings:
                 continue
             assert "Manage WG Link" not in node.value, (path.name, node.lineno)
-            if "WGLink" in node.value:
+            for retired_folder_name in (
+                "CAD Link folder", "CAD Link workspace",
+                "Waveguide Generator workspace", "Waveguide Generator bundle folder",
+            ):
+                assert retired_folder_name not in node.value, (path.name, node.lineno)
+            internal_value = node.value.replace("WGLink folder", "").replace(
+                "WGLink in Scripts and Add-Ins", ""
+            )
+            if "WGLink" in internal_value:
                 found[path.name, node.value] += 1
     assert found == expected
+
+
+def test_addin_operations_are_distinct_from_the_wg_app():
+    literals = {}
+    for filename in ("WGLink.py", "wglink_core.py"):
+        tree = ast.parse((ADDIN / filename).read_text(encoding="utf-8"))
+        literals[filename] = [
+            node.value for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        ]
+    shell_copy = "\n".join(literals["WGLink.py"])
+    for phrase in (
+        "Starting the Waveguide Generator add-in",
+        "Stopping the Waveguide Generator add-in",
+        "Promoting the Waveguide Generator add-in's standby registration",
+        "another registration of the Waveguide Generator add-in",
+        "The Waveguide Generator add-in finished updating the linked model.",
+        "Stop and Run WGLink in Scripts and Add-Ins",
+    ):
+        assert phrase in shell_copy
+    assert "Starting Waveguide Generator" not in literals["WGLink.py"]
+    assert "Stopping Waveguide Generator" not in literals["WGLink.py"]
+    # Starting the external WG app remains a separate, correctly named action.
+    assert "Starting Waveguide Generator…" in literals["WGLink.py"]
+    assert (
+        "Updating the linked model with the Waveguide Generator add-in caused "
+        "feature-health regressions: "
+    ) in literals["wglink_core.py"]

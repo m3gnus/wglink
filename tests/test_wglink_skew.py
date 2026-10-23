@@ -91,7 +91,7 @@ def test_unavailable_wg_consumer_requires_starting_wg_and_checking_folder(
     title, text = fixture.ui.messages[-1]
     assert title == "Waveguide Generator refused"
     assert "not collecting requests from Fusion" in text
-    assert "Start Waveguide Generator" in text and "check its CAD Link folder" in text
+    assert "Start Waveguide Generator" in text and "check its WGLink folder" in text
     assert "Update Waveguide Generator" not in text
 
 

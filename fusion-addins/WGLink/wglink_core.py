@@ -483,7 +483,7 @@ def _verify_update(
         )
         _write_progress(progress_path, report)
         raise WgLinkError(
-            "Waveguide Generator update caused feature-health regressions: "
+            "Updating the linked model with the Waveguide Generator add-in caused feature-health regressions: "
             f"{names}. Freshness evidence was not committed; Undo the update or "
             "repair every named feature before trying again."
         )

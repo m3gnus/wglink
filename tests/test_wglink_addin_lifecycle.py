@@ -4595,7 +4595,8 @@ def test_a_start_that_fails_partway_rolls_back_panel_and_lease(
 
     assert calls["n"] == 2
     assert module._owned is False
-    assert ui.messages and ui.messages[0][0] == "Waveguide Generator start error"
+    assert ui.messages and ui.messages[0][0] == "Waveguide Generator add-in start error"
+    assert "Starting the Waveguide Generator add-in" in ui.messages[0][1]
     assert panels.itemById(module.PANEL_ID) is None
     assert not [definition for definition in definitions.items.values() if definition.isValid]
     assert module._ipc_lease_snapshot()["owner"] is None

@@ -76,14 +76,14 @@ REQUEST_NOT_TAKEN_MESSAGE = (
     "Waveguide Generator has not picked up the request from Fusion for a minute. "
     "Either WG is closed, or it is older than this Waveguide Generator add-in, or it is not "
     "collecting requests from Fusion. Open Waveguide Generator (update it if an "
-    "older version is running). The request waits in the CAD Link folder and is "
+    "older version is running). The request waits in the WGLink folder and is "
     "handled once WG takes it."
 )
 WG_NOT_COLLECTING_MESSAGE = (
     "Waveguide Generator is not collecting requests from Fusion: it has not said "
-    "that it reads them. Either WG is not running with this CAD Link folder, or "
+    "that it reads them. Either WG is not running with this WGLink folder, or "
     "its CAD Link request handling is switched off. Start Waveguide Generator, "
-    "check its CAD Link folder, then try again."
+    "check its WGLink folder, then try again."
 )
 WG_OUTDATED_MESSAGE = (
     "This Waveguide Generator does not advertise the delivery capabilities this "
@@ -105,7 +105,7 @@ def requests_not_taken_at_startup_message(count: int) -> str:
         "when the Waveguide Generator add-in started have not been picked up. Either WG is closed, or it "
         "is older than this Waveguide Generator add-in, or it is not collecting requests from "
         "Fusion. Open Waveguide Generator (update it if an older version is "
-        "running). The requests wait in the CAD Link folder and are handled once WG "
+        "running). The requests wait in the WGLink folder and are handled once WG "
         "takes them."
     )
 
@@ -629,7 +629,7 @@ def return_reference(bundle_path: Path, workspace_root: Path) -> tuple[str, str]
         relative = bundle.relative_to(root)
     except ValueError as exc:
         raise OSError(
-            f"Return bundle {bundle} is not inside the Waveguide Generator workspace {root}."
+            f"Return bundle {bundle} is not inside the WGLink folder {root}."
         ) from exc
     digest = hashlib.sha256((bundle / "wgreturn.json").read_bytes()).hexdigest()
     return relative.as_posix(), f"sha256:{digest}"

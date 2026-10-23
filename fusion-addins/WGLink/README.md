@@ -292,8 +292,8 @@ regions on). Clear the declarations to send without them."
 
 ## The workspace is WG's setting
 
-The CAD Link folder is chosen once, under **Settings → CAD Link** in Waveguide
-Generator. It is separate from WG's run-output folder. Waveguide Generator reads it from
+The WGLink folder is chosen once, under **Settings → CAD Link** in Waveguide
+Generator. It is separate from WG's run-output folder. The Waveguide Generator add-in reads it from
 WG's own `cadlink_settings.json` — resolved the way WG resolves it,
 `WG2_DATA_DIR` included — and lists the bundles in `<workspace>/wglink` in the
 Insert dropdown, newest first, labelled by design name and export sequence.

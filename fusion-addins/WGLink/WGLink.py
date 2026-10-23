@@ -812,7 +812,7 @@ def _required_manifest_features() -> dict[str, bool]:
 
 
 def _no_workspace_text(action: str = "send again") -> str:
-    """Why there is no CAD Link folder to use, told apart the way WG tells it.
+    """Why there is no WGLink folder to use, told apart the way WG tells it.
 
     A folder that was chosen and has since been moved or deleted is not the
     same situation as one never chosen, and a user told "choose one" when he
@@ -825,13 +825,13 @@ def _no_workspace_text(action: str = "send again") -> str:
         missing = None
     if missing is not None:
         return (
-            "The CAD Link folder Waveguide Generator is set to no longer exists:\n"
+            "The WGLink folder Waveguide Generator is set to no longer exists:\n"
             f"{missing}\n\n"
-            "It may have been moved, renamed or deleted. Choose the CAD Link folder "
+            "It may have been moved, renamed or deleted. Choose the WGLink folder "
             f"again in WG under Settings → CAD Link, then {action}."
         )
     return (
-        "Waveguide Generator has no selected CAD Link workspace. Choose one in "
+        "Waveguide Generator has no selected WGLink folder. Choose one in "
         f"WG under Settings → CAD Link, then {action}."
     )
 
@@ -1143,7 +1143,7 @@ def _summary(operation: str, report: dict[str, object]) -> str:
     if operation == "update":
         deviation = report.get("deviation", {})
         return (
-            "Waveguide Generator update finished.\n"
+            "The Waveguide Generator add-in finished updating the linked model.\n"
             f"Fit points moved: {report.get('fit_points_moved', 0)}\n"
             f"Sections done: {report.get('sections_done', 0)}\n"
             f"Health regressions: {len(report.get('regressed', []))}\n"
@@ -1297,7 +1297,7 @@ def _submit_to_wg(report: dict[str, object], kind: str) -> str:
         raise wglink_core.WgLinkError(_no_workspace_text(action))
     bundle = Path(str(report.get("bundle_path") or ""))
     not_asked = (
-        "The return bundle is in the CAD Link folder, but Waveguide Generator was "
+        "The return bundle is in the WGLink folder, but Waveguide Generator was "
         "not asked to take it. "
     )
     request_id = str(uuid.uuid4())
@@ -1319,7 +1319,7 @@ def _submit_to_wg(report: dict[str, object], kind: str) -> str:
         _begin_request(channel, request_id, DELIVERY)["outcome"] = "writeFailed"
         raise wglink_core.WgLinkError(
             f"{not_asked}The Waveguide Generator add-in could not write the request for WG: {exc}. "
-            f"Check the CAD Link folder is writable, then {action}."
+            f"Check the WGLink folder is writable, then {action}."
         ) from exc
     if confirmed:
         _begin_request(channel, request_id, DELIVERY)["outcome"] = "requested"
@@ -1512,7 +1512,7 @@ def _startup_pickup_check(paths: list[Path]) -> None:
 #: What an item that start-up could not convert still has: it is kept, and the
 #: next start-up writes it again under its own id -- never a new one.
 OUTBOX_KEPT_TEXT = (
-    "Nothing was dropped. They stay in the CAD Link folder, and the Waveguide Generator add-in tries again "
+    "Nothing was dropped. They stay in the WGLink folder, and the Waveguide Generator add-in tries again "
     "the next time it starts, under the same request ids, so Waveguide Generator "
     "never runs one twice. Restart Fusion once the folder is writable."
 )
@@ -1569,7 +1569,7 @@ def _convert_outbox_at_startup() -> None:
         _message(
             f"{len(result['failed'])} request(s) an earlier session queued for "
             "Waveguide Generator could not be moved into WG's request folder at "
-            "start-up: the CAD Link folder could not be written, or a file in it "
+            "start-up: the WGLink folder could not be written, or a file in it "
             "was held by another program.\n\n" + OUTBOX_KEPT_TEXT,
             f"{PANEL_NAME} earlier requests waiting",
         )
@@ -1578,7 +1578,7 @@ def _convert_outbox_at_startup() -> None:
             f"{len(result['abandoned'])} earlier Send(s) to Waveguide Generator were "
             "never delivered, and this Waveguide Generator cannot take a Send from a "
             "file. Update Waveguide Generator, then send those models again from "
-            "Fusion. Their returns are still in the CAD Link folder.",
+            "Fusion. Their returns are still in the WGLink folder.",
             f"{PANEL_NAME} earlier sends not delivered",
         )
 
@@ -2527,7 +2527,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             args.command.execute.add(handler)
             _handlers.append(handler)
         except Exception as exc:  # noqa: BLE001
-            _report_error("Building a Waveguide Generator dialog", f"{PANEL_NAME} command error", exc)
+            _report_error("Building a dialog for the Waveguide Generator add-in", f"{PANEL_NAME} command error", exc)
 
 
 def _delete_quietly(entity: object) -> None:
@@ -3561,7 +3561,7 @@ def _execute_return_request(
         output = wglink_workspace.return_folder()
         if output is None:
             raise wglink_core.WgLinkError(
-                "Waveguide Generator has no selected return workspace."
+                "Waveguide Generator has no selected WGLink folder."
             )
         options: dict[str, object] = {
             "selection": "root",
@@ -4286,7 +4286,7 @@ class CandidateEventHandler(adsk.core.CustomEventHandler):
             with wglink_activity.because(wglink_activity.CAUSE_PROMOTION):
                 _attempt_promotion()
         except Exception as exc:  # noqa: BLE001
-            _report_error("Promoting a standby Waveguide Generator", f"{PANEL_NAME} recovery error", exc)
+            _report_error("Promoting the Waveguide Generator add-in's standby registration", f"{PANEL_NAME} recovery error", exc)
 
 
 class FollowupEventHandler(adsk.core.CustomEventHandler):
@@ -4303,7 +4303,7 @@ class FollowupEventHandler(adsk.core.CustomEventHandler):
                 return
             _run_followups()
         except Exception as exc:  # noqa: BLE001
-            _report_error("Finishing a Waveguide Generator command", f"{PANEL_NAME} error", exc)
+            _report_error("Finishing a command in the Waveguide Generator add-in", f"{PANEL_NAME} error", exc)
 
 
 def _schedule_followup(job: object) -> None:
@@ -4676,7 +4676,7 @@ def _build_owner(app: object, ui: object) -> None:
             target = manage.controls if manage is not None else _panel.controls
             _controls.append(target.addCommand(definition))
         if not _start_watch(app):
-            raise RuntimeError("Fusion refused the Waveguide Generator owner event")
+            raise RuntimeError("Fusion refused the Waveguide Generator add-in's owner event")
         if not _activate_ipc_lease():
             raise RuntimeError("The Waveguide Generator add-in's IPC owner lease was lost during startup")
         _owned = True
@@ -4771,10 +4771,10 @@ def _run() -> None:
                 # Candidate promotion is coordination (engine B): a standby
                 # with the gate off waits for a restart rather than a timer.
                 _log(
-                    f"[{PANEL_NAME}] another Waveguide Generator registration owns this Fusion "
+                    f"[{PANEL_NAME}] another registration of the Waveguide Generator add-in owns this Fusion "
                     "session, and automatic coordination is off, so this one does "
                     "not take over by itself. It stays idle until it is started "
-                    "again (Stop and Run it in Scripts and Add-Ins, or restart "
+                    "again (Stop and Run WGLink in Scripts and Add-Ins, or restart "
                     "Fusion) after the owner has stopped."
                 )
             return
@@ -4784,7 +4784,7 @@ def _run() -> None:
             _release_ipc_lease()
             raise
     except Exception as exc:  # noqa: BLE001
-        _report_error("Starting Waveguide Generator", f"{PANEL_NAME} start error", exc)
+        _report_error("Starting the Waveguide Generator add-in", f"{PANEL_NAME} add-in start error", exc)
 
 
 def stop(_context: object) -> None:
@@ -4810,4 +4810,4 @@ def _stop() -> None:
             if lease_owner:
                 _release_ipc_lease()
     except Exception as exc:  # noqa: BLE001
-        _report_error("Stopping Waveguide Generator", f"{PANEL_NAME} stop error", exc)
+        _report_error("Stopping the Waveguide Generator add-in", f"{PANEL_NAME} add-in stop error", exc)

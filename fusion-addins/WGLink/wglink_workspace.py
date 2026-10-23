@@ -135,7 +135,7 @@ def workspace_root(**kwargs: Any) -> Path | None:
 
 
 def missing_workspace(**kwargs: Any) -> Path | None:
-    """The CAD Link folder WG has persisted, when that folder no longer exists.
+    """The WGLink folder WG has persisted, when that folder no longer exists.
 
     ``workspace_root`` answers ``None`` both when nothing was ever chosen and
     when the chosen folder was moved or deleted, and those need different
