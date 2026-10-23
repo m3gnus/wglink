@@ -217,8 +217,9 @@ def test_frozen_reader_refuses_unknown_required_feature(manifest, frozen):
 
 
 def test_frozen_reader_refuses_complete_new_return(manifest, frozen):
-    with pytest.raises(frozen.ProtocolValidationError):
+    with pytest.raises(frozen.ProtocolValidationError) as caught:
         frozen.validate_structure(manifest, frozen.WG_INGRESS)
+    assert str(caught.value) == '$.mesh.symmetry: CAD-authored verdict keys are forbidden'
 
 
 @pytest.mark.parametrize('path', sorted((ROOT / 'tests/fixtures/no-fem-e9f0dfb').glob('**/wgreturn.json')))

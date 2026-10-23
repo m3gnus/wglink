@@ -45,7 +45,10 @@ areas, and exactly one per-face area per face. `observed.bodies` is optional
 for groups; when present it is a list of nonempty body names. Sources retain
 their existing required `bodies` field. STEP resolution, overlapping resolved
 faces and area drift are checked by WG, not guessed by this schema validator.
-Source faces take precedence over groups, then walls; reject faces in two groups.
+Resolved source and group faces must not overlap, even when their sizes match.
+WG refuses source/group and group/group overlaps, including a painted group on
+a geometrically selected linked throat. Source and group targets replace the
+wall target only on their own disjoint faces.
 
 `mesh.symmetry` is a CAD preparation policy, independent of
 `assembly.domain`. `off` maps to `preparation.symmetry_mode = "full"`;
@@ -61,9 +64,29 @@ Fine 15 / Coarse 40 mm. `PORT_EXIT` uses the existing role alias.
 `default_mesh(sources)` returns detached defaults and preserves source
 suggestions already supplied. `build_return_manifest(mesh=...)` attaches the
 required feature and validates/detaches the snapshot; omitting `mesh` keeps
-legacy builder behavior. `send` currently supplies `default_mesh(sources)`.
-W2a replaces that call with the document settings snapshot, using these same
-constants and builder. Persistence, group painting and the dialog belong to W2.
+legacy builder behavior. Send uses the root component's `WGLink/mesh_settings`
+JSON attribute (schema 1), or defaults when it is absent, through the same
+builder. The stored record is the complete mesh object plus `schema: 1`.
+Saving sets `settings_origin` to `user`. Sizes are keyed by source id; new ids
+get their role defaults and ids outside the export stay stored but are not
+emitted. Invalid or unsupported stored data refuses rather than resetting it.
+
+Group membership lives on face paint `WGMESH_<group_id>`, including faces
+expanded from body selections. Groups share the source appearance writer;
+clearing an override restores the body's appearance. Every Send remeasures
+group observations from the included faces. Empty or unknown painted groups
+refuse. The document settings and current membership enter the return-state
+fingerprint, so changing mesh settings invalidates a pending snapshot.
+
+`wglink_mesh.estimate_triangles` is advisory: `2.3 * sum(A / h²)` plus linear
+grading rings around sources, bounded by remaining wall area. Curved wall
+patches can supply measured areas and sampled principal radii; their effective
+size also respects WG's chord-deviation ceiling (`sqrt(8 * radius * deviation)`,
+0.15 mm deviation). Without curvature evidence the area estimate is a lower
+bound on curved models. WG's actual count is authoritative. A caller may
+supply a symmetry fraction for the geometry as drawn; it is an estimate,
+not a CAD symmetry verdict. Symmetry Off uses the whole drawn geometry.
+The dialog belongs to W2b.
 
 WG must advertise capability schema 1 with integer `meshSizing >= 1`
 (booleans, floats and strings do not count). Manual Send/Solve, resumed backend
@@ -96,8 +119,11 @@ so revision hashes and rebuilds stay identical. M0 owns its separate
 
 The frozen pre-W1 validator rejects a feature-only probe with
 `unknown required feature(s): mesh-sizing-v1`. With a complete new block it
-can reject `mesh.symmetry` first, because its verdict-key scan precedes feature
-negotiation. Both prevent old WG from silently consuming a new snapshot.
+rejects `$.mesh.symmetry: CAD-authored verdict keys are forbidden`, because
+its verdict-key scan precedes feature negotiation. Both prevent old WG from
+silently consuming a new snapshot. If a new return is imported directly into
+an old WG and shows either diagnostic, update and restart Waveguide Generator,
+then Send again from Fusion. Do not strip mesh fields or required features.
 
 The release/pin owner handles the WGLink 0.4.0 bump, package pin, protocol
 provenance, endpoint oracle updates and paired-package qualification; W1 does

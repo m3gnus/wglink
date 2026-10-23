@@ -32,7 +32,7 @@ else:
     import wglink_protocol
 
 if __package__:
-    from . import wglink_activity, wglink_author, wglink_core, wglink_fem
+    from . import wglink_activity, wglink_author, wglink_core, wglink_fem, wglink_mesh
     from .wglink_return import (
         BASE_RETURN_FEATURES,
         DOCUMENT_UP_FEATURE,
@@ -52,6 +52,7 @@ else:
     import wglink_author
     import wglink_core
     import wglink_fem
+    import wglink_mesh
     from wglink_return import (
         BASE_RETURN_FEATURES,
         DOCUMENT_UP_FEATURE,
@@ -69,6 +70,8 @@ else:
 
 
 DECLARATION_ATTRIBUTE = "return_declaration"
+# Attribute/appearance writes need not move Fusion's timeline or body revision.
+_mesh_authoring_generation = 0
 # The two managed roles that name a final exterior body. Every other managed
 # role is a helper WGLink built on the way there; wglink_return skips those, so
 # nothing here may mark one as a body the export depends on.
@@ -136,6 +139,8 @@ def _shape_fingerprint(body: object) -> dict[str, Any]:
                 "area_mm2": float(face.area) * 100.0,
                 "bbox_mm": face_box,
                 "source_role": _face_role(face),
+                **({"mesh_group": wglink_core._appearance_name(face)}
+                   if (wglink_core._appearance_name(face) or "").startswith("WGMESH_") else {}),
             })
         except Exception:  # noqa: BLE001 - one unreadable face degrades the token
             faces.append({"unreadable": True})
@@ -1533,6 +1538,7 @@ def return_state(app: object, options: dict[str, Any] | None = None) -> dict[str
         )
     except wglink_core.WgLinkError as exc:
         return {"hash": None, "reason": str(exc)}
+    source_face_keys: set[tuple[str, object]] = set()
     try:
         sources = _sources(
             records,
@@ -1547,7 +1553,9 @@ def return_state(app: object, options: dict[str, Any] | None = None) -> dict[str
             source_identity=bool(opts.get("source_identity")),
             design=design,
             allow_empty=fem_driven,
+            source_face_keys=source_face_keys,
         )
+        mesh = _mesh_snapshot(design, sources, [body for _item, body in included_pairs], source_face_keys)
     except wglink_core.WgLinkError as exc:
         return {"hash": None, "reason": str(exc)}
     bodies = []
@@ -1594,6 +1602,9 @@ def return_state(app: object, options: dict[str, Any] | None = None) -> dict[str
         "fem_air_volumes": scope["fem_air_volumes"],
         "instances": instances,
         "sources": source_state,
+        # Untouched documents keep the established fingerprint. Saved settings
+        # and managed group paint must invalidate pending snapshot requests.
+        **({"mesh": mesh} if read_mesh_settings(design) is not None else {}),
         **({"domain": {"kind": "automatic"}, "cut_provenance": cut_state} if automatic_domain else {}),
         **({"document_up": document_up} if document_up is not None else {}),
         # Only when declared, so a design without regions keeps its hash.
@@ -2994,6 +3005,95 @@ def _observed(faces: list[object], face_bodies: dict[tuple[str, object], str]) -
     }
 
 
+def read_mesh_settings(design: object) -> dict[str, Any] | None:
+    """Root-component storage travels with the document, including linked designs."""
+    text = wglink_core._attribute_value(design.rootComponent, wglink_mesh.SETTINGS_ATTRIBUTE)
+    if text is None:
+        return None
+    try:
+        return wglink_mesh.loads_settings(text)
+    except wglink_mesh.MeshSettingsError as exc:
+        raise wglink_core.WgLinkError(str(exc)) from exc
+
+
+def save_mesh_settings(design: object, mesh: dict[str, Any]) -> None:
+    try:
+        text = wglink_mesh.dumps_settings(mesh)
+    except wglink_mesh.MeshSettingsError as exc:
+        raise wglink_core.WgLinkError(str(exc)) from exc
+    wglink_core._set_attribute(design.rootComponent, wglink_mesh.SETTINGS_ATTRIBUTE, text)
+    global _mesh_authoring_generation
+    _mesh_authoring_generation += 1
+
+
+def paint_surface_group(
+    app: object, design: object, entities: list[object], group_id: str | None,
+    *, source_faces: list[object] = (),
+) -> None:
+    """Expand body selections to faces and reuse the source appearance writer.
+
+    The dialog supplies geometric linked-throat memberships as source_faces;
+    Send independently checks those memberships before exporting.
+    """
+    faces, seen = [], set()
+    for entity in entities:
+        members = wglink_core._items(entity.faces) if hasattr(entity, "faces") else [entity]
+        for face in members:
+            native = _native_face(face)
+            key = _face_key(native)
+            if key not in seen:
+                seen.add(key)
+                faces.append(native)
+    source_keys = {_face_key(_native_face(face)) for face in source_faces}
+    descriptors = [{"index": index, "appearance_name": wglink_core._appearance_name(face),
+                    "is_source": _face_key(face) in source_keys} for index, face in enumerate(faces)]
+    try:
+        plan = wglink_author.plan_surface_group_assignment(descriptors, group_id)
+        global _mesh_authoring_generation
+        _mesh_authoring_generation += 1
+        wglink_author.apply_face_appearance_plan(
+            faces, plan, lambda name: wglink_core._named_appearance(app, design, name)
+        )
+    except wglink_author.AuthorError as exc:
+        raise wglink_core.WgLinkError(str(exc)) from exc
+
+
+def _mesh_snapshot(
+    design: object, sources: list[dict[str, Any]], bodies: list[object],
+    source_face_keys: set[tuple[str, object]],
+) -> dict[str, Any]:
+    """Measure group paint in this scope; never reuse stale saved observations."""
+    settings = read_mesh_settings(design)
+    definitions = settings["surface_groups"] if settings else []
+    groups = {group["group_id"]: {**group} for group in definitions}
+    faces_by_group: dict[str, list[object]] = {key: [] for key in groups}
+    body_names = {}
+    for body in bodies:
+        for face in wglink_core._items(getattr(body, "faces", None)):
+            body_names[_face_key(face)] = str(getattr(body, "name", "unnamed body"))
+            name = wglink_core._appearance_name(face) or ""
+            if not name.startswith("WGMESH_"):
+                continue
+            group_id = name[len("WGMESH_"):]
+            if group_id not in groups:
+                raise wglink_core.WgLinkError("A painted surface group has no settings. Open Sources & Mesh… and save again.")
+            if _face_key(face) in source_face_keys:
+                raise wglink_core.WgLinkError("A face cannot be in both a source and a surface group.")
+            faces_by_group[group_id].append(face)
+    for group_id, group in groups.items():
+        faces = faces_by_group[group_id]
+        if not faces:
+            raise wglink_core.WgLinkError(f"Surface group {group['name']!r} has no faces in this export. Open Sources & Mesh… and select its faces again.")
+        group["observed"] = _observed(faces, body_names)
+    try:
+        mesh = wglink_mesh.snapshot(sources, settings, surface_groups=list(groups.values()))
+    except wglink_mesh.MeshSettingsError as exc:
+        raise wglink_core.WgLinkError(str(exc)) from exc
+    for source in sources:
+        source["suggested_resolution_mm"] = mesh["source_size_mm"][source["id"]]
+    return mesh
+
+
 #: How far from perpendicular a throat axis may sit to its own throat plane
 #: before the disc a declared cut would halve stops being defined. Matches the
 #: reader's own limit, because the two decide the same thing about the same
@@ -3179,6 +3279,7 @@ def _sources(
     adopt_seeded: bool = False,
     adopted: list[tuple[str, bool]] | None = None,
     allow_empty: bool = False,
+    source_face_keys: set[tuple[str, object]] | None = None,
 ) -> list[dict[str, Any]]:
     """Every drivable source the return carries.
 
@@ -3264,6 +3365,9 @@ def _sources(
         )
     if source_identity:
         _check_source_identities(sources)
+    if source_face_keys is not None:
+        source_face_keys.update(claimed)
+        source_face_keys.update(_face_key(face) for faces in painted.values() for face in faces)
     return sources
 
 
@@ -4276,6 +4380,7 @@ def send(
         for record in records
     ]
     adopted_sources: list[tuple[str, bool]] = []
+    source_face_keys: set[tuple[str, object]] = set()
     sources = _sources(
         records,
         included_bodies,
@@ -4292,8 +4397,10 @@ def send(
         adopt_seeded=True,
         adopted=adopted_sources,
         allow_empty=fem_driven,
+        source_face_keys=source_face_keys,
     )
     _refuse_ambiguous_fem_drivers(region_exports, sources)
+    mesh = _mesh_snapshot(design, sources, included_bodies, source_face_keys)
     # After ``_sources``, deliberately: an adoption above has already written
     # its stamps, so the fingerprint is taken of the document as it now is
     # rather than of one that could not be fingerprinted at all.
@@ -4426,7 +4533,7 @@ def send(
             scope=scope,
             instances=instance_records,
             sources=sources,
-            mesh=wglink_protocol.default_mesh(sources),
+            mesh=mesh,
             required_features=[
                 *BASE_RETURN_FEATURES,
                 *([SOURCE_IDENTITY_FEATURE] if source_identity else []),

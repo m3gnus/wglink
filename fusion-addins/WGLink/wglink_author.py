@@ -27,7 +27,7 @@ from dataclasses import dataclass
 import html
 import math
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 if __package__:
     from . import wglink_protocol
@@ -271,6 +271,54 @@ def plan_source_assignment(
         unchanged=tuple(unchanged),
         summary=summary,
     )
+
+
+def group_appearance_name(group_id: str) -> str:
+    if not isinstance(group_id, str) or not group_id.strip() or group_id != group_id.strip():
+        raise AuthorError("A surface group needs a nonempty, trimmed id.")
+    return f"WGMESH_{group_id}"
+
+
+def plan_surface_group_assignment(
+    faces: Sequence[Mapping[str, Any]], group_id: str | None
+) -> SourcePlan:
+    """Groups cannot replace a source or another group's membership."""
+    name = group_appearance_name(group_id) if group_id is not None else None
+    if not faces:
+        raise AuthorError("Select at least one face or body for the surface group.")
+    positions = _indices(faces, "face")
+    paint, clear, unchanged = [], [], []
+    for index, entry in zip(positions, faces):
+        current = entry.get("appearance_name") or ""
+        if name is None:
+            (clear if current.startswith("WGMESH_") else unchanged).append(index)
+        elif current == name:
+            unchanged.append(index)
+        elif _canonical_role(current) or entry.get("is_source"):
+            raise AuthorError("A face cannot be in both a source and a surface group.")
+        elif current.startswith("WGMESH_"):
+            raise AuthorError("A face cannot be in two surface groups. Clear its group first.")
+        else:
+            paint.append(index)
+    return SourcePlan(None, name, tuple(paint), tuple(clear), tuple(unchanged),
+                      f"{'Saved' if name else 'Cleared'} the surface group on {_faces_phrase(len(faces))}.")
+
+
+def apply_face_appearance_plan(
+    faces: Sequence[object], plan: SourcePlan, named_appearance: Callable[[str], object]
+) -> None:
+    """One paint/clear writer for sources and mesh groups, on the main thread.
+
+    Clearing a face override with None restores the body's appearance.
+    ``named_appearance`` is the existing Fusion library/copy resolver.
+    """
+    appearance = named_appearance(plan.appearance_name) if plan.paint else None
+    for indices, value, action in ((plan.paint, appearance, "paint"), (plan.clear, None, "clear")):
+        for index in indices:
+            try:
+                faces[index].appearance = value
+            except Exception as exc:
+                raise AuthorError(f"Could not {action} the managed appearance on a selected face: {exc}.") from exc
 
 
 # ------------------------------------------------------------- body declaration

@@ -1987,6 +1987,8 @@ def _named_appearance(app: object, design: object, name: str) -> object:
             continue
         minted = design.appearances.addByCopy(base, name)
         rgba = ROLE_COLOURS.get(name.upper())
+        if rgba is None and name.startswith("WGMESH_"):
+            rgba = (40, 190, 210, 255)
         prop = _colour_property(minted) if rgba else None
         if prop and rgba:
             prop.value = adsk.core.Color.create(*rgba)

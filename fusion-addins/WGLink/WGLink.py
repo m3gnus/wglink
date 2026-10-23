@@ -1022,27 +1022,9 @@ def _apply_source_role(command_inputs: object) -> dict[str, object]:
         _face_descriptors(faces),
         _selected_name(command_inputs, "source_role", wglink_author.DEFAULT_SOURCE_ROLE),
     )
-    appearance = (
-        wglink_core._named_appearance(app, design, plan.appearance_name)
-        if plan.paint
-        else None
+    wglink_author.apply_face_appearance_plan(
+        faces, plan, lambda name: wglink_core._named_appearance(app, design, name)
     )
-    for index in plan.paint:
-        try:
-            faces[index].appearance = appearance
-        except Exception as exc:  # noqa: BLE001
-            raise wglink_core.WgLinkError(
-                f"Could not paint the {plan.role} appearance onto a selected face: {exc}."
-            ) from exc
-    for index in plan.clear:
-        try:
-            # None is how wglink_core strips a stray tag too: the face falls
-            # back to the appearance its body carries.
-            faces[index].appearance = None
-        except Exception as exc:  # noqa: BLE001
-            raise wglink_core.WgLinkError(
-                f"Could not clear the WG source appearance from a selected face: {exc}."
-            ) from exc
     # The source identity is authored here, and whatever WG advertises, so a
     # document is ready when WG starts reading identities. The preflight and the
     # heartbeat never author one. Send authors one in exactly one case: a role
@@ -2589,6 +2571,10 @@ def _geometry_change_key(design: object, records: dict) -> tuple:
         _source_identity_enabled(),
         automatic_domain,
         document_up,
+        wglink_send._mesh_authoring_generation,
+        wglink_core._attribute_value(
+            getattr(design, "rootComponent", None), wglink_send.wglink_mesh.SETTINGS_ATTRIBUTE
+        ),
     ]
     if document_up:
         try:
