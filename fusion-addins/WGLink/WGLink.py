@@ -1663,6 +1663,10 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
     def _execute(self, args: object, *, send_options: dict[str, object] | None = None,
                  admission: wglink_launcher.BackendAdmission | None = None) -> None:
         global _command_busy
+        if any(state is not None and state.construction_failed
+               for state in (self.mesh_state, self.fem_state)):
+            args.isValidResult = False
+            return
         progress = None
         # Whether this command got as far as producing a report. A user who
         # cancelled the bundle picker or the detach confirmation changed
@@ -1906,6 +1910,7 @@ FEM_DECLARE_LABEL = "Declare or update the FEM region"
 
 class FemDialogState:
     def __init__(self) -> None:
+        self.construction_failed = False
         self.group_ids: list[int] = []
         self.next_group_id = 1
         self.region_id: str | None = None
@@ -2242,7 +2247,7 @@ class FemInputChangedHandler(adsk.core.InputChangedEventHandler):
             self._changed(args)
 
     def _changed(self, args: object) -> None:
-        if self.state.restoring:
+        if self.state.construction_failed or self.state.restoring:
             return
         try:
             changed = getattr(args, "input", None)
@@ -2272,7 +2277,9 @@ class FemValidateInputsHandler(adsk.core.ValidateInputsEventHandler):
 
     def notify(self, args: object) -> None:
         try:
-            args.areInputsValid = _sync_fem_validation(_command_inputs(args.inputs), self.state)
+            args.areInputsValid = not self.state.construction_failed and _sync_fem_validation(
+                _command_inputs(args.inputs), self.state
+            )
         except Exception:  # noqa: BLE001 - execute repeats the validation
             try:
                 args.areInputsValid = False
@@ -2329,6 +2336,7 @@ MESH_DIALOG_TITLE = "Sources & Mesh — Waveguide Generator"
 
 class MeshDialogState:
     def __init__(self):
+        self.construction_failed = False
         self.sources = {}
         self.groups = {}
         self.next_id = 1
@@ -2705,7 +2713,7 @@ class MeshInputChangedHandler(adsk.core.InputChangedEventHandler):
         self.state = state
 
     def notify(self, args):
-        if self.state.restoring:
+        if self.state.construction_failed or self.state.restoring:
             return
         self.state.restoring = True
         try:
@@ -2760,7 +2768,9 @@ class MeshValidateInputsHandler(adsk.core.ValidateInputsEventHandler):
 
     def notify(self, args):
         try:
-            args.areInputsValid = _sync_mesh_dialog(_command_inputs(args.inputs), self.state)
+            args.areInputsValid = not self.state.construction_failed and _sync_mesh_dialog(
+                _command_inputs(args.inputs), self.state
+            )
         except Exception:
             args.areInputsValid = False
 
@@ -2772,7 +2782,7 @@ class MeshDialogActivateHandler(adsk.core.CommandEventHandler):
 
     def notify(self, args):
         state = self.state
-        if state.activated:
+        if state.construction_failed or state.activated:
             return
         state.restoring = True
         try:
@@ -2792,6 +2802,39 @@ class MeshDialogActivateHandler(adsk.core.CommandEventHandler):
 class MeshDialogDestroyHandler(adsk.core.CommandEventHandler):
     def notify(self, args):
         args.command.parentCommandDefinition.name = COMMANDS["source"][1]
+
+
+def _initialize_authoring_dialog(command, operation):
+    """Install every handler before construction; only a complete dialog may save."""
+    execute = CommandExecuteHandler(operation)
+    if operation == "source":
+        state = MeshDialogState()
+        execute.mesh_state = state
+        build = _build_mesh_dialog
+        handlers = ((command.activate, MeshDialogActivateHandler(state)),
+                    (command.destroy, MeshDialogDestroyHandler()),
+                    (command.inputChanged, MeshInputChangedHandler(state)),
+                    (command.validateInputs, MeshValidateInputsHandler(state)))
+    else:
+        state = FemDialogState()
+        execute.fem_state = state
+        build = _build_fem_dialog
+        handlers = ((command.inputChanged, FemInputChangedHandler(state)),
+                    (command.validateInputs, FemValidateInputsHandler(state)))
+    # Keep events inert during construction too: Fusion may dispatch them while
+    # inputs are being added, or while the outer reporter displays an error.
+    state.construction_failed = True
+    for event, handler in (*handlers, (command.execute, execute)):
+        event.add(handler)
+        _handlers.append(handler)
+    if operation == "source":
+        command.parentCommandDefinition.name = MESH_DIALOG_TITLE
+        command.isExecutedWhenPreEmpted = False
+        command.okButtonText = "Save"
+        command.setDialogInitialSize(660, 720)
+        command.setDialogMinimumSize(420, 420)
+    build(command.commandInputs, state)
+    state.construction_failed = False
 
 
 class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
@@ -2847,27 +2890,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 args.command.inputChanged.add(changed)
                 _handlers.append(changed)
             if self.operation == "source":
-                command = args.command
-                command.parentCommandDefinition.name = MESH_DIALOG_TITLE
-                command.isExecutedWhenPreEmpted = False
-                command.okButtonText = "Save"
-                destroy = MeshDialogDestroyHandler()
-                command.destroy.add(destroy)
-                _handlers.append(destroy)
-                command.setDialogInitialSize(660, 720)
-                command.setDialogMinimumSize(420, 420)
-                state = MeshDialogState()
-                _build_mesh_dialog(inputs, state)
-                activate = MeshDialogActivateHandler(state)
-                command.activate.add(activate)
-                changed = MeshInputChangedHandler(state)
-                command.inputChanged.add(changed)
-                validate = MeshValidateInputsHandler(state)
-                command.validateInputs.add(validate)
-                handler = CommandExecuteHandler(self.operation)
-                handler.mesh_state = state
-                command.execute.add(handler)
-                _handlers.extend((activate, changed, validate, handler))
+                _initialize_authoring_dialog(args.command, self.operation)
                 return
             if self.operation == "declare":
                 bodies = inputs.addSelectionInput(
@@ -2927,18 +2950,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                     True,
                 )
             if self.operation == "fem":
-                state = FemDialogState()
-                _build_fem_dialog(inputs, state)
-                changed = FemInputChangedHandler(state)
-                args.command.inputChanged.add(changed)
-                _handlers.append(changed)
-                validate = FemValidateInputsHandler(state)
-                args.command.validateInputs.add(validate)
-                _handlers.append(validate)
-                handler = CommandExecuteHandler(self.operation)
-                handler.fem_state = state
-                args.command.execute.add(handler)
-                _handlers.append(handler)
+                _initialize_authoring_dialog(args.command, self.operation)
                 return
             if self.operation not in {"insert", "send", "solve", "source", "declare"}:
                 # A document with one link needs no choice, and the old free

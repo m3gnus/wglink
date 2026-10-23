@@ -69,9 +69,7 @@ def change(scene, inputs, items, state, input_id):
     assert scene.ui.messages == []
 
 
-def test_command_lifecycle_title_save_size_and_first_promoted_button(scene):
-    module = scene.module
-    inputs, items = _building_inputs(module)
+def _dialog_command(inputs):
     class Event:
         def __init__(self):
             self.handlers = []
@@ -81,6 +79,13 @@ def test_command_lifecycle_title_save_size_and_first_promoted_button(scene):
     command = types.SimpleNamespace(commandInputs=inputs, parentCommandDefinition=types.SimpleNamespace(name="Sources & Mesh…"),
         setDialogInitialSize=lambda *size: initial.append(size), setDialogMinimumSize=lambda *size: minimum.append(size),
         **{name: Event() for name in ("activate", "destroy", "inputChanged", "validateInputs", "execute")})
+    return command, initial, minimum
+
+
+def test_command_lifecycle_title_save_size_and_first_promoted_button(scene):
+    module = scene.module
+    inputs, items = _building_inputs(module)
+    command, initial, minimum = _dialog_command(inputs)
     module.CommandCreatedHandler("source").notify(types.SimpleNamespace(command=command))
     assert scene.ui.messages == []
     assert module.COMMANDS["source"][:2] == ("hornlab_wglink_set_source", "Sources & Mesh…")
@@ -98,6 +103,67 @@ def test_command_lifecycle_title_save_size_and_first_promoted_button(scene):
     assert items["mesh_source_faces_1"].selection(0).entity is scene.faces[0]
     command.destroy.handlers[0].notify(types.SimpleNamespace(command=command))
     assert command.parentCommandDefinition.name == "Sources & Mesh…"
+
+
+@pytest.mark.parametrize("operation, builder, apply, sync, state_attr", [
+    ("source", "_build_mesh_dialog", "_apply_mesh_dialog", "_sync_mesh_dialog", "mesh_state"),
+    ("fem", "_build_fem_dialog", "_apply_fem_region", "_sync_fem_validation", "fem_state"),
+])
+@pytest.mark.parametrize("finish_inputs", [False, True])
+def test_failed_construction_keeps_handlers_and_refuses_save_once(
+    scene, monkeypatch, operation, builder, apply, sync, state_attr, finish_inputs
+):
+    module = scene.module
+    inputs, items = _building_inputs(module)
+    command, _, _ = _dialog_command(inputs)
+    monkeypatch.setattr(module, "_require_fem_regions", lambda: None)
+    original_build = getattr(module, builder)
+    events = ("inputChanged", "validateInputs", "execute")
+    if operation == "source":
+        events += ("activate", "destroy")
+
+    def refuse_partial_dialog():
+        for _ in range(2):
+            command.inputChanged.handlers[0].notify(types.SimpleNamespace())
+            validate_args = types.SimpleNamespace(areInputsValid=True)
+            command.validateInputs.handlers[0].notify(validate_args)
+            assert validate_args.areInputsValid is False
+            execute_args = types.SimpleNamespace(isValidResult=True)
+            command.execute.handlers[0].notify(execute_args)
+            assert execute_args.isValidResult is False
+            if operation == "source":
+                command.activate.handlers[0].notify(types.SimpleNamespace())
+
+    def broken_build(inputs, state):
+        assert all(len(getattr(command, event).handlers) == 1 for event in events)
+        assert all(getattr(command, event).handlers[0] in module._handlers for event in events)
+        assert state.construction_failed
+        # Events can also arrive while inputs are still being constructed.
+        refuse_partial_dialog()
+        if finish_inputs:
+            original_build(inputs, state)
+        else:
+            inputs.addStringValueInput("partial", "Partial input", "")
+        raise RuntimeError("dialog construction failed")
+
+    monkeypatch.setattr(module, builder, broken_build)
+    module.CommandCreatedHandler(operation).notify(types.SimpleNamespace(command=command))
+    assert items  # Construction reached the strict input fake.
+    assert len(scene.ui.messages) == 1
+    assert "dialog construction failed" in scene.ui.messages[0][1]
+    execute = command.execute.handlers[0]
+    assert getattr(execute, state_attr).construction_failed
+
+    def unexpected(*_args):
+        pytest.fail("A failed dialog must not validate or save partial inputs")
+
+    monkeypatch.setattr(module, apply, unexpected)
+    monkeypatch.setattr(module, sync, unexpected)
+    refuse_partial_dialog()
+    assert len(scene.ui.messages) == 1
+    if operation == "source":
+        command.destroy.handlers[0].notify(types.SimpleNamespace(command=command))
+        assert command.parentCommandDefinition.name == module.COMMANDS["source"][1]
 
 
 def test_defaults_filters_copy_and_restore_runs_once(scene):
