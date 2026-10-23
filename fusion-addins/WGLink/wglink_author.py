@@ -485,7 +485,7 @@ def plan_body_declaration(
 # ----------------------------------------------------------------- pre-flight
 
 NO_SOURCE_WARNING = (
-    "No drivable source: use Set WG Source… to mark a face LF, MF, HF, or "
+    "No drivable source: use Sources & Mesh… to mark a face LF, MF, HF, or "
     "PASSIVE_CARDIOID. The export refuses without one."
 )
 LOG_HINT = (

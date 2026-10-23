@@ -87,7 +87,7 @@ def _unresolved(missing: int, total: int, painted: str, canonical: str) -> str:
     return (
         f"{missing} of {total} face(s) painted {painted} carry no WG source "
         f"identity for {canonical} (painted by hand, repainted, or marked before "
-        f"source identities existed). Select them and run Set WG Source… "
+        f"source identities existed). Select them and run Sources & Mesh… "
         f"{canonical}; a face added to a source that still resolves keeps that "
         "source's identity."
     )
@@ -411,7 +411,7 @@ def test_the_preview_reports_the_refusal_and_writes_nothing(
 
     report = send_module.preflight_scope(_app(), {"source_identity": True})
 
-    assert "Set WG Source" in report["source_error"]
+    assert "Sources & Mesh" in report["source_error"]
     assert "adopt" in report["source_error"].lower()
     assert a.attributes.values == b.attributes.values == {}
 

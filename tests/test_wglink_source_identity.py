@@ -287,7 +287,7 @@ def test_an_unstamped_painted_source_is_refused_naming_the_remedy(
         _send(send_module, tmp_path)
 
     text = str(refusal.value)
-    assert "LF" in text and "Set WG Source" in text
+    assert "LF" in text and "Sources & Mesh" in text
     assert not list(tmp_path.glob("*.wgreturn"))
     assert not list(tmp_path.glob(".*tmp-*"))
 
@@ -492,7 +492,7 @@ def test_the_preflight_names_an_identity_refusal_before_ok(send_module, monkeypa
     report = send_module.preflight_scope(_app(), {"source_identity": True})
     legacy = send_module.preflight_scope(_app(), {})
 
-    assert "Set WG Source" in report["source_error"]
+    assert "Sources & Mesh" in report["source_error"]
     assert legacy.get("source_error") is None
 
 

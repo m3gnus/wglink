@@ -399,14 +399,33 @@ def _building_inputs(module):
         def addBoolValueInput(self, input_id, name, _checkbox, _resource, value):
             return self.addValueInput(input_id, name, "", value)
 
+        def addTextBoxCommandInput(self, input_id, name, text, _rows, _readonly):
+            item = self.addValueInput(input_id, name, "", text)
+            item.formattedText = text
+            return item
+
+        def addTableCommandInput(self, input_id, name, _columns, _ratio):
+            item = self.addGroupCommandInput(input_id, name)
+            item.cells = {}
+            item.addCommandInput = lambda cell, row, col: item.cells.update({(row, col): cell})
+            return item
+
         def addDropDownCommandInput(self, input_id, name, _style):
             entries = []
-            item = types.SimpleNamespace(id=input_id, name=name, selectedItem=None)
+            class Dropdown:
+                id = input_id
+                @property
+                def selectedItem(self):
+                    return next((entry for entry in entries if entry.isSelected), None)
+                @selectedItem.setter
+                def selectedItem(self, value):
+                    for entry in entries:
+                        entry.isSelected = entry.name == value.name
+            item = Dropdown()
+            item.name = name
             def add(label, selected):
-                entry = types.SimpleNamespace(name=label, isSelected=selected)
-                entries.append(entry)
-                if selected:
-                    item.selectedItem = entry
+                entries.append(types.SimpleNamespace(name=label, isSelected=selected))
+                item.listItems.count = len(entries)
             item.listItems = types.SimpleNamespace(add=add, item=lambda i: entries[i], count=0)
             items[input_id] = item
             return item
@@ -414,8 +433,8 @@ def _building_inputs(module):
         def addSelectionInput(self, input_id, _name, _prompt):
             item = _SelectionInput([])
             item.addSelection = lambda face: item._entities.append(face)
-            item.addSelectionFilter = lambda _filter: None
-            item.setSelectionLimits = lambda *_limits: None
+            item.id = input_id
+            item.clearSelection = lambda: item._entities.clear()
             items[input_id] = item
             return item
 

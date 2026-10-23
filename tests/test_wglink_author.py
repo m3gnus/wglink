@@ -404,10 +404,10 @@ def test_pre_flight_needs_a_gathered_report(author):
 
 def test_a_failure_message_is_one_human_line_plus_where_to_look(author):
     message = author.failure_message(
-        "Set WG Source…", RuntimeError("Fusion refused\nthe appearance")
+        "Sources & Mesh…", RuntimeError("Fusion refused\nthe appearance")
     )
 
-    assert message.startswith("Set WG Source… hit an unexpected error: ")
+    assert message.startswith("Sources & Mesh… hit an unexpected error: ")
     assert "Fusion refused the appearance" in message
     assert "Traceback" not in message
     assert author.LOG_HINT in message

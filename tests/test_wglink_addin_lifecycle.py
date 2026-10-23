@@ -830,26 +830,6 @@ def _build_dialog(module, operation: str) -> tuple[list[str], dict[str, list[obj
     return added, listed
 
 
-def test_set_wg_source_offers_the_four_roles_and_a_clear(monkeypatch) -> None:
-    ui = _UI(_Panels(), _Definitions(reserve_ids=False))
-    module = _load_instance(monkeypatch, "WGLink_source_dialog", ui)
-
-    added, listed = _build_dialog(module, "source")
-
-    assert added == ["source_faces", "source_role", "source_help"]
-    assert [label for label, _selected in listed["source_role"]] == [
-        "LF", "MF", "HF", "PASSIVE_CARDIOID", "Clear WG source",
-    ]
-    assert [label for label, selected in listed["source_role"] if selected] == ["HF"]
-    # The dialog teaches the convention rather than assuming it is known.
-    assert "HF" in listed["source_help"][0] and "WG solves" in listed["source_help"][0]
-    faces = listed["_selections"][0]
-    assert faces.filters == ["Faces"] and faces.limits == (1, 0)
-    # No managed-link chooser: authoring a source has nothing to do with links.
-    assert "instance_choice" not in added
-    assert ui.messages == []
-
-
 def test_declare_body_offers_shell_exclude_and_clear(monkeypatch) -> None:
     ui = _UI(_Panels(), _Definitions(reserve_ids=False))
     module = _load_instance(monkeypatch, "WGLink_declare_dialog", ui)
@@ -1330,11 +1310,11 @@ def test_an_unexpected_failure_shows_one_line_and_logs_the_traceback(
     try:
         raise RuntimeError("Fusion refused the appearance")
     except RuntimeError as exc:
-        module._report_error("Set WG Source…", "Waveguide Generator error", exc)
+        module._report_error("Sources & Mesh…", "Waveguide Generator error", exc)
 
     (title, text), = ui.messages
     assert title == "Waveguide Generator error"
-    assert text.startswith("Set WG Source… hit an unexpected error: ")
+    assert text.startswith("Sources & Mesh… hit an unexpected error: ")
     assert "Fusion refused the appearance" in text
     assert "Traceback" not in text
     assert "Text Commands" in text

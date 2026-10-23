@@ -387,7 +387,7 @@ def plan_export_scope(
                             f"body {name!r} is declared 'exclude' but carries painted "
                             f"source face(s) {', '.join(painted)}; clear the "
                             "declaration to solve with them, or clear the paint "
-                            "with Set WG Source…"
+                            "with Sources & Mesh…"
                         ),
                     )
                 )
@@ -581,7 +581,7 @@ def plan_export_scope(
                         reason=(
                             f"hidden body {name!r} carries painted source face(s) "
                             f"{', '.join(painted)}; show the body to solve with "
-                            "them, or clear the paint with Set WG Source…"
+                            "them, or clear the paint with Sources & Mesh…"
                         ),
                     )
                 )

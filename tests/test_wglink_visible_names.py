@@ -28,7 +28,7 @@ def test_panel_commands_and_manifest_use_the_display_name():
     assert shell["PANEL_NAME"] == "Waveguide Generator"
     assert _assignments("wglink_return.py")["MANAGE_DROPDOWN_NAME"] == "Manage Link…"
     commands = shell["COMMANDS"]
-    assert commands["source"][1] == "Set WG Source…"
+    assert commands["source"][1] == "Sources & Mesh…"
     assert commands["detach"][2] == (
         "Remove Waveguide Generator link data without changing bodies or features."
     )

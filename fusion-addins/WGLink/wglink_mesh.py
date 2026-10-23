@@ -66,6 +66,7 @@ def snapshot(
     settings: Mapping[str, Any] | None = None,
     *,
     surface_groups: Sequence[Mapping[str, Any]] = (),
+    source_aliases: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """Current sources only; new ids get defaults, saved ids keep their size.
 
@@ -77,8 +78,11 @@ def snapshot(
         stored = validate_settings(settings)
         for key in ("wall_size_mm", "grading_distance_mm", "symmetry"):
             mesh[key] = stored[key]
-        mesh["source_size_mm"].update({key: size for key, size in stored["source_size_mm"].items()
-                                       if key in mesh["source_size_mm"]})
+        for key in mesh["source_size_mm"]:
+            for alias in (key, *(source_aliases or {}).get(key, ())):
+                if alias in stored["source_size_mm"]:
+                    mesh["source_size_mm"][key] = stored["source_size_mm"][alias]
+                    break
         mesh["settings_origin"] = "user"
     mesh["surface_groups"] = deepcopy(list(surface_groups))
     effective_sources = [{**source, "suggested_resolution_mm": mesh["source_size_mm"][source["id"]]}

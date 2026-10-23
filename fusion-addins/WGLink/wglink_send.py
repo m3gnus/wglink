@@ -1305,7 +1305,8 @@ def _source_faces(
     return faces
 
 
-def preflight_scope(app: object, options: dict[str, Any] | None = None) -> dict[str, Any]:
+def preflight_scope(app: object, options: dict[str, Any] | None = None,
+                    *, authoring_context: dict[str, Any] | None = None) -> dict[str, Any]:
     """Gather what the Send and Solve dialogs preview, without exporting.
 
     Deliberately fail-soft: a scope or source problem is reported as text for
@@ -1379,7 +1380,19 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None) -> dict[
             SCOPE_REASON_UNCLASSIFIED_VISIBLE_SURFACE
             in report["scope_reason_codes"]
         )
-        return report
+        if authoring_context is None:
+            return report
+        scope = {"included": []}
+
+    if authoring_context is not None:
+        # Authoring repairs paint even on a hidden/excluded body or before a
+        # surface body is declared. Keep Send's scope refusal out of this edit
+        # path, while estimating only geometry the real export would include.
+        authoring_context["estimate_bodies"] = [
+            walk["bodies"][item["object_id"]] for item in scope["included"]
+            if item["object_id"] in walk["bodies"]
+        ]
+        scope = {"included": walk["candidates"]}
 
     included_pairs = [
         (item, walk["bodies"][item["object_id"]])
@@ -1387,6 +1400,8 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None) -> dict[
         if item["object_id"] in walk["bodies"]
     ]
     included_bodies = [body for _item, body in included_pairs]
+    if authoring_context is not None:
+        authoring_context["bodies"] = included_bodies
     measured_bodies = [
         walk["measured"][item["object_id"]] for item, _body in included_pairs
     ]
@@ -1427,8 +1442,11 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None) -> dict[
             fractions,
             source_identity=bool(opts.get("source_identity")),
             design=design,
-            allow_empty=fem_driven,
+            allow_empty=fem_driven or authoring_context is not None,
+            authoring_context=authoring_context,
         )
+        if authoring_context is not None:
+            authoring_context["sources"] = sources
     except wglink_core.WgLinkError as exc:
         report["source_error"] = str(exc)
         sources = []
@@ -2442,7 +2460,7 @@ def _connected_components(faces: list[object]) -> int:
 #   needs no document write and cannot be missing; ``_throat_faces`` already
 #   refuses a throat face that is removed or split.
 # * A painted source is every unclaimed face painted one role (WG selects those
-#   faces by appearance name, so one role is one source). Set WG Source... stamps
+#   faces by appearance name, so one role is one source). Sources & Mesh stamps
 #   each native face with ``source_identity``: the source id, the role it was
 #   painted, a nonce for that face, and how many faces the source was marked on.
 #   Fusion copies an attribute onto both halves of a split face and onto a pasted
@@ -2590,7 +2608,7 @@ def _painted_role(face: object) -> str | None:
 
 def _run_again(canonical: str) -> str:
     return (
-        f"Select every face that should drive {canonical} and run Set WG Source… "
+        f"Select every face that should drive {canonical} and run Sources & Mesh… "
         f"{canonical} again. Because this source no longer resolves, that gives it a "
         "new source identity, and WG asks for its setup again."
     )
@@ -2606,7 +2624,7 @@ def _unresolved_paint(role: str, canonical: str, missing: int, total: int) -> st
     return (
         f"{missing} of {total} face(s) painted {role} carry no WG source "
         f"identity for {canonical} (painted by hand, repainted, or marked before "
-        f"source identities existed). Select them and run Set WG Source… "
+        f"source identities existed). Select them and run Sources & Mesh… "
         f"{canonical}; a face added to a source that still resolves keeps that "
         "source's identity."
     )
@@ -3384,6 +3402,7 @@ def _sources(
     adopted: list[tuple[str, bool]] | None = None,
     allow_empty: bool = False,
     source_face_keys: set[tuple[str, object]] | None = None,
+    authoring_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Every drivable source the return carries.
 
@@ -3397,6 +3416,7 @@ def _sources(
     this to read, so they leave it out and cannot write a stamp.
     """
     sources: list[dict[str, Any]] = []
+    source_aliases: dict[str, list[str]] = {}
     claimed: set[tuple[str, object]] = set()
     used: set[str] = set()
     face_bodies: dict[tuple[str, object], str] = {}
@@ -3414,8 +3434,13 @@ def _sources(
             claimed.add(key)
             face_bodies.setdefault(key, str(getattr(record.get("body"), "name", "unnamed body")))
         source_id, drive_id = _source_ids(role, used)
+        legacy_id = source_id
+        stable_id = _throat_source_identity(str(record["instance_id"]))
         if source_identity:
-            source_id = _throat_source_identity(str(record["instance_id"]))
+            source_id = stable_id
+        source_aliases[source_id] = [stable_id, legacy_id]
+        if authoring_context is not None:
+            authoring_context.setdefault("members", {})[source_id] = faces
         sources.append(
             {
                 "id": source_id,
@@ -3445,10 +3470,28 @@ def _sources(
         if not faces:
             continue
         source_id, drive_id = _source_ids(role, used)
+        legacy_id = source_id
+        stable_id = None
         if source_identity:
-            source_id = _painted_source_identity(
-                role, faces, design, adopt=adopt, adopt_seeded=adopt_seeded, adopted=adopted
-            )
+            try:
+                source_id = _painted_source_identity(
+                    role, faces, design, adopt=adopt, adopt_seeded=adopt_seeded, adopted=adopted
+                )
+            except wglink_core.WgLinkError:
+                # Authoring must show broken/old paint so Save can explicitly
+                # reassign it. Send and the ordinary preview still refuse it.
+                if authoring_context is None:
+                    raise
+        if source_identity and source_id != legacy_id:
+            stable_id = source_id
+        elif not source_identity and design is not None:
+            try:
+                stable_id = _painted_source_identity(role, faces, design)
+            except wglink_core.WgLinkError:
+                pass  # Old/unresolved paint remains authorable; never adopt here.
+        source_aliases[source_id] = [alias for alias in (stable_id, legacy_id) if alias]
+        if authoring_context is not None:
+            authoring_context.setdefault("members", {})[source_id] = faces
         sources.append(
             {
                 "id": source_id,
@@ -3469,6 +3512,13 @@ def _sources(
         )
     if source_identity:
         _check_source_identities(sources)
+    if (getattr(design, "rootComponent", None) is not None
+            and (settings := read_mesh_settings(design)) is not None):
+        # Document mesh sizes survive WG starting, stopping or changing whether
+        # its protocol uses stable source identities. Aliases never leave CAD.
+        sizes = wglink_mesh.snapshot(sources, settings, source_aliases=source_aliases)["source_size_mm"]
+        for source in sources:
+            source["suggested_resolution_mm"] = sizes[source["id"]]
     if source_face_keys is not None:
         source_face_keys.update(claimed)
         source_face_keys.update(_face_key(face) for faces in painted.values() for face in faces)

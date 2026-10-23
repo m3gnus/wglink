@@ -74,7 +74,7 @@ labelling it `original`.
 
 ## Commands
 
-The panel promotes the three everyday commands, **Set WG Source…**, **Solve in
+The panel promotes the three everyday commands, **Sources & Mesh…**, **Solve in
 WG** and **Send to WG**. **Manage Link…** contains **Declare Body…**,
 **Insert**, **Update**, and **Detach**.
 Insert and Update are ordinarily automatic — WG's *Send to CAD* publishes a
@@ -82,54 +82,33 @@ handoff the add-in applies on its own — so the dropdown is maintenance,
 authoring-remedy, and recovery UI rather than the normal workflow. Audit and
 Relink remain full head-less APIs but are not panel commands.
 
-- **Set WG Source…** marks the selected faces as the `LF`, `MF`, `HF` or
-  `PASSIVE_CARDIOID` drive source by creating (or reusing) an appearance named
-  exactly after the role and painting it on. (`PASSIVE_CARDIOID` was named
-  `PORT_EXIT` before this rename; a face already painted `PORT_EXIT` is still
-  recognised as a source and keeps exporting under that name — only a newly
-  painted face gets the new name.) That appearance name *is* the convention
-  the export reads, and it is the one thing a model built from scratch in Fusion
-  cannot be sent without; before this command it had to be authored by renaming
-  a Fusion appearance by hand. The same dialog clears a role, which strips only
-  faces that actually carry one of the four roles — a face painted with your own
-  material is left alone.
+- **Sources & Mesh…** saves sources, mesh sizes and surface groups in the
+  Fusion document. Reopening restores the values and painted face selections.
+  Sources have a role (`HF`, `MF`, `LF` or `PASSIVE_CARDIOID`), faces and a mesh
+  size. Use **Add Source** or **Remove Last Source** to change the list. Sources
+  from a linked WG design are read-only.
 
-  The command also stamps each selected face with the source's identity (a
-  `source_identity` attribute on the native face: the id, the role, a per-face
-  nonce and the number of faces the source was marked on). When WG advertises
-  `"sourceIdentity": 1` in `wg-capabilities.json`, Send, Solve, a return WG
-  asks for, the pre-flight and the heartbeat all declare `source-identity-v1`,
-  and each `sources[].id` becomes that stable identity (`wgs-` and 20 base32
-  characters) instead of the role-derived `source-hf`. A linked throat's identity
-  is derived from its link's `instance_id` and needs no stamp. A WG that does not
-  advertise the capability gets the legacy manifest, byte for byte, stamps or
-  not. Fusion entity tokens and stamps never enter the manifest.
+  **Walls** sets the size of surfaces outside sources and groups. **Surface
+  Groups** can refine or coarsen selected faces or bodies with **Fine 15 mm**,
+  **Coarse 40 mm** or a custom size. The add-in paints their membership. Removing
+  a group restores the body appearance. **Advanced** contains grading distance,
+  Symmetry **Automatic / Off**, and **Reset to defaults**. Defaults are HF 6,
+  MF 15, LF/passive 25, walls 25 and grading distance 100 mm.
 
-  Export refuses a painted role, never guessing, when a face carries no stamp,
-  the faces carry two identities, a face was split or copied, or the source no
-  longer adds up to the faces it was marked on. What re-running
-  **Set WG Source…** does depends on the source:
+  **Save** validates the complete settings before editing. Overlapping groups,
+  source/group overlap, empty groups and nonpositive sizes block Save. A source
+  coarser than its walls and an approximate triangle estimate above 22,000 are
+  warnings. The approximate estimate shows quarter-to-full counts until WG
+  finds symmetry; it can solve a half or quarter. Off solves the whole model.
+  Curvature can raise the actual count. The estimate turns amber above 18,000.
 
-  - **The source no longer resolves** — a member face's paint was removed or
-    changed by hand, a face was removed, split or copied, or two identities
-    share the role. Selecting every face that should drive the role and running
-    the command gives it a **new** identity, removes the stale stamps from every
-    other face, and WG asks for that source's setup again.
-  - **The source still resolves** — the selected faces are added to it and it
-    **keeps** its identity; this is also the remedy for faces painted by hand or
-    before identities existed.
-  - **Part of the source is outside what is being sent** (another component, or
-    a body the selection leaves out) — the refusal says so. Include those faces
-    in the export, or select them and **Clear** their WG source; running the
-    command again on the faces in scope changes nothing.
+  Sources keep their existing identities when their faces still resolve. Save
+  explicitly repairs old or broken identities and can mint a new identity when
+  the source changed, so WG asks for that source's setup again. Removing faces
+  clears their source paint and identity. Linked throat identities come from
+  the link. Existing `PORT_EXIT` paint is recognised and kept when unchanged;
+  newly painted passive faces use `PASSIVE_CARDIOID`.
 
-  Clear removes the stamp from every selected face, including one whose paint
-  was already removed by hand. A source whose faces were all deleted is simply
-  absent from the next return. The command's stamp writes succeed together or
-  are rolled back together (a read-only referenced component refuses a write);
-  the appearance it already painted or cleared is kept, and the error says so —
-  Send then names the remedy, or undo the command. A face whose stamp Fusion
-  would not restore is reported, never called restored.
 - **Solve in WG** writes the same validated `.wgreturn` bundle as Send to WG,
   then asks Waveguide Generator to prepare that exact bundle and start the
   solve, so WG is already solving when you switch to it. The request is a
@@ -734,7 +713,7 @@ and need a live check on macOS and Windows before the feature is field-validated
   a read-only referenced component refuses the write so the rollback runs.
 - Fusion `==` identifies an attribute's `parent` with the same face reached from
   a body's `faces` (the fakes use object identity or the token fallback).
-- Undo of Set WG Source… restores the stamps. Undo moves nothing the heartbeat's
+- Undo of Sources & Mesh… restores the stamps. Undo moves nothing the heartbeat's
   change key watches, so the published token can stay stale for up to the 60 s
   age ceiling, then reads "cannot tell" until the next measurement (at most the
   120 s duty-cycle wait).

@@ -372,12 +372,26 @@ def _source_command(fixture, monkeypatch) -> None:
         "_named_appearance",
         lambda _app, _design, name: types.SimpleNamespace(name=name),
     )
-    _command(
-        module,
-        "source",
-        source_faces=_SelectionInput([_fake_face(None)]),
-        source_role=_chosen("HF"),
-    )
+    from test_wglink_fem_dialog import _building_inputs
+    from test_wglink_send import Attributes, body, face
+
+    member = face("body paint")
+    member.attributes = Attributes()
+    member.entityToken = "new-source-face"
+    loose_body = body("New source", faces=[member])
+    member.body = loose_body
+    loose_body.parentComponent = fixture.design.rootComponent
+    fixture.design.rootComponent.bRepBodies.append(loose_body)
+    inputs, items = _building_inputs(module)
+    state = module.MeshDialogState()
+    with module.wglink_activity.because(module.wglink_activity.command_cause("source")):
+        module._build_mesh_dialog(inputs, state)
+        module.MeshDialogActivateHandler(state).notify(types.SimpleNamespace(
+            command=types.SimpleNamespace(commandInputs=inputs)))
+        module._add_mesh_row(inputs, state, "source", {"role": "MF"}, [member])
+    handler = module.CommandExecuteHandler("source")
+    handler.mesh_state = state
+    handler.notify(types.SimpleNamespace(command=types.SimpleNamespace(commandInputs=inputs)))
 
 
 def _insert_command(fixture, monkeypatch) -> None:
