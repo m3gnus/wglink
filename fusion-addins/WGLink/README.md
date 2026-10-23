@@ -85,22 +85,29 @@ Relink remain full head-less APIs but are not panel commands.
 - **Sources & Mesh…** saves sources, mesh sizes and surface groups in the
   Fusion document. Reopening restores the values and painted face selections.
   Sources have a role (`HF`, `MF`, `LF` or `PASSIVE_CARDIOID`), faces and a mesh
-  size. Use **Add Source** or **Remove Last Source** to change the list. Sources
+  size. Use **Add Source** or the **Remove** button in any source row to change the list. Sources
   from a linked WG design are read-only.
 
   **Walls** sets the size of surfaces outside sources and groups. **Surface
   Groups** can refine or coarsen selected faces or bodies with **Fine 15 mm**,
   **Coarse 40 mm** or a custom size. The add-in paints their membership. Removing
-  a group restores the body appearance. **Advanced** contains grading distance,
+  a group restores each face’s saved appearance, including body inheritance.
+  Any painted group missing from the saved settings appears as a recoverable group;
+  keep it with Save or remove its row to clear it. **Advanced** contains grading distance,
   Symmetry **Automatic / Off**, and **Reset to defaults**. Defaults are HF 6,
-  MF 15, LF/passive 25, walls 25 and grading distance 100 mm.
+  MF 15, LF/passive 25, walls 25 and grading distance 100 mm. Reset changes
+  sizes only; it preserves group names, membership and symmetry.
 
   **Save** validates the complete settings before editing. Overlapping groups,
-  source/group overlap, empty groups and nonpositive sizes block Save. A source
+  source/group overlap, empty groups, duplicate group names and nonpositive sizes
+  block Save. Saved faces that cannot be selected are reported by row and count;
+  unhide or reselect them before saving. A source
   coarser than its walls and an approximate triangle estimate above 22,000 are
-  warnings. The approximate estimate shows quarter-to-full counts until WG
-  finds symmetry; it can solve a half or quarter. Off solves the whole model.
-  Curvature can raise the actual count. The estimate turns amber above 18,000.
+  advisory warnings, separated from errors under **Warnings**. The estimate is
+  for the part WG solves. Automatic assumes quarter symmetry and also shows the
+  upper count if WG finds none; Off uses the whole model. Both the 18,000 amber
+  threshold and 22,000 warning use the estimated solved-part count. Curvature
+  can raise the actual count.
 
   Sources keep their existing identities when their faces still resolve. Save
   explicitly repairs old or broken identities and can mint a new identity when

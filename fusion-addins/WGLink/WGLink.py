@@ -697,6 +697,12 @@ def _input(command_inputs: object, name: str) -> object | None:
         return None
 
 
+def _command_inputs(inputs):
+    """Events for grouped inputs can supply only that group's collection."""
+    command = getattr(inputs, "command", None)
+    return command.commandInputs if command is not None else inputs
+
+
 def _input_value(command_inputs: object, name: str) -> object | None:
     item = _input(command_inputs, name)
     return item.value if item else None
@@ -1014,15 +1020,6 @@ def _body_descriptors(bodies: list[object]) -> list[dict[str, object]]:
     return descriptors
 
 
-def _apply_source_role(command_inputs: object) -> dict[str, object]:
-    """Paint or strip the appearance that WG reads a source role from."""
-
-    return _apply_source_faces(
-        _selected_entities(command_inputs, "source_faces"),
-        _selected_name(command_inputs, "source_role", wglink_author.DEFAULT_SOURCE_ROLE),
-    )
-
-
 def _apply_source_faces(faces: list[object], role: str) -> dict[str, object]:
     app = _app()
     design = wglink_core._design(app)
@@ -1043,29 +1040,14 @@ def _apply_source_faces(faces: list[object], role: str) -> dict[str, object]:
     global _source_authoring_generation
     _source_authoring_generation += 1
     summary = plan.summary
-    try:
-        if plan.role is not None:
-            wglink_send.assign_source_identity(
-                design, [faces[index] for index in (*plan.paint, *plan.unchanged)], plan.role
-            )
-            removed = 0
-        else:
-            removed = wglink_send.clear_source_identity(design, faces)
-    except wglink_core.WgLinkError as exc:
-        # The appearance change above is not undone: say so, rather than let
-        # "restored" read as "nothing changed". Send names what to do next.
-        changed = len(plan.paint) if plan.role is not None else len(plan.clear)
-        if not changed:
-            raise
-        done = (
-            f"the {plan.role} paint applied to {changed} face(s)"
-            if plan.role is not None
-            else f"clearing the WG source role from {changed} face(s)"
+    # The dialog owns paint/attribute rollback and the final failure message.
+    if plan.role is not None:
+        wglink_send.assign_source_identity(
+            design, [faces[index] for index in (*plan.paint, *plan.unchanged)], plan.role
         )
-        raise wglink_core.WgLinkError(
-            f"{exc} However, {done} was kept; Send to WG names what to do next, "
-            "or undo this command in Fusion."
-        ) from exc
+        removed = 0
+    else:
+        removed = wglink_send.clear_source_identity(design, faces)
     if plan.role is None:
         if removed and not plan.clear:
             summary = (
@@ -2278,11 +2260,6 @@ class FemInputChangedHandler(adsk.core.InputChangedEventHandler):
             elif input_id.startswith(("fem_kind_", "fem_lining_")):
                 group_id = int(input_id.rsplit("_", 1)[-1])
                 _sync_fem_group_options(inputs, group_id)
-            elif input_id.startswith("fem_name_"):
-                group_id = int(input_id.rsplit("_", 1)[-1])
-                group = _input(inputs, _fem_input_id("group", group_id))
-                if group is not None and str(changed.value).strip():
-                    group.name = str(changed.value).strip()
             _sync_fem_validation(inputs, self.state)
         except Exception as exc:  # noqa: BLE001 - the dialog must keep working
             _log(f"Declare FEM Region input update failed: {exc}")
@@ -2295,7 +2272,7 @@ class FemValidateInputsHandler(adsk.core.ValidateInputsEventHandler):
 
     def notify(self, args: object) -> None:
         try:
-            args.areInputsValid = _sync_fem_validation(args.inputs, self.state)
+            args.areInputsValid = _sync_fem_validation(_command_inputs(args.inputs), self.state)
         except Exception:  # noqa: BLE001 - execute repeats the validation
             try:
                 args.areInputsValid = False
@@ -2403,10 +2380,10 @@ def _add_mesh_row(inputs, state, kind, record=None, faces=()):
     is_source = kind == "source"
     rows = state.sources if is_source else state.groups
     linked = bool(record.get("instance_id")) if is_source else False
-    rows[row_id] = {**record, "original_faces": list(faces)}
+    rows[row_id] = {**record, "row_id": row_id, "original_faces": list(faces)}
     parent = inputs.itemById("mesh_sources" if is_source else "mesh_groups").children
     role = wglink_author.resolve_source_choice(record.get("role", "HF")) if is_source else None
-    title = f"{role} source" if is_source else record.get("name", "Surface group")
+    title = f"Source {row_id}" if is_source else f"Surface group {row_id}"
     group = parent.addGroupCommandInput(f"mesh_{kind}_{row_id}", title)
     group.isExpanded = True
     children = group.children
@@ -2432,26 +2409,32 @@ def _add_mesh_row(inputs, state, kind, record=None, faces=()):
     )
     _add_selection_filters(selection, *(('Faces',) if is_source else ('Faces', 'SolidBodies', 'SurfaceBodies')))
     selection.setSelectionLimits(0, 0)
-    selection.isUseCurrentSelections = False
     if linked:
         # Fusion does not disable selection inputs with isEnabled. Keep linked
         # membership in the record and show a read-only face count instead.
         selection.isVisible = False
         children.addTextBoxCommandInput(f"mesh_linked_faces_{row_id}", "Faces", str(len(faces)), 1, True)
     elif state.activated:
-        for face in faces:
-            selection.addSelection(face)
+        _restore_mesh_selections(selection, rows[row_id])
     value = children.addValueInput(f"mesh_{kind}_size_{row_id}", "Mesh size", "mm", _mm_input(size))
     value.isEnabled = not linked
-    _sync_mesh_buttons(inputs, state)
+    if not linked:
+        _mesh_button(children, f"mesh_remove_{kind}_{row_id}", "Remove")
     return row_id
 
 
-def _sync_mesh_buttons(inputs, state):
-    for kind, rows in (("source", state.sources), ("group", state.groups)):
-        button = inputs.itemById(f"mesh_remove_{kind}")
-        if button:
-            button.isEnabled = bool(rows) and not bool(next(reversed(rows.values())).get("instance_id"))
+def _restore_mesh_selections(selection, record):
+    # Stable API: discard preselection once on activate, then restore saved faces.
+    selection.clearSelection()
+    missing = []
+    for face in record["original_faces"]:
+        try:
+            selected = selection.addSelection(face)
+        except Exception:
+            selected = False
+        if not selected:
+            missing.append(wglink_send._face_key(face))
+    record["unselected_saved_faces"] = set(missing)
 
 
 def _build_mesh_dialog(inputs, state):
@@ -2479,7 +2462,6 @@ def _build_mesh_dialog(inputs, state):
                 children.addTextBoxCommandInput("mesh_group_note", "",
                     "Optional: faces or bodies meshed finer or coarser than the walls.", 2, True)
             _mesh_button(children, f"mesh_add_{kind}", f"Add {label}")
-            _mesh_button(children, f"mesh_remove_{kind}", f"Remove Last {label}")
         walls = inputs.itemById("mesh_walls").children
         wall = walls.addValueInput("mesh_wall", "Walls", "mm", _mm_input(mesh["wall_size_mm"]))
         wall.tooltip = "Mesh size for every surface that is not a source or in a surface group."
@@ -2491,16 +2473,6 @@ def _build_mesh_dialog(inputs, state):
         symmetry.tooltip = "Off solves the whole model: slower, more memory."
         _mesh_button(advanced, "mesh_reset", "Reset to defaults")
         estimate = inputs.itemById("mesh_estimate_section").children
-        # MSHExport's header row gives the estimate a stable, compact summary.
-        table = estimate.addTableCommandInput("mesh_summary", "Mesh sizes", 2, "3:1")
-        table.hasGrid = False
-        table.minimumVisibleRows = table.maximumVisibleRows = 2
-        for column, label in enumerate(("Surface", "Mesh size (mm)")):
-            header = estimate.addTextBoxCommandInput(f"mesh_header_{column}", "", label, 1, True)
-            table.addCommandInput(header, 0, column)
-        for column, text in enumerate(("Walls", "")):
-            cell = estimate.addTextBoxCommandInput(f"mesh_wall_summary_{column}", "", text, 1, True)
-            table.addCommandInput(cell, 1, column)
         estimate.addTextBoxCommandInput("mesh_estimate", "", "", 4, True)
         inputs.itemById("mesh_validation_section").children.addTextBoxCommandInput("mesh_validation", "", "", 4, True)
         for source in sources:
@@ -2509,12 +2481,23 @@ def _build_mesh_dialog(inputs, state):
             _add_mesh_row(inputs, state, "source", record, faces)
             state.original_sources.append({**record, "original_faces": list(faces)})
         all_faces = _mesh_faces(state.context.get("bodies", []))
-        for group in saved["surface_groups"] if saved else []:
-            label = wglink_author.group_appearance_name(group["group_id"])
-            faces = [face for face in all_faces if wglink_core._appearance_name(face) == label]
+        definitions = list(saved["surface_groups"] if saved else [])
+        known = {group["group_id"] for group in definitions}
+        painted = {}
+        for face in all_faces:
+            label = wglink_core._appearance_name(face) or ""
+            if label.startswith("WGMESH_"):
+                painted.setdefault(label[len("WGMESH_"):], []).append(face)
+        for group_id in sorted(painted.keys() - known):
+            # Hand-painted labels may lack a usable id. Preserve their face
+            # membership, but mint a valid id so Save can recover or clear them.
+            recovered_id = group_id if group_id.strip() and group_id == group_id.strip() else uuid.uuid4().hex
+            definitions.append({"group_id": recovered_id, "name": f"Recovered {group_id.strip() or 'surface group'}",
+                                "recovered_paint_id": group_id, "size_mm": wglink_protocol.MESH_PRESETS["Fine"]})
+        for group in definitions:
+            faces = painted.get(group.get("recovered_paint_id", group["group_id"]), [])
             _add_mesh_row(inputs, state, "group", group, faces)
             state.original_groups.extend(faces)
-        _sync_mesh_buttons(inputs, state)
     finally:
         state.restoring = False
     _sync_mesh_dialog(inputs, state)
@@ -2546,34 +2529,44 @@ def _mesh_dialog_errors(sources, groups, mesh, state):
     errors = [state.preview_error] if state.preview_error else []
     if not sources:
         errors.append("There must be at least one source.")
-    sizes = [mesh["wall_size_mm"], mesh["grading_distance_mm"],
-             *(row["size_mm"] for row in [*sources, *groups])]
-    if any(value is None or not math.isfinite(value) or value <= 0 for value in sizes):
-        errors.append("Sizes must be greater than 0.")
-    source_keys, group_keys, roles = set(), set(), set()
-    for source in sources:
-        if not source["faces"]:
-            errors.append("Select at least one face for each source.")
-        # The export convention supports one painted source per role.
-        if not source.get("instance_id"):
-            if source["role"] in roles:
-                errors.append("Use one source per role.")
-            roles.add(source["role"])
-        keys = {wglink_send._face_key(face) for face in source["faces"]}
-        if keys & source_keys:
-            errors.append("A face cannot be in two sources.")
-        source_keys.update(keys)
-    for group in groups:
-        if not group["faces"]:
-            errors.append("A surface group must not be empty.")
-        if not group["name"]:
-            errors.append("Give each surface group a name.")
-        keys = {wglink_send._face_key(face) for face in group["faces"]}
-        if keys & group_keys:
-            errors.append("A face cannot be in two surface groups.")
-        if keys & source_keys:
-            errors.append("A face cannot be in both a source and a surface group.")
-        group_keys.update(keys)
+    def size_error(label, value):
+        if value is None or not math.isfinite(value) or value <= 0:
+            errors.append(f"{label}: size must be greater than 0.")
+    size_error("Walls", mesh["wall_size_mm"])
+    size_error("Grading distance", mesh["grading_distance_mm"])
+    source_keys, group_keys, roles, names = {}, {}, {}, {}
+    for kind, rows in (("Source", sources), ("Group", groups)):
+        for row in rows:
+            label = (f"Source {row['row_id']} ({row['role']})" if kind == "Source"
+                     else f"Group {row['row_id']} ({row['name'] or 'unnamed'})")
+            size_error(label, row["size_mm"])
+            if not row["faces"]:
+                errors.append(f"{label}: select at least one face.")
+            selected = {wglink_send._face_key(face) for face in row["faces"]}
+            missing = row.get("unselected_saved_faces", set()) - selected
+            missing_count = min(len(missing), max(0, len(row["original_faces"]) - len(selected)))
+            if missing_count:
+                errors.append(f"{label}: {missing_count} saved faces could not be selected (hidden or changed). Reselect them.")
+            if kind == "Source":
+                if not row.get("instance_id"):
+                    if row["role"] in roles:
+                        errors.append(f"{label}: same role as {roles[row['role']]}. Use one source per role.")
+                    roles[row["role"]] = label
+                other = source_keys
+            else:
+                if not row["name"]:
+                    errors.append(f"{label}: give this surface group a name.")
+                name = row["name"].casefold()
+                if name in names:
+                    errors.append(f"{label}: duplicate group name with {names[name]}. Use unique group names.")
+                names[name] = label
+                for key in selected & source_keys.keys():
+                    errors.append(f"{label}: a face is also in {source_keys[key]}. A face cannot be in both a source and a surface group.")
+                other = group_keys
+            for key in selected & other.keys():
+                plural = "sources" if kind == "Source" else "surface groups"
+                errors.append(f"{label}: a face is also in {other[key]}. A face cannot be in two {plural}.")
+            other.update({key: label for key in selected})
     return list(dict.fromkeys(errors))
 
 
@@ -2593,17 +2586,12 @@ def _mesh_snapshot_values(sources, groups, mesh):
 def _sync_mesh_dialog(inputs, state):
     sources, groups, mesh = _mesh_dialog_values(inputs, state)
     errors = _mesh_dialog_errors(sources, groups, mesh, state)
-    for (row_id, _record), source in zip(state.sources.items(), sources):
-        inputs.itemById(f"mesh_source_{row_id}").name = f"{source['role']} source"
-    for (row_id, _record), group in zip(state.groups.items(), groups):
-        inputs.itemById(f"mesh_group_{row_id}").name = group["name"] or "Surface group"
     warnings = []
     wall = mesh["wall_size_mm"]
-    inputs.itemById("mesh_wall_summary_1").formattedText = f"{wall:g}" if wall is not None else ""
     for source in sources:
         if (source["size_mm"] is not None and wall is not None and math.isfinite(wall)
                 and 0 < wall < source["size_mm"] and math.isfinite(source["size_mm"])):
-            warnings.append(f"{source['role']} source {source['size_mm']:g} mm is coarser than the walls ({mesh['wall_size_mm']:g} mm); it will be meshed at {mesh['wall_size_mm']:g} mm.")
+            warnings.append(f"Source {source['row_id']} ({source['role']}): {source['size_mm']:g} mm is coarser than the walls ({mesh['wall_size_mm']:g} mm); it will be meshed at {mesh['wall_size_mm']:g} mm.")
     estimate_text = "Approximate estimate is available when the settings are valid. Limit 22,000."
     if not errors:
         try:
@@ -2613,26 +2601,22 @@ def _sync_mesh_dialog(inputs, state):
                 area, measured, snapshot, solved_fraction=0.25 if mesh["symmetry"] == "auto" else 1.0
             )
             count, full = estimate["triangles"], estimate["drawn_triangles"]
-            # Fusion has no WG symmetry verdict. Show quarter-to-full bounds
-            # rather than promise a cut that WG may not find.
-            count_text = f"{count:,}–{full:,}" if count != full else f"{count:,}"
-            estimate_text = f"≈ {count_text} triangles for the part WG solves (≈ {full:,} full model"
+            estimate_text = f"≈ {count:,} triangles for the part WG solves"
             if mesh["symmetry"] == "auto":
-                estimate_text += "; WG solves a half or quarter when it finds symmetry"
-            estimate_text += "). Limit 22,000. (approximate)"
-            if full > 18000:
+                estimate_text += f" (assuming quarter symmetry; WG checks symmetry; up to {full:,} if none)"
+            estimate_text += ". Limit 22,000. (approximate)"
+            if count > 18000:
                 estimate_text = f'<font color="#b77900">{estimate_text}</font>'
-            if full > 22000:
-                warnings.append("The approximate full-model estimate is above the 22,000 triangle limit. Larger sizes give fewer triangles.")
+            if count > 22000:
+                warnings.append("The approximate estimate for the part WG solves is above the 22,000 triangle limit. Larger sizes give fewer triangles.")
         except (wglink_mesh.MeshSettingsError, wglink_core.WgLinkError):
             estimate_text = "Approximate estimate unavailable for this geometry. Limit 22,000."
     inputs.itemById("mesh_estimate").formattedText = estimate_text
     validation = inputs.itemById("mesh_validation")
     validation.formattedText = (("<b>Fix before saving:</b><br>" + "<br>".join(html.escape(error) for error in errors)) if errors else "")
     if warnings:
-        validation.formattedText += ("<br>" if errors else "") + "<br>".join(html.escape(warning) for warning in warnings)
+        validation.formattedText += ("<br>" if errors else "") + "<b>Warnings:</b><br>" + "<br>".join(html.escape(warning) for warning in warnings)
     validation.isVisible = bool(errors or warnings)
-    _sync_mesh_buttons(inputs, state)
     return not errors
 
 
@@ -2648,8 +2632,10 @@ def _apply_mesh_dialog(inputs, state):
     app = _app()
     design = wglink_core._design(app)
     faces = _mesh_faces([
-        *(face for source in state.original_sources for face in source["original_faces"]),
-        *state.original_groups, *(face for row in [*sources, *groups] for face in row["faces"]),
+        *(face for source in state.original_sources if not source.get("instance_id")
+          for face in source["original_faces"]),
+        *state.original_groups,
+        *(face for row in [*sources, *groups] if not row.get("instance_id") for face in row["faces"]),
     ])
     # Source reassignment can also repair stamps outside the selected faces.
     # Reuse its transaction journal for a single atomic dialog Save.
@@ -2657,30 +2643,16 @@ def _apply_mesh_dialog(inputs, state):
     for attribute in wglink_core._items(design.findAttributes(
             wglink_core.ATTRIBUTE_GROUP, wglink_send.SOURCE_IDENTITY_ATTRIBUTE)):
         stamps._remember(attribute.parent)
-    appearances = []
     for face in faces:
         native = _native(face)
-        appearances.append((native, native.appearance))
+        stamps.remember_appearance(native)
         stamps._remember(native)
-    old_settings = wglink_core._attribute_value(design.rootComponent, wglink_mesh.SETTINGS_ATTRIBUTE)
+        stamps.remember_attribute(native, wglink_send.GROUP_ORIGINAL_APPEARANCE_ATTRIBUTE)
+    stamps.remember_attribute(design.rootComponent, wglink_mesh.SETTINGS_ATTRIBUTE)
     try:
         return _save_mesh_dialog(design, app, state, sources, groups, mesh)
     except Exception as exc:
         problems = stamps.rollback()
-        for face, appearance in appearances:
-            try:
-                face.appearance = appearance
-            except Exception as restore_error:
-                problems.append(str(restore_error))
-        try:
-            if old_settings is None:
-                attribute = wglink_core._attribute(design.rootComponent, wglink_mesh.SETTINGS_ATTRIBUTE)
-                if attribute is not None and not wglink_core._delete_attribute(attribute):
-                    problems.append("Could not restore the mesh settings attribute.")
-            else:
-                wglink_core._set_attribute(design.rootComponent, wglink_mesh.SETTINGS_ATTRIBUTE, old_settings)
-        except Exception as restore_error:
-            problems.append(str(restore_error))
         if problems:
             raise wglink_author.AuthorError(f"Could not save sources and mesh: {exc} Undo this command in Fusion; some changes could not be restored.") from exc
         raise wglink_author.AuthorError(f"Could not save sources and mesh: {exc} This dialog's changes were restored.") from exc
@@ -2718,7 +2690,7 @@ def _save_mesh_dialog(design, app, state, sources, groups, mesh):
                    if (current.get("instance_id") == source.get("instance_id") and
                        wglink_author.resolve_source_choice(current["role"]) == source["role"])]
         if len(matches) != 1:
-            raise wglink_author.AuthorError("Could not save a source. Review its faces in Sources & Mesh….")
+            raise wglink_author.AuthorError(f"Could not save {source['role']} source. Review its faces in Sources & Mesh….")
         source["id"] = matches[0]["id"]
     _, snapshot = _mesh_snapshot_values(sources, groups, mesh)
     wglink_send.save_mesh_settings(design, snapshot)
@@ -2737,7 +2709,8 @@ class MeshInputChangedHandler(adsk.core.InputChangedEventHandler):
             return
         self.state.restoring = True
         try:
-            inputs = args.inputs
+            command = args.input.parentCommand
+            inputs = command.commandInputs if command is not None else _command_inputs(args.inputs)
             input_id = args.input.id
             for kind, rows in (("source", self.state.sources), ("group", self.state.groups)):
                 if input_id == f"mesh_add_{kind}":
@@ -2746,8 +2719,8 @@ class MeshInputChangedHandler(adsk.core.InputChangedEventHandler):
                         used = {_selected_name(inputs, f"mesh_source_role_{row}", "HF") for row in rows}
                         record = {"role": next((role for role in wglink_protocol.MESH_DEFAULTS["source_size_mm"] if role not in used), "HF")}
                     _add_mesh_row(inputs, self.state, kind, record)
-                elif input_id == f"mesh_remove_{kind}" and rows:
-                    row = next(reversed(rows))
+                elif input_id.startswith(f"mesh_remove_{kind}_"):
+                    row = int(input_id.rsplit("_", 1)[1])
                     if not rows[row].get("instance_id"):
                         inputs.itemById(f"mesh_{kind}_{row}").deleteMe()
                         del rows[row]
@@ -2765,14 +2738,14 @@ class MeshInputChangedHandler(adsk.core.InputChangedEventHandler):
                 defaults = wglink_protocol.MESH_DEFAULTS
                 inputs.itemById("mesh_wall").value = defaults["wall_size_mm"] / 10
                 inputs.itemById("mesh_grading").value = defaults["grading_distance_mm"] / 10
-                _mesh_select(inputs.itemById("mesh_symmetry"), "Automatic")
                 for row, source in self.state.sources.items():
                     if not source.get("instance_id"):
                         role = _selected_name(inputs, f"mesh_source_role_{row}", "HF")
                         inputs.itemById(f"mesh_source_size_{row}").value = wglink_protocol.default_source_size_mm(role) / 10
                 for row in self.state.groups:
-                    inputs.itemById(f"mesh_group_{row}").deleteMe()
-                self.state.groups.clear()
+                    inputs.itemById(f"mesh_group_size_{row}").value = wglink_protocol.MESH_PRESETS["Fine"] / 10
+                    label = f"Fine {wglink_protocol.MESH_PRESETS['Fine']:g} mm"
+                    _mesh_select(inputs.itemById(f"mesh_group_preset_{row}"), label)
             _sync_mesh_dialog(inputs, self.state)
         except Exception as exc:
             _report_error("Updating Sources & Mesh…", f"{PANEL_NAME} error", exc)
@@ -2787,7 +2760,7 @@ class MeshValidateInputsHandler(adsk.core.ValidateInputsEventHandler):
 
     def notify(self, args):
         try:
-            args.areInputsValid = _sync_mesh_dialog(args.inputs, self.state)
+            args.areInputsValid = _sync_mesh_dialog(_command_inputs(args.inputs), self.state)
         except Exception:
             args.areInputsValid = False
 
@@ -2809,11 +2782,7 @@ class MeshDialogActivateHandler(adsk.core.CommandEventHandler):
                     if record.get("instance_id"):
                         continue
                     selection = inputs.itemById(f"mesh_{kind}_faces_{row_id}")
-                    for face in record["original_faces"]:
-                        try:
-                            selection.addSelection(face)
-                        except Exception:
-                            pass  # Empty/missing selections are shown by validation.
+                    _restore_mesh_selections(selection, record)
             state.activated = True
             _sync_mesh_dialog(inputs, state)
         finally:

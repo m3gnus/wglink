@@ -7,6 +7,7 @@ import pytest
 
 from test_wglink_activation_boundary import _boundary
 from test_wglink_fem_dialog import _building_inputs
+from test_wglink_mesh_settings import AppearanceFace
 from test_wglink_send import Attributes, Collection, body, component, face
 
 
@@ -14,7 +15,11 @@ from test_wglink_send import Attributes, Collection, body, component, face
 def scene(monkeypatch, tmp_path):
     fixture = _boundary(monkeypatch, tmp_path, "WGLink_mesh_dialog", coordination=False)
     module = fixture.module
-    faces = [face("HF", area=100), face("body paint", area=500), face("body paint", area=600)]
+    inherited = types.SimpleNamespace(name="body paint", id="body-paint")
+    faces = [AppearanceFace(inherited) for _ in range(3)]
+    for member, area in zip(faces, (100, 500, 600)):
+        member.area = area
+    faces[0].appearance = types.SimpleNamespace(name="HF", id="hf")
     cabinet = body("Cabinet", faces=faces)
     for index, member in enumerate(faces):
         member.body = cabinet
@@ -31,13 +36,19 @@ def scene(monkeypatch, tmp_path):
                 attribute.name = name
                 found.append(attribute)
         return Collection(found)
-    design = types.SimpleNamespace(rootComponent=root, findAttributes=find)
+    appearances = {inherited.id: inherited, "hf": faces[0].appearance}
+    design = types.SimpleNamespace(rootComponent=root, findAttributes=find,
+        appearances=types.SimpleNamespace(itemById=appearances.get))
+    monkeypatch.setattr(module.adsk.core, "AppearanceSourceTypes", types.SimpleNamespace(
+        OverrideAppearanceSource=4, FaceAppearanceSource=3), raising=False)
     fixture.app.activeProduct = design
     fixture.design = design
     fixture.faces = faces
     fixture.cabinet = cabinet
     monkeypatch.setattr(module.wglink_core, "_design", lambda _app: design)
-    monkeypatch.setattr(module.wglink_core, "_named_appearance", lambda _app, _design, name: types.SimpleNamespace(name=name))
+    def named(_app, _design, name):
+        return appearances.setdefault(name, types.SimpleNamespace(name=name, id=name))
+    monkeypatch.setattr(module.wglink_core, "_named_appearance", named)
     return fixture
 
 
@@ -54,7 +65,7 @@ def build(scene, *, activate=True):
 
 
 def change(scene, inputs, items, state, input_id):
-    scene.module.MeshInputChangedHandler(state).notify(types.SimpleNamespace(inputs=inputs, input=items[input_id]))
+    scene.module.MeshInputChangedHandler(state).notify(types.SimpleNamespace(inputs=items[input_id].commandInputs, input=items[input_id]))
     assert scene.ui.messages == []
 
 
@@ -102,8 +113,8 @@ def test_defaults_filters_copy_and_restore_runs_once(scene):
     assert items["mesh_symmetry"].tooltip == "Off solves the whole model: slower, more memory."
     assert items["mesh_source_faces_1"].filters == ["Faces"]
     assert items["mesh_source_faces_1"].limits == (0, 0)
-    assert not items["mesh_source_faces_1"].isUseCurrentSelections
-    for key in ("mesh_add_source", "mesh_remove_source", "mesh_add_group", "mesh_remove_group"):
+    assert not hasattr(items["mesh_source_faces_1"], "isUseCurrentSelections")
+    for key in ("mesh_add_source", "mesh_remove_source_1", "mesh_add_group"):
         assert items[key].isFullWidth
     change(scene, inputs, items, state, "mesh_add_group")
     assert items["mesh_group_faces_2"].filters == ["Faces", "SolidBodies", "SurfaceBodies"]
@@ -150,10 +161,10 @@ def test_save_reopen_restores_every_value_and_face_and_repaints(scene, identitie
     module._apply_mesh_dialog(inputs, state)
     assert module.wglink_send.read_mesh_settings(scene.design) == saved
     # Removing a group clears its managed paint and removes the stored group.
-    change(scene, inputs, items, state, "mesh_remove_group")
+    change(scene, inputs, items, state, f"mesh_remove_group_{next(reversed(state.groups))}")
     module._apply_mesh_dialog(inputs, state)
     assert not module.wglink_send.read_mesh_settings(scene.design)["surface_groups"]
-    assert all(member.appearance is None for member in scene.faces[1:])
+    assert all(member.override is None for member in scene.faces[1:])
 
 
 @pytest.mark.parametrize("value", [0, -1, math.nan, math.inf])
@@ -164,8 +175,8 @@ def test_invalid_sizes_block_with_bottom_copy_before_document_edits(scene, value
     args = types.SimpleNamespace(inputs=inputs)
     module.MeshValidateInputsHandler(state).notify(args)
     assert not args.areInputsValid
-    assert items["mesh_validation"].formattedText == "<b>Fix before saving:</b><br>Sizes must be greater than 0."
-    with pytest.raises(module.wglink_author.AuthorError, match="Sizes must be greater than 0"):
+    assert items["mesh_validation"].formattedText == "<b>Fix before saving:</b><br>Walls: size must be greater than 0."
+    with pytest.raises(module.wglink_author.AuthorError, match="Walls: size must be greater than 0"):
         module._apply_mesh_dialog(inputs, state)
     assert scene.design.rootComponent.attributes.values == {}
     assert scene.faces[0].appearance.name == "HF"
@@ -177,7 +188,7 @@ def test_source_group_and_group_group_overlap_and_empty_validation(scene):
     change(scene, inputs, items, state, "mesh_add_group")
     items["mesh_group_name_2"].value = "Back"
     assert not module._sync_mesh_dialog(inputs, state)
-    assert "A surface group must not be empty." in items["mesh_validation"].formattedText
+    assert "Group 2 (Back): select at least one face." in items["mesh_validation"].formattedText
     items["mesh_group_faces_2"].addSelection(scene.cabinet)  # Expands bodies, including the source.
     assert not module._sync_mesh_dialog(inputs, state)
     assert "A face cannot be in both a source and a surface group." in items["mesh_validation"].formattedText
@@ -188,8 +199,8 @@ def test_source_group_and_group_group_overlap_and_empty_validation(scene):
     items["mesh_group_faces_3"].addSelection(scene.faces[1])
     assert not module._sync_mesh_dialog(inputs, state)
     assert "A face cannot be in two surface groups." in items["mesh_validation"].formattedText
-    change(scene, inputs, items, state, "mesh_remove_group")
-    change(scene, inputs, items, state, "mesh_remove_source")
+    change(scene, inputs, items, state, f"mesh_remove_group_{next(reversed(state.groups))}")
+    change(scene, inputs, items, state, f"mesh_remove_source_{next(reversed(state.sources))}")
     assert not module._sync_mesh_dialog(inputs, state)
     assert "There must be at least one source." in items["mesh_validation"].formattedText
 
@@ -210,14 +221,14 @@ def test_warnings_are_advisory_and_estimate_is_live_approximate_and_amber(scene,
         assert ("#b77900" in items["mesh_estimate"].formattedText) == (index > 0)
         assert "approximate" in items["mesh_estimate"].formattedText
         assert "Limit 22,000." in items["mesh_estimate"].formattedText
-        assert "LF source 30 mm is coarser than the walls (25 mm); it will be meshed at 25 mm." in items["mesh_validation"].formattedText
+        assert "Source 1 (LF): 30 mm is coarser than the walls (25 mm); it will be meshed at 25 mm." in items["mesh_validation"].formattedText
     assert "above the 22,000 triangle limit" in items["mesh_validation"].formattedText
     assert calls[0][0] == 120000
     assert calls[0][3] == {"solved_fraction": 0.25}
     assert calls[0][2]["source_size_mm"] == {"source-hf": 30}
 
 
-def test_reset_uses_protocol_defaults_and_removes_groups_without_editing_document(scene):
+def test_reset_changes_sizes_only_and_preserves_groups_without_editing_document(scene):
     module = scene.module
     inputs, items, state = build(scene)
     items["mesh_wall"].value = 4
@@ -228,8 +239,9 @@ def test_reset_uses_protocol_defaults_and_removes_groups_without_editing_documen
     assert items["mesh_wall"].value == 2.5
     assert items["mesh_grading"].value == 10
     assert items["mesh_source_size_1"].value == .6
-    assert items["mesh_symmetry"].selectedItem.name == "Automatic"
-    assert state.groups == {}
+    assert items["mesh_symmetry"].selectedItem.name == "Off"
+    assert len(state.groups) == 1
+    assert items["mesh_group_size_2"].value == 1.5
     assert not scene.design.rootComponent.attributes.values
 
 
@@ -246,8 +258,7 @@ def test_linked_sources_are_read_only_and_cannot_be_removed(scene, monkeypatch):
     assert not items["mesh_source_role_1"].isEnabled
     assert not items["mesh_source_size_1"].isEnabled
     assert not items["mesh_source_faces_1"].isVisible
-    assert not items["mesh_remove_source"].isEnabled
-    change(scene, inputs, items, state, "mesh_remove_source")
+    assert "mesh_remove_source_1" not in items
     assert len(state.sources) == 1
     items["mesh_source_size_1"].value = 100
     sources, _, _ = module._mesh_dialog_values(inputs, state)
@@ -268,9 +279,9 @@ def test_custom_size_and_add_remove_sources_and_restoring_guard(scene):
     assert items[f"mesh_source_size_{mf_row}"].value == 1.2
     last_row = next(reversed(state.sources))
     removed_faces = list(state.sources[last_row]["original_faces"])
-    change(scene, inputs, items, state, "mesh_remove_source")
+    change(scene, inputs, items, state, f"mesh_remove_source_{next(reversed(state.sources))}")
     module._apply_mesh_dialog(inputs, state)
-    assert all(member.appearance is None for member in removed_faces)
+    assert all(member.override is None for member in removed_faces)
     change(scene, inputs, items, state, "mesh_add_group")
     row_id = next(iter(state.groups))
     items[f"mesh_group_size_{row_id}"].value = 2.1
@@ -304,7 +315,8 @@ def test_saved_source_size_survives_wg_capability_changes_and_send_mapping(scene
 def test_hidden_painted_source_can_be_repaired_even_when_send_scope_refuses(scene):
     module = scene.module
     scene.cabinet.isVisible = False
-    other = body("Other", faces=[face("MF")])
+    other = body("Other", faces=[AppearanceFace(scene.faces[1].inherited)])
+    other.faces[0].appearance = types.SimpleNamespace(name="MF", id="mf")
     other.faces[0].body = other
     other.faces[0].attributes = Attributes()
     other.faces[0].entityToken = "other-source"
@@ -316,10 +328,10 @@ def test_hidden_painted_source_can_be_repaired_even_when_send_scope_refuses(scen
     assert len(state.sources) == 2
     # The hidden HF source is last in the preview's role order.
     assert items["mesh_source_role_2"].selectedItem.name == "HF"
-    change(scene, inputs, items, state, "mesh_remove_source")
+    change(scene, inputs, items, state, f"mesh_remove_source_{next(reversed(state.sources))}")
     assert module._sync_mesh_dialog(inputs, state)
     module._apply_mesh_dialog(inputs, state)
-    assert scene.faces[0].appearance is None
+    assert scene.faces[0].override is None
     assert module.wglink_send.preflight_scope(scene.app)["scope_error"] is None
 
 
@@ -342,3 +354,253 @@ def test_failure_after_paint_restores_all_sources_groups_stamps_and_settings(sce
     assert [member.attributes.values for member in scene.faces] == original_stamps
     assert scene.faces[0].appearance.name == "HF"
     assert scene.faces[1].appearance.name == "body paint"
+
+
+@pytest.mark.parametrize("field", ["name", "id", "parentCommand", "parentCommandInput", "commandInputs", "isValid", "objectType"])
+def test_fusion_input_getters_reject_assignment(scene, field):
+    inputs, items, _state = build(scene)
+    for key in ("mesh_sources", "mesh_source_role_1", "mesh_source_faces_1", "mesh_source_size_1"):
+        with pytest.raises(AttributeError, match="read-only"):
+            setattr(items[key], field, "invalid")
+    with pytest.raises(AttributeError):
+        items["mesh_sources"].children = inputs
+    with pytest.raises(AttributeError):
+        items["mesh_source_role_1"].selectedItem = None
+    with pytest.raises(AttributeError):
+        items["mesh_source_role_1"].listItems = []
+    with pytest.raises(AttributeError):
+        items["mesh_source_faces_1"].selectionCount = 1
+
+
+def test_group_event_collection_cannot_resolve_other_inputs_and_validate_uses_command(scene):
+    inputs, items, state = build(scene)
+    children = items["mesh_sources"].children
+    assert children.itemById("mesh_add_source") is items["mesh_add_source"]
+    assert children.itemById("mesh_source_faces_1") is None
+    assert children.itemById("mesh_wall") is None
+    change(scene, inputs, items, state, "mesh_add_group")
+    items["mesh_group_name_2"].value = "Back"
+    items["mesh_group_faces_2"].addSelection(scene.faces[1])
+    args = types.SimpleNamespace(inputs=items["mesh_group_faces_2"].commandInputs)
+    scene.module.MeshValidateInputsHandler(state).notify(args)
+    assert args.areInputsValid
+    # Execute receives the owning command and saves grouped inputs too.
+    handler = scene.module.CommandExecuteHandler("source")
+    handler.mesh_state = state
+    handler.notify(types.SimpleNamespace(command=items["mesh_group_faces_2"].parentCommand))
+    assert scene.module.wglink_send.read_mesh_settings(scene.design)["surface_groups"][0]["name"] == "Back"
+
+
+def test_first_activate_clears_preselection_and_reports_failed_saved_faces(scene):
+    scene.faces[1].appearance = scene.faces[0].appearance
+    for member in scene.faces[:2]:
+        member.selectable = False
+    inputs, items, state = build(scene, activate=False)
+    selection = items["mesh_source_faces_1"]
+    selection.addSelection(scene.faces[2])  # Fusion's automatic preselection.
+    scene.module.MeshDialogActivateHandler(state).notify(types.SimpleNamespace(
+        command=selection.parentCommand))
+    assert selection.selectionCount == 0
+    text = items["mesh_validation"].formattedText
+    assert "Source 1 (HF): 2 saved faces could not be selected (hidden or changed). Reselect them." in text
+    assert not scene.module._sync_mesh_dialog(inputs, state)
+    for member in scene.faces[:2]:
+        member.selectable = True
+        assert selection.addSelection(member)
+    assert scene.module._sync_mesh_dialog(inputs, state)
+
+
+@pytest.mark.parametrize("keep", [False, True])
+@pytest.mark.parametrize("paint_id", ["lost", "", " untrimmed "])
+def test_orphan_paint_recovers_as_editable_group_and_save_can_clear_or_keep_it(scene, keep, paint_id):
+    module = scene.module
+    scene.faces[1].appearance = module.wglink_core._named_appearance(scene.app, scene.design, f"WGMESH_{paint_id}")
+    with pytest.raises(module.wglink_core.WgLinkError, match="no settings"):
+        module.wglink_send._mesh_snapshot(scene.design, [], [scene.cabinet], set())
+    inputs, items, state = build(scene)
+    assert items["mesh_group_name_2"].value == f"Recovered {paint_id.strip() or 'surface group'}"
+    assert items["mesh_group_faces_2"]._entities == [scene.faces[1]]
+    if not keep:
+        change(scene, inputs, items, state, "mesh_remove_group_2")
+    module._apply_mesh_dialog(inputs, state)
+    saved = module.wglink_send.read_mesh_settings(scene.design)
+    assert len(saved["surface_groups"]) == int(keep)
+    if keep:
+        group_id = saved["surface_groups"][0]["group_id"]
+        assert group_id and group_id == group_id.strip()
+        if paint_id == "lost":
+            assert group_id == paint_id
+        assert scene.faces[1].appearance.name == f"WGMESH_{group_id}"
+    else:
+        assert scene.faces[1].override is None
+    module.wglink_send._mesh_snapshot(scene.design, [], [scene.cabinet], set())
+
+
+def test_any_row_can_be_removed_and_reset_preserves_membership_names_and_symmetry(scene):
+    module = scene.module
+    inputs, items, state = build(scene)
+    change(scene, inputs, items, state, "mesh_add_source")
+    change(scene, inputs, items, state, "mesh_add_source")
+    change(scene, inputs, items, state, "mesh_remove_source_1")
+    assert list(state.sources) == [2, 3]
+    assert "mesh_source_faces_1" not in items
+    for _ in range(3):
+        change(scene, inputs, items, state, "mesh_add_group")
+    change(scene, inputs, items, state, "mesh_remove_group_5")
+    assert list(state.groups) == [4, 6]
+    items["mesh_group_name_4"].value = "Back"
+    items["mesh_group_faces_4"].addSelection(scene.faces[1])
+    items["mesh_group_size_4"].value = 4
+    original_id = state.groups[4]["group_id"]
+    module._mesh_select(items["mesh_symmetry"], "Off")
+    change(scene, inputs, items, state, "mesh_reset")
+    assert list(state.groups) == [4, 6]
+    assert state.groups[4]["group_id"] == original_id
+    assert items["mesh_group_name_4"].value == "Back"
+    assert items["mesh_group_faces_4"]._entities == [scene.faces[1]]
+    assert items["mesh_group_size_4"].value == module.wglink_protocol.MESH_PRESETS["Fine"] / 10
+    assert items["mesh_symmetry"].selectedItem.name == "Off"
+
+
+def test_validation_names_rows_refuses_duplicate_names_and_separates_warnings(scene):
+    module = scene.module
+    inputs, items, state = build(scene)
+    for name, member in (("Back", scene.faces[1]), (" back ", scene.faces[2])):
+        change(scene, inputs, items, state, "mesh_add_group")
+        row = next(reversed(state.groups))
+        items[f"mesh_group_name_{row}"].value = name
+        items[f"mesh_group_faces_{row}"].addSelection(member)
+    items["mesh_source_size_1"].value = 3
+    items["mesh_group_size_2"].value = 0
+    assert not module._sync_mesh_dialog(inputs, state)
+    text = items["mesh_validation"].formattedText
+    assert "Group 2 (Back): size must be greater than 0." in text
+    assert "Group 3 (back): duplicate group name with Group 2 (Back)." in text
+    assert text.index("Fix before saving:") < text.index("Warnings:") < text.index("coarser than the walls")
+    with pytest.raises(module.wglink_author.AuthorError, match="duplicate group name"):
+        module._apply_mesh_dialog(inputs, state)
+    assert scene.design.rootComponent.attributes.values == {}
+
+
+@pytest.mark.parametrize("count,full,amber,warning", [
+    (6000, 24000, False, False), (18000, 72000, False, False),
+    (18001, 72004, True, False), (22001, 88004, True, True),
+])
+def test_estimate_thresholds_use_solved_part_and_do_not_repeat_full_count(scene, monkeypatch, count, full, amber, warning):
+    module = scene.module
+    inputs, items, state = build(scene)
+    monkeypatch.setattr(module.wglink_mesh, "estimate_triangles", lambda *_a, **_kw: {
+        "triangles": count, "drawn_triangles": full})
+    assert module._sync_mesh_dialog(inputs, state)
+    text = items["mesh_estimate"].formattedText
+    assert text.count(f"{full:,}") == 1
+    assert f"≈ {count:,} triangles for the part WG solves" in text
+    assert "assuming quarter symmetry" in text
+    assert ("#b77900" in text) == amber
+    assert ("above the 22,000" in items["mesh_validation"].formattedText) == warning
+    assert "mesh_summary" not in items
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("failure", ["settings", "instances"])
+def test_save_failure_restores_original_group_journal_and_exact_inheritance(scene, monkeypatch, explicit, failure):
+    module = scene.module
+    original_paint = types.SimpleNamespace(id="original-blue", name="Original blue")
+    previous_lookup = scene.design.appearances.itemById
+    scene.design.appearances.itemById = lambda key: original_paint if key == original_paint.id else previous_lookup(key)
+    if explicit:
+        scene.faces[1].appearance = original_paint
+    inputs, items, state = build(scene)
+    change(scene, inputs, items, state, "mesh_add_group")
+    items["mesh_group_name_2"].value = "Original group"
+    items["mesh_group_faces_2"].addSelection(scene.faces[1])
+    module._apply_mesh_dialog(inputs, state)
+    original_attributes = [dict(member.attributes.values) for member in scene.faces]
+    original_settings = dict(scene.design.rootComponent.attributes.values)
+    original_overrides = [member.override for member in scene.faces]
+    inputs, items, state = build(scene)
+    change(scene, inputs, items, state, "mesh_add_group")
+    items["mesh_group_name_3"].value = "New group"
+    items["mesh_group_faces_3"].addSelection(scene.faces[2])
+    if failure == "settings":
+        def refuse(*_args):
+            raise module.wglink_core.WgLinkError("settings refused")
+        monkeypatch.setattr(module.wglink_send, "save_mesh_settings", refuse)
+    else:
+        # The original group clears and repaints before this real W2a guard fires.
+        reused = types.SimpleNamespace()
+        scene.faces[2].body = types.SimpleNamespace(parentComponent=reused)
+        scene.design.rootComponent.allOccurrences = [types.SimpleNamespace(component=reused) for _ in range(2)]
+    with pytest.raises(module.wglink_author.AuthorError, match="This dialog's changes were restored") as caught:
+        module._apply_mesh_dialog(inputs, state)
+    if failure == "instances":
+        assert "Make Independent" in str(caught.value)
+        scene.faces[2].body = scene.cabinet
+        scene.design.rootComponent.allOccurrences = []
+    assert [member.attributes.values for member in scene.faces] == original_attributes
+    assert scene.design.rootComponent.attributes.values == original_settings
+    assert all(member.override is old for member, old in zip(scene.faces, original_overrides))
+    # The original W2a journal still clears to the exact pre-group appearance.
+    module.wglink_send.paint_surface_group(scene.app, scene.design, [scene.faces[1]], None)
+    assert scene.faces[1].override is (original_paint if explicit else None)
+
+
+def test_incomplete_rollback_does_not_claim_restoration(scene, monkeypatch):
+    module = scene.module
+    inputs, _items, state = build(scene)
+    original_set = module.wglink_core._set_attribute
+    def refuse_root(entity, name, value):
+        if entity is scene.design.rootComponent:
+            original_set(entity, name, "partial settings write")
+            raise RuntimeError("settings write refused")
+        return original_set(entity, name, value)
+    # Seed saved settings so rollback must restore an attribute too.
+    module._apply_mesh_dialog(inputs, state)
+    inputs, _items, state = build(scene)
+    monkeypatch.setattr(module.wglink_core, "_set_attribute", refuse_root)
+    with pytest.raises(module.wglink_author.AuthorError, match="some changes could not be restored") as caught:
+        module._apply_mesh_dialog(inputs, state)
+    assert "This dialog's changes were restored" not in str(caught.value)
+
+
+def test_failure_never_repaints_read_only_linked_sources(scene, monkeypatch):
+    module = scene.module
+    original = module.wglink_send.preflight_scope
+    def linked(app, options, *, authoring_context):
+        result = original(app, options, authoring_context=authoring_context)
+        authoring_context["sources"][0]["instance_id"] = "linked-design"
+        return result
+    monkeypatch.setattr(module.wglink_send, "preflight_scope", linked)
+    inputs, _items, state = build(scene)
+    journaled = []
+    remember = module.wglink_send._StampEdit.remember_appearance
+    def record(edit, member):
+        journaled.append(member)
+        remember(edit, member)
+    monkeypatch.setattr(module.wglink_send._StampEdit, "remember_appearance", record)
+    def refuse(*_args):
+        raise RuntimeError("save refused")
+    monkeypatch.setattr(module, "_save_mesh_dialog", refuse)
+    with pytest.raises(module.wglink_author.AuthorError, match="changes were restored"):
+        module._apply_mesh_dialog(inputs, state)
+    assert journaled == []
+
+
+def test_source_stamp_failure_after_paint_uses_single_dialog_rollback_message(scene, monkeypatch):
+    module = scene.module
+    inputs, items, state = build(scene)
+    change(scene, inputs, items, state, "mesh_add_source")
+    items["mesh_source_faces_2"].addSelection(scene.faces[1])
+    assign = module.wglink_send.assign_source_identity
+    def refuse(design, faces, role):
+        if role == "MF":
+            raise module.wglink_core.WgLinkError("source stamp refused")
+        return assign(design, faces, role)
+    monkeypatch.setattr(module.wglink_send, "assign_source_identity", refuse)
+    with pytest.raises(module.wglink_author.AuthorError, match="changes were restored") as caught:
+        module._apply_mesh_dialog(inputs, state)
+    assert "was kept" not in str(caught.value)
+    assert scene.faces[1].override is None
+    assert scene.faces[0].appearance.name == "HF"
+    assert all(not member.attributes.values for member in scene.faces)
+    assert not scene.design.rootComponent.attributes.values

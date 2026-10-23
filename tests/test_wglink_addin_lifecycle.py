@@ -1007,7 +1007,10 @@ def test_setting_a_source_paints_the_role_appearance_and_leaves_matches_alone(
         source_role=_chosen("HF"),
     )
 
-    report = module._apply_source_role(inputs)
+    report = module._apply_source_faces(
+        module._selected_entities(inputs, "source_faces"),
+        module._selected_name(inputs, "source_role", "HF"),
+    )
 
     assert minted == ["HF"]
     assert blank.appearance.name == "HF" and wrong.appearance.name == "HF"
@@ -1038,18 +1041,14 @@ def test_setting_a_source_again_on_a_refused_source_reassigns_a_new_identity(
     first, second = _fake_face("HF"), _fake_face("HF")
     design = _face_design([first, second])
     monkeypatch.setattr(module.wglink_core, "_design", lambda _app: design)
-    module._apply_source_role(_dialog_inputs(
-        source_faces=_SelectionInput([first]), source_role=_chosen("HF")
-    ))
+    module._apply_source_faces([first], "HF")
     original = _identity_stamp(first)
     # A split: Fusion copied the face's stamp onto the other half.
     second.attributes.values = dict(first.attributes.values)
     with pytest.raises(module.wglink_core.WgLinkError, match="split or copied"):
         module.wglink_send._painted_source_identity("HF", [first, second])
 
-    module._apply_source_role(_dialog_inputs(
-        source_faces=_SelectionInput([first, second]), source_role=_chosen("HF")
-    ))
+    module._apply_source_faces([first, second], "HF")
 
     assert module.wglink_send._painted_source_identity("HF", [first, second]) != original["id"]
 
@@ -1080,7 +1079,10 @@ def test_clearing_a_source_returns_only_role_faces_to_their_body_appearance(
         source_role=_chosen(module.wglink_author.CLEAR_SOURCE_LABEL),
     )
 
-    report = module._apply_source_role(inputs)
+    report = module._apply_source_faces(
+        module._selected_entities(inputs, "source_faces"),
+        module._selected_name(inputs, "source_role", "HF"),
+    )
 
     # No appearance is minted for a clear, and the user's own material survives.
     assert minted == []
@@ -1092,7 +1094,7 @@ def test_clearing_a_source_returns_only_role_faces_to_their_body_appearance(
     assert _identity_stamp(kept)["faces"] == 1
 
 
-def test_a_failed_stamp_says_the_paint_it_applied_was_kept(monkeypatch) -> None:
+def test_failed_source_helper_leaves_dialog_responsible_for_paint_rollback(monkeypatch) -> None:
     module = _load_instance(
         monkeypatch, "WGLink_stamp_failure", _UI(_Panels(), _Definitions(reserve_ids=False))
     )
@@ -1112,13 +1114,11 @@ def test_a_failed_stamp_says_the_paint_it_applied_was_kept(monkeypatch) -> None:
     monkeypatch.setattr(module.wglink_core, "_design", lambda _app: design)
 
     with pytest.raises(module.wglink_core.WgLinkError) as refusal:
-        module._apply_source_role(_dialog_inputs(
-            source_faces=_SelectionInput([blank]), source_role=_chosen("HF")
-        ))
+        module._apply_source_faces([blank], "HF")
 
     text = str(refusal.value)
     assert "Every source identity stamp was restored" in text
-    assert "HF paint applied to 1 face(s) was kept" in text
+    assert "was kept" not in text
     assert blank.appearance.name == "HF"
 
 
@@ -1138,10 +1138,7 @@ def test_clear_takes_the_identity_off_a_face_whose_paint_was_removed_by_hand(
     stripped.attributes.values[("WGLink", "source_identity")] = json.dumps(dict(stamp, face="a"))
     kept.attributes.values[("WGLink", "source_identity")] = json.dumps(dict(stamp, face="b"))
 
-    report = module._apply_source_role(_dialog_inputs(
-        source_faces=_SelectionInput([stripped]),
-        source_role=_chosen(module.wglink_author.CLEAR_SOURCE_LABEL),
-    ))
+    report = module._apply_source_faces([stripped], module.wglink_author.CLEAR_SOURCE_LABEL)
 
     assert _identity_stamp(stripped) is None
     assert _identity_stamp(kept)["faces"] == 1

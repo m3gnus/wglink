@@ -92,27 +92,6 @@ def test_an_unknown_role_is_refused_rather_than_painted(author):
         author.role_appearance_name(author.CLEAR_SOURCE_LABEL)
 
 
-def test_the_dropdown_offers_four_roles_and_a_clear(author):
-    assert author.source_choices() == (
-        "LF", "MF", "HF", "PASSIVE_CARDIOID", "Clear WG source",
-    )
-    assert author.DEFAULT_SOURCE_ROLE in author.SOURCE_ROLES
-    assert author.resolve_source_choice(author.CLEAR_SOURCE_LABEL) is None
-
-
-def test_the_dialog_copy_teaches_the_convention_in_one_line(author):
-    text = author.source_help_text("HF")
-
-    assert "HF" in text and "WG solves" in text
-    assert "\n" not in text
-    assert "appearance" in author.source_help_text("PASSIVE_CARDIOID")
-    # The legacy spelling resolves to the same help text as the new name.
-    assert author.source_help_text("PORT_EXIT") == author.source_help_text(
-        "PASSIVE_CARDIOID"
-    )
-    assert "back to" in author.source_help_text(author.CLEAR_SOURCE_LABEL)
-
-
 def test_painting_replaces_a_different_role_and_skips_the_matching_one(author):
     plan = author.plan_source_assignment(faces(None, "MF", "HF"), "HF")
 

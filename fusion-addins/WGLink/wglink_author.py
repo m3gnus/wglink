@@ -77,19 +77,6 @@ def source_ids(role: str, used: set[str]) -> tuple[str, str]:
 # never silently renamed.
 RECOGNISED_SOURCE_ROLES = wglink_protocol.RECOGNISED_SOURCE_ROLES
 
-_ROLE_MEANING = {
-    "LF": "LF drive",
-    "MF": "MF drive",
-    "HF": "HF drive",
-    "PASSIVE_CARDIOID": "passive cardioid port",
-}
-
-
-def source_choices() -> tuple[str, ...]:
-    """The dropdown items of the Set WG Source command, in display order."""
-
-    return (*SOURCE_ROLES, CLEAR_SOURCE_LABEL)
-
 
 def resolve_source_choice(choice: object) -> str | None:
     """Turn a dropdown item into a role, or ``None`` for "clear"."""
@@ -124,21 +111,6 @@ def role_appearance_name(role: object) -> str:
     if value is None:
         raise AuthorError(f"{CLEAR_SOURCE_LABEL!r} has no appearance name.")
     return value
-
-
-def source_help_text(choice: object) -> str:
-    """One line of dialog copy that teaches the convention while choosing."""
-
-    role = resolve_source_choice(choice)
-    if role is None:
-        return (
-            "Removes the WG source role from the selected faces: they go back to "
-            "their body's own appearance and stop driving WG solves."
-        )
-    return (
-        f"Marks the selected face as the {_ROLE_MEANING[role]} source for WG "
-        f"solves, by painting it with an appearance named {role!r}."
-    )
 
 
 def _canonical_role(value: object) -> str | None:

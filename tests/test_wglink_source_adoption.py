@@ -87,8 +87,9 @@ def _unresolved(missing: int, total: int, painted: str, canonical: str) -> str:
     return (
         f"{missing} of {total} face(s) painted {painted} carry no WG source "
         f"identity for {canonical} (painted by hand, repainted, or marked before "
-        f"source identities existed). Select them and run Sources & Mesh… "
-        f"{canonical}; a face added to a source that still resolves keeps that "
+        f"source identities existed). Open Sources & Mesh…, choose the {canonical} "
+        "source row, reselect these faces in its Faces input, and click Save; "
+        "a face added to a source that still resolves keeps that "
         "source's identity."
     )
 

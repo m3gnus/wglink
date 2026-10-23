@@ -376,15 +376,76 @@ def test_dialog_accepts_relative_level_boundaries(fixture, level):
 
 
 def _building_inputs(module):
-    """Build real dialog code against a minimal Fusion command-input surface."""
+    """Mirror installed adsk/core.py getters and collection ownership.
+
+    Command.commandInputs can resolve all command IDs. Group children are local:
+    an inputChanged collection cannot resolve a sibling or nested group's IDs.
+    """
     items = {}
+    command = types.SimpleNamespace()
+
+    class Input:
+        readonly = {"id", "name", "parentCommand", "parentCommandInput", "commandInputs",
+                    "children", "listItems", "selectionCount", "selectedItem", "objectType", "isValid"}
+
+        def __init__(self, input_id, name, collection, **readonly):
+            self._readonly = dict(id=input_id, name=name, parentCommand=command,
+                                  parentCommandInput=collection.parent, commandInputs=collection,
+                                  isValid=True, objectType="adsk::core::CommandInput", **readonly)
+
+        def __getattr__(self, key):
+            try:
+                return self._readonly[key]
+            except KeyError:
+                raise AttributeError(key) from None
+
+        def __setattr__(self, key, value):
+            if key in self.readonly:
+                raise AttributeError(f"{key} is read-only in Fusion")
+            super().__setattr__(key, value)
+
+        def deleteMe(self):
+            for member in list(items.values()):
+                parent = member.parentCommandInput
+                while parent is not None:
+                    if parent is self:
+                        items.pop(member.id, None)
+                        break
+                    parent = parent.parentCommandInput
+            items.pop(self.id)
+            return True
+
+    class Dropdown(Input):
+        @property
+        def selectedItem(self):
+            return next((entry for entry in self._entries if entry.isSelected), None)
+
+    class Selection(Input, _SelectionInput):
+        def addSelection(self, face):
+            if getattr(face, "selectable", True) is False:
+                return False
+            self._entities.append(face)
+            return True
+
+        def clearSelection(self):
+            self._entities.clear()
+            return True
 
     class Inputs:
+        def __init__(self, parent=None):
+            self.parent = parent
+
+        @property
+        def command(self):
+            return command
+
         def itemById(self, input_id):
-            return items.get(input_id)
+            item = items.get(input_id)
+            return item if self.parent is None or (item is not None and item.parentCommandInput is self.parent) else None
 
         def addGroupCommandInput(self, input_id, name):
-            item = types.SimpleNamespace(children=self, name=name, deleteMe=lambda: items.pop(input_id))
+            item = Input(input_id, name, self)
+            item._readonly["children"] = Inputs(item)
             items[input_id] = item
             return item
 
@@ -392,7 +453,8 @@ def _building_inputs(module):
             return self.addValueInput(input_id, name, "", value)
 
         def addValueInput(self, input_id, name, units, value):
-            item = types.SimpleNamespace(id=input_id, name=name, value=value, unitType=units)
+            item = Input(input_id, name, self)
+            item.value, item.unitType = value, units
             items[input_id] = item
             return item
 
@@ -404,43 +466,27 @@ def _building_inputs(module):
             item.formattedText = text
             return item
 
-        def addTableCommandInput(self, input_id, name, _columns, _ratio):
-            item = self.addGroupCommandInput(input_id, name)
-            item.cells = {}
-            item.addCommandInput = lambda cell, row, col: item.cells.update({(row, col): cell})
-            return item
-
         def addDropDownCommandInput(self, input_id, name, _style):
             entries = []
-            class Dropdown:
-                id = input_id
-                @property
-                def selectedItem(self):
-                    return next((entry for entry in entries if entry.isSelected), None)
-                @selectedItem.setter
-                def selectedItem(self, value):
-                    for entry in entries:
-                        entry.isSelected = entry.name == value.name
-            item = Dropdown()
-            item.name = name
+            item = Dropdown(input_id, name, self)
+            item._entries = entries
             def add(label, selected):
                 entries.append(types.SimpleNamespace(name=label, isSelected=selected))
                 item.listItems.count = len(entries)
-            item.listItems = types.SimpleNamespace(add=add, item=lambda i: entries[i], count=0)
+            item._readonly["listItems"] = types.SimpleNamespace(add=add, item=lambda i: entries[i], count=0)
             items[input_id] = item
             return item
 
-        def addSelectionInput(self, input_id, _name, _prompt):
-            item = _SelectionInput([])
-            item.addSelection = lambda face: item._entities.append(face)
-            item.id = input_id
-            item.clearSelection = lambda: item._entities.clear()
+        def addSelectionInput(self, input_id, name, _prompt):
+            item = Selection(input_id, name, self)
+            _SelectionInput.__init__(item, [])
             items[input_id] = item
             return item
 
     module.adsk.core.ValueInput = types.SimpleNamespace(createByReal=lambda value: value)
     module.adsk.core.DropDownStyles = types.SimpleNamespace(TextListDropDownStyle=1)
     inputs = Inputs()
+    command.commandInputs = inputs
     inputs.addGroupCommandInput("fem_groups", "Surface groups")
     return inputs, items
 
@@ -467,7 +513,7 @@ def test_dialog_builds_defaults_and_updates_kind_and_lining_visibility(fixture):
     assert items["fem_resistivity_1"].isEnabled
     for kind in ("moving", "interface", "plane-wave-termination"):
         label = next(label for label, value in module.wglink_fem.KIND_CHOICES if value == kind)
-        items["fem_kind_1"].selectedItem = types.SimpleNamespace(name=label)
+        module._mesh_select(items["fem_kind_1"], label)
         module.FemInputChangedHandler(state)._changed(types.SimpleNamespace(
             input=items["fem_kind_1"], inputs=inputs,
         ))
@@ -497,3 +543,21 @@ def test_restoring_dialog_reads_old_defaults_and_saved_boundary_options(fixture,
     assert items["fem_faces_1"].selection(0).entity is faces[0]
     assert items["fem_faces_2"].selection(0).entity is faces[1]
     assert not state.restoring
+
+
+def test_group_name_edit_keeps_creation_title_and_validation_runs_on_group_event(fixture, monkeypatch):
+    module = fixture.module
+    inputs, items = _building_inputs(module)
+    state = module.FemDialogState()
+    module._add_fem_group(inputs, state, name="Original")
+    errors = []
+    monkeypatch.setattr(module, "_log", errors.append)
+    monkeypatch.setattr(module, "_sync_fem_validation", lambda actual, _state: actual is inputs)
+    items["fem_name_1"].value = "Renamed"
+    module.FemInputChangedHandler(state)._changed(types.SimpleNamespace(
+        inputs=items["fem_name_1"].commandInputs, input=items["fem_name_1"]))
+    assert not errors
+    assert items["fem_group_1"].name == "Original"
+    args = types.SimpleNamespace(inputs=items["fem_name_1"].commandInputs)
+    module.FemValidateInputsHandler(state).notify(args)
+    assert args.areInputsValid

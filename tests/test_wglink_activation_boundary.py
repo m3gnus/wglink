@@ -373,9 +373,12 @@ def _source_command(fixture, monkeypatch) -> None:
         lambda _app, _design, name: types.SimpleNamespace(name=name),
     )
     from test_wglink_fem_dialog import _building_inputs
-    from test_wglink_send import Attributes, body, face
+    from test_wglink_send import Attributes, body
+    from test_wglink_mesh_settings import AppearanceFace
 
-    member = face("body paint")
+    member = AppearanceFace(types.SimpleNamespace(name="body paint", id="body-paint"))
+    monkeypatch.setattr(module.adsk.core, "AppearanceSourceTypes", types.SimpleNamespace(
+        OverrideAppearanceSource=4, FaceAppearanceSource=3), raising=False)
     member.attributes = Attributes()
     member.entityToken = "new-source-face"
     loose_body = body("New source", faces=[member])

@@ -2608,8 +2608,9 @@ def _painted_role(face: object) -> str | None:
 
 def _run_again(canonical: str) -> str:
     return (
-        f"Select every face that should drive {canonical} and run Sources & Mesh… "
-        f"{canonical} again. Because this source no longer resolves, that gives it a "
+        f"Open Sources & Mesh…, choose the {canonical} source row, select every face "
+        "that should drive it in its Faces input, and click Save. Because this "
+        "source no longer resolves, that gives it a "
         "new source identity, and WG asks for its setup again."
     )
 
@@ -2624,8 +2625,9 @@ def _unresolved_paint(role: str, canonical: str, missing: int, total: int) -> st
     return (
         f"{missing} of {total} face(s) painted {role} carry no WG source "
         f"identity for {canonical} (painted by hand, repainted, or marked before "
-        f"source identities existed). Select them and run Sources & Mesh… "
-        f"{canonical}; a face added to a source that still resolves keeps that "
+        f"source identities existed). Open Sources & Mesh…, choose the {canonical} "
+        "source row, reselect these faces in its Faces input, and click Save; "
+        "a face added to a source that still resolves keeps that "
         "source's identity."
     )
 
@@ -2773,21 +2775,30 @@ def _stamp_attributes(design: object) -> list[tuple[object, dict[str, Any]]]:
 
 
 class _StampEdit:
-    """Every stamp write of one command, undone together if any of them fails.
+    """Journal source stamps and optional dialog attributes/paint for one command.
 
     A face in an externally referenced (read-only) component refuses the write;
     without this, the faces written before it would keep a half-applied source.
     """
 
     def __init__(self) -> None:
-        self._originals: list[tuple[object, str | None]] = []
+        self._originals: list[tuple[object, str, str | None]] = []
+        self._appearances = []
 
     def _remember(self, face: object) -> None:
-        if any(face is seen for seen, _value in self._originals):
+        self.remember_attribute(face, SOURCE_IDENTITY_ATTRIBUTE)
+
+    def remember_attribute(self, entity: object, name: str) -> None:
+        if any(entity is seen and name == key for seen, key, _value in self._originals):
             return
-        self._originals.append(
-            (face, wglink_core._attribute_value(face, SOURCE_IDENTITY_ATTRIBUTE))
-        )
+        self._originals.append((entity, name, wglink_core._attribute_value(entity, name)))
+
+    def remember_appearance(self, face: object) -> None:
+        if any(face is seen for seen, _value in self._appearances):
+            return
+        types = adsk.core.AppearanceSourceTypes
+        explicit = face.appearanceSourceType in (types.OverrideAppearanceSource, types.FaceAppearanceSource)
+        self._appearances.append((face, face.appearance if explicit else None))
 
     def write(self, face: object, stamp: dict[str, Any]) -> None:
         self._remember(face)
@@ -2803,14 +2814,24 @@ class _StampEdit:
 
     def rollback(self) -> list[str]:
         problems: list[str] = []
-        for face, value in reversed(self._originals):
+        for face, appearance in reversed(self._appearances):
             try:
+                face.appearance = appearance
+            except Exception as exc:
+                problems.append(str(exc))
+        for face, name, value in reversed(self._originals):
+            try:
+                # Unedited attributes can belong to read-only linked geometry.
+                if wglink_core._attribute_value(face, name) == value:
+                    continue
                 if value is None:
-                    attribute = wglink_core._attribute(face, SOURCE_IDENTITY_ATTRIBUTE)
+                    attribute = wglink_core._attribute(face, name)
                     if attribute is not None and attribute.deleteMe() is False:
-                        problems.append("Fusion refused to remove a stamp this command wrote")
+                        raise wglink_core.WgLinkError("Fusion refused to remove a stamp this command wrote")
                 else:
-                    wglink_core._set_attribute(face, SOURCE_IDENTITY_ATTRIBUTE, value)
+                    wglink_core._set_attribute(face, name, value)
+                if wglink_core._attribute_value(face, name) != value:
+                    problems.append(f"Fusion did not restore {name}")
             except Exception as exc:  # noqa: BLE001 - report every face we could not restore
                 problems.append(str(exc))
         return problems
