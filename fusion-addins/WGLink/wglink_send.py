@@ -3026,6 +3026,103 @@ def save_mesh_settings(design: object, mesh: dict[str, Any]) -> None:
     _mesh_authoring_generation += 1
 
 
+GROUP_ORIGINAL_APPEARANCE_ATTRIBUTE = "mesh_group_original_appearance"
+
+
+def _group_appearance_writer(
+    design: object, faces: list[object], plan: wglink_author.SourcePlan,
+) -> Callable[[object, object], None]:
+    """Prepare every original before painting; keep it until restoration succeeds.
+
+    Appearance ids refer to document assets, so renames and fresh wrappers do not
+    change which override is restored. A null id means inheritance, not a copy of
+    the body's current appearance. Legacy group paint has no saved original.
+    """
+    originals = {}
+    restores = {}
+    for index in plan.paint:
+        face = faces[index]
+        try:
+            source = face.appearanceSourceType
+            types = adsk.core.AppearanceSourceTypes
+            appearance_id = None
+            if source in (types.OverrideAppearanceSource, types.FaceAppearanceSource):
+                appearance_id = face.appearance.id
+                if not isinstance(appearance_id, str) or not appearance_id:
+                    raise ValueError("the original face appearance has no id")
+                if design.appearances.itemById(appearance_id) is None:
+                    raise ValueError("the original face appearance is not in this design")
+            originals[id(face)] = wglink_core._json({"schema": 1, "id": appearance_id})
+        except Exception as exc:
+            raise wglink_core.WgLinkError(
+                f"Could not preserve the selected face's original appearance: {exc}."
+            ) from exc
+    for index in plan.clear:
+        face = faces[index]
+        text = wglink_core._attribute_value(face, GROUP_ORIGINAL_APPEARANCE_ATTRIBUTE)
+        appearance = None
+        if text is not None:
+            try:
+                original = json.loads(text)
+                if (not isinstance(original, dict) or type(original.get("schema")) is not int
+                        or original["schema"] != 1 or "id" not in original):
+                    raise ValueError("invalid saved appearance")
+                appearance_id = original["id"]
+                if appearance_id is not None:
+                    if not isinstance(appearance_id, str) or not appearance_id:
+                        raise ValueError("invalid saved appearance id")
+                    appearance = design.appearances.itemById(appearance_id)
+                    if appearance is None:
+                        raise ValueError("the saved face appearance is missing from this design")
+            except Exception as exc:
+                raise wglink_core.WgLinkError(
+                    f"Could not restore the selected face's original appearance: {exc}."
+                ) from exc
+        restores[id(face)] = appearance
+
+    def write(face, appearance):
+        if id(face) in restores:
+            face.appearance = restores[id(face)]
+            attribute = wglink_core._attribute(face, GROUP_ORIGINAL_APPEARANCE_ATTRIBUTE)
+            if attribute is not None and attribute.deleteMe() is False:
+                raise wglink_core.WgLinkError("Fusion refused to remove the saved face appearance.")
+        else:
+            if id(face) in originals:
+                text = originals[id(face)]
+                wglink_core._set_attribute(face, GROUP_ORIGINAL_APPEARANCE_ATTRIBUTE, text)
+                if wglink_core._attribute_value(face, GROUP_ORIGINAL_APPEARANCE_ATTRIBUTE) != text:
+                    raise wglink_core.WgLinkError("Fusion refused to save the original face appearance.")
+            face.appearance = appearance
+
+    return write
+
+
+def _check_group_instance_selection(design: object, selections: list[tuple[object, object]]) -> None:
+    """Native paint is shared, like source identity. Require every placement.
+
+    Fusion exposes an occurrence-wide appearance override, but no documented
+    per-occurrence face override. Do not infer that a proxy setter isolates it.
+    allOccurrences includes hidden placements and nested repeated assemblies.
+    """
+    occurrences = wglink_core._items(getattr(design.rootComponent, "allOccurrences", None))
+    for face, _context in selections:
+        native = _native_face(face)
+        component = getattr(getattr(native, "body", None), "parentComponent", None)
+        if component is None:
+            continue
+        instances = [occ for occ in occurrences
+                     if _same_live_entity(getattr(occ, "component", None), component)]
+        if len(instances) <= 1:
+            continue
+        contexts = [context for member, context in selections
+                    if _same_live_entity(_native_face(member), native)]
+        if not all(any(_same_live_entity(occ, context) for context in contexts) for occ in instances):
+            raise wglink_core.WgLinkError(
+                f"This face belongs to a component used {len(instances)} times; "
+                "make it unique (Make Independent) or select all instances"
+            )
+
+
 def paint_surface_group(
     app: object, design: object, entities: list[object], group_id: str | None,
     *, source_faces: list[object] = (),
@@ -3035,24 +3132,31 @@ def paint_surface_group(
     The dialog supplies geometric linked-throat memberships as source_faces;
     Send independently checks those memberships before exporting.
     """
-    faces, seen = [], set()
+    selections = []
     for entity in entities:
         members = wglink_core._items(entity.faces) if hasattr(entity, "faces") else [entity]
         for face in members:
-            native = _native_face(face)
-            key = _face_key(native)
-            if key not in seen:
-                seen.add(key)
-                faces.append(native)
+            context = getattr(face, "assemblyContext", None) or getattr(entity, "assemblyContext", None)
+            selections.append((face, context))
+    _check_group_instance_selection(design, selections)
+    faces, seen = [], set()
+    for face, _context in selections:
+        native = _native_face(face)
+        key = _face_key(native)
+        if key not in seen:
+            seen.add(key)
+            faces.append(native)
     source_keys = {_face_key(_native_face(face)) for face in source_faces}
     descriptors = [{"index": index, "appearance_name": wglink_core._appearance_name(face),
                     "is_source": _face_key(face) in source_keys} for index, face in enumerate(faces)]
     try:
         plan = wglink_author.plan_surface_group_assignment(descriptors, group_id)
+        write = _group_appearance_writer(design, faces, plan)
         global _mesh_authoring_generation
         _mesh_authoring_generation += 1
         wglink_author.apply_face_appearance_plan(
-            faces, plan, lambda name: wglink_core._named_appearance(app, design, name)
+            faces, plan, lambda name: wglink_core._named_appearance(app, design, name),
+            write_appearance=write,
         )
     except wglink_author.AuthorError as exc:
         raise wglink_core.WgLinkError(str(exc)) from exc

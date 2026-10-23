@@ -20,14 +20,55 @@ def fixture_mesh():
     return json.loads((FIXTURES / 'f1-single-source.wgreturn/wgreturn.json').read_text())['mesh']
 
 
+class AppearanceFace:
+    """Fusion returns the effective appearance, including inherited body paint."""
+    def __init__(self, inherited):
+        self.__dict__.update(vars(face('body paint', area=100)))
+        self.attributes = Attributes()
+        self.inherited = inherited
+        self.override = None
+
+    @property
+    def appearance(self):
+        return self.override if self.override is not None else self.inherited
+
+    @appearance.setter
+    def appearance(self, value):
+        self.override = value
+
+    @property
+    def appearanceSourceType(self):
+        return 4 if self.override is not None else 1
+
+
+class OccurrenceFace:
+    def __init__(self, native, occurrence):
+        self.nativeObject = native
+        self.assemblyContext = occurrence
+        self.entityToken = f'{occurrence.entityToken}/face'
+
+    @property
+    def appearance(self):
+        return self.nativeObject.appearance
+
+    @property
+    def area(self):
+        return self.nativeObject.area
+
+
 def document(monkeypatch, send_module):
     source = face('HF')
-    back = face('body paint', area=100)
+    back = AppearanceFace(types.SimpleNamespace(name='body paint', id='grey'))
     exterior = body('Cabinet', faces=[source, back])
+    back.body = exterior
     root = component('Mesh test', [exterior])
     root.attributes = Attributes()
     design = types.SimpleNamespace(rootComponent=root, exportManager=ContractExportManager(),
                                    findAttributes=lambda *_a: Collection())
+    design.appearances = Collection([back.inherited])
+    design.appearances.itemById = lambda key: next((a for a in design.appearances if a.id == key), None)
+    monkeypatch.setattr(send_module.adsk.core, 'AppearanceSourceTypes', types.SimpleNamespace(
+        OverrideAppearanceSource=4, FaceAppearanceSource=3), raising=False)
     app = types.SimpleNamespace(version='2704.1.53', activeDocument=types.SimpleNamespace(name='Mesh test'))
     monkeypatch.setattr(send_module.wglink_core, '_design', lambda _app: design)
     return app, design, exterior, source, back
@@ -132,7 +173,8 @@ def test_group_paint_reuses_library_writer_and_clear_restores_body(monkeypatch, 
         send_module.paint_surface_group(app, design, [exterior], 'back')
     assert source.appearance.name == 'HF'
     send_module.paint_surface_group(app, design, [back, source], None)
-    assert back.appearance is None and source.appearance.name == 'HF'
+    assert back.override is None and back.appearance is back.inherited
+    assert source.appearance.name == 'HF'
 
 
 def test_proxy_group_paint_and_geometric_source_refusal(monkeypatch, send_module):
@@ -144,6 +186,144 @@ def test_proxy_group_paint_and_geometric_source_refusal(monkeypatch, send_module
     send_module.paint_surface_group(app, design, [proxy], 'back')
     assert back.appearance.name == 'WGMESH_back'
     assert not hasattr(proxy, 'appearance')
+
+
+@pytest.mark.parametrize('override', [False, True])
+def test_group_clear_restores_exact_override_after_reopen(monkeypatch, send_module, override):
+    app, design, _, _, back = document(monkeypatch, send_module)
+    red = types.SimpleNamespace(name='red', id='custom-red')
+    design.appearances.append(red)
+    if override:
+        back.appearance = red
+    cyan = types.SimpleNamespace(name='WGMESH_back')
+    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda *_a: cyan)
+    send_module.paint_surface_group(app, design, [back], 'back')
+    saved = dict(back.attributes.values)
+    assert back.appearance is cyan
+    assert json.loads(saved[('WGLink', send_module.GROUP_ORIGINAL_APPEARANCE_ATTRIBUTE)]) == {
+        'schema': 1, 'id': 'custom-red' if override else None,
+    }
+    # Repeated assignment must not replace the original with managed cyan.
+    send_module.paint_surface_group(app, design, [back], 'back')
+    assert back.attributes.values == saved
+    reopened = AppearanceFace(types.SimpleNamespace(name='new body paint', id='new-grey'))
+    reopened.appearance = cyan
+    reopened.attributes.values = saved
+    # A fresh appearance wrapper, with a renamed display label and the same id.
+    restored_red = types.SimpleNamespace(name='renamed custom red', id='custom-red')
+    design.appearances[design.appearances.index(red)] = restored_red
+    send_module.paint_surface_group(app, design, [reopened], None)
+    assert reopened.override is (restored_red if override else None)
+    assert reopened.appearance is (restored_red if override else reopened.inherited)
+    assert not reopened.attributes.values
+    # Leaving one group and joining another captures the restored original.
+    send_module.paint_surface_group(app, design, [reopened], 'other')
+    send_module.paint_surface_group(app, design, [reopened], None)
+    assert reopened.override is (restored_red if override else None)
+
+
+def test_group_rejoin_after_manual_repaint_captures_the_new_override(monkeypatch, send_module):
+    app, design, _, _, back = document(monkeypatch, send_module)
+    cyan = types.SimpleNamespace(name='WGMESH_back')
+    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda *_a: cyan)
+    send_module.paint_surface_group(app, design, [back], 'back')
+    red = types.SimpleNamespace(name='red', id='red')
+    design.appearances.append(red)
+    back.appearance = red  # Manual paint has left the group; the old attribute remains.
+    send_module.paint_surface_group(app, design, [back], 'other')
+    send_module.paint_surface_group(app, design, [back], None)
+    assert back.appearance is red
+    assert not back.attributes.values
+
+
+@pytest.mark.parametrize('failure', ['unreadable-original', 'attribute-write', 'missing-asset', 'bad-record'])
+def test_group_original_failures_keep_current_paint(monkeypatch, send_module, failure):
+    app, design, _, _, back = document(monkeypatch, send_module)
+    red = types.SimpleNamespace(name='red', id='red')
+    design.appearances.append(red)
+    back.appearance = red
+    cyan = types.SimpleNamespace(name='WGMESH_back')
+    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda *_a: cyan)
+    if failure == 'unreadable-original':
+        red.id = ''
+    elif failure == 'attribute-write':
+        back.attributes.add = lambda *_a: None  # Fusion may refuse without raising.
+    if failure in ('unreadable-original', 'attribute-write'):
+        with pytest.raises(send_module.wglink_core.WgLinkError, match='original.*appearance'):
+            send_module.paint_surface_group(app, design, [back], 'back')
+        assert back.appearance is red
+        return
+    send_module.paint_surface_group(app, design, [back], 'back')
+    if failure == 'missing-asset':
+        design.appearances.remove(red)
+    else:
+        back.attributes.add('WGLink', send_module.GROUP_ORIGINAL_APPEARANCE_ATTRIBUTE, '{')
+    saved = dict(back.attributes.values)
+    with pytest.raises(send_module.wglink_core.WgLinkError, match='original appearance'):
+        send_module.paint_surface_group(app, design, [back], None)
+    assert back.appearance is cyan and back.attributes.values == saved
+
+
+def repeated_component(design, back):
+    comp = component('Repeated cabinet', [back.body])
+    occurrences = [types.SimpleNamespace(component=comp, entityToken=f'parent:{i}/cabinet:1')
+                   for i in range(2)]
+    design.rootComponent.allOccurrences = Collection(occurrences)
+    return [OccurrenceFace(back, occ) for occ in occurrences]
+
+
+@pytest.mark.parametrize('selection', ['face', 'body', 'native', 'duplicate', 'different-faces'])
+def test_group_subset_of_repeated_component_refuses_before_writes(monkeypatch, send_module, selection):
+    app, design, _, _, back = document(monkeypatch, send_module)
+    first, second = repeated_component(design, back)
+    selected = [first]
+    if selection == 'body':
+        selected = [types.SimpleNamespace(faces=Collection([first]), assemblyContext=first.assemblyContext)]
+    elif selection == 'native':
+        selected = [back]
+    elif selection == 'duplicate':
+        selected = [first, OccurrenceFace(back, first.assemblyContext)]
+    elif selection == 'different-faces':
+        other = AppearanceFace(back.inherited)
+        other.body = back.body
+        selected.append(OccurrenceFace(other, second.assemblyContext))
+    calls = []
+    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda *_a: calls.append(1))
+    with pytest.raises(send_module.wglink_core.WgLinkError) as exc:
+        send_module.paint_surface_group(app, design, selected, 'back')
+    assert str(exc.value) == ('This face belongs to a component used 2 times; '
+                              'make it unique (Make Independent) or select all instances')
+    assert first.appearance is second.appearance is back.inherited
+    assert not back.attributes.values and not calls
+
+
+@pytest.mark.parametrize('all_instances', [False, True])
+def test_group_unique_or_explicit_all_instances_paints_measures_and_clears(monkeypatch, send_module, all_instances):
+    app, design, _, _, back = document(monkeypatch, send_module)
+    proxies = repeated_component(design, back)
+    if not all_instances:
+        # Make Independent leaves only one occurrence referencing this component.
+        design.rootComponent.allOccurrences.pop()
+        proxies = proxies[:1]
+    cyan = types.SimpleNamespace(name='WGMESH_back')
+    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda *_a: cyan)
+    selections = [types.SimpleNamespace(faces=Collection([p]), assemblyContext=p.assemblyContext)
+                  for p in proxies]
+    send_module.paint_surface_group(app, design, selections, 'back')
+    assert all(p.appearance is cyan for p in proxies)
+    send_module.save_mesh_settings(design, fixture_mesh())
+    exported = [types.SimpleNamespace(name=f'cabinet:{i}', faces=Collection([p]))
+                for i, p in enumerate(proxies)]
+    snapshot = send_module._mesh_snapshot(design, [], exported, set())
+    observed = snapshot['surface_groups'][0]['observed']
+    assert observed['face_count'] == len(proxies)
+    assert observed['total_area_mm2'] == len(proxies) * 10000
+    if all_instances:
+        with pytest.raises(send_module.wglink_core.WgLinkError, match='used 2 times'):
+            send_module.paint_surface_group(app, design, proxies[:1], None)
+        assert all(p.appearance is cyan for p in proxies)
+    send_module.paint_surface_group(app, design, selections, None)
+    assert back.override is None and not back.attributes.values
 
 
 @pytest.mark.parametrize('kind', ['empty', 'unknown', 'linked-source'])

@@ -305,18 +305,23 @@ def plan_surface_group_assignment(
 
 
 def apply_face_appearance_plan(
-    faces: Sequence[object], plan: SourcePlan, named_appearance: Callable[[str], object]
+    faces: Sequence[object], plan: SourcePlan, named_appearance: Callable[[str], object],
+    *, write_appearance: Callable[[object, object], None] | None = None,
 ) -> None:
     """One paint/clear writer for sources and mesh groups, on the main thread.
 
-    Clearing a face override with None restores the body's appearance.
+    The optional writer preserves/restores group overrides at the Fusion boundary.
+    By default, clearing a face override with None restores the body's appearance.
     ``named_appearance`` is the existing Fusion library/copy resolver.
     """
     appearance = named_appearance(plan.appearance_name) if plan.paint else None
     for indices, value, action in ((plan.paint, appearance, "paint"), (plan.clear, None, "clear")):
         for index in indices:
             try:
-                faces[index].appearance = value
+                if write_appearance is None:
+                    faces[index].appearance = value
+                else:
+                    write_appearance(faces[index], value)
             except Exception as exc:
                 raise AuthorError(f"Could not {action} the managed appearance on a selected face: {exc}.") from exc
 
