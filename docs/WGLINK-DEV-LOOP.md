@@ -1,6 +1,6 @@
-# Validating a WGLink change without a release
+# Validating a Waveguide Generator change without a release
 
-WGLink reaches Fusion as a copy that Waveguide Generator installs from a pinned
+Waveguide Generator reaches Fusion as a copy that Waveguide Generator installs from a pinned
 commit. That is right for users and wrong for development: proving a one-line
 change means push the add-in, bump WG's pin, build the package, install it and
 restart Fusion — minutes of round trip for an edit that took a second, and
@@ -23,7 +23,7 @@ python scripts/dev_sync_wglink.py --status
 `--status` compares the installed file hash with this checkout and prints the
 commit reported by the running add-in, when Fusion has published status. Check
 that the installed hash matches and that the running commit is the new commit
-after restarting WGLink. With automatic coordination off, status is published
+after restarting Waveguide Generator. With automatic coordination off, status is published
 at startup and after commands; there is no periodic tick. `--watch` re-syncs
 on every save.
 
@@ -50,13 +50,13 @@ Insert, Update, WG handoffs and return requests require advertised
 `fusionRequestDelivery >= 3` under capability schema 1. Send and Solve also
 require `solveCommandDelivery >= 4`. Test both the older-version refusal and
 Fusion-bound delivery with WG's request consumer off; product version strings are ignored.
-WGLink is version 0.3.1; WG's package pin must use the same `addinVersion`.
+The Waveguide Generator add-in is version 0.3.1; WG's package pin must use the same `addinVersion`.
 WG's R-2 test-loader and provenance
 changes are listed in the implementation guide's packaged-pair reference table.
 
 ## Reading file status
 
-WGLink exchanges requests and acknowledgements through files; there is no HTTP
+Waveguide Generator exchanges requests and acknowledgements through files; there is no HTTP
 session to restart or inspect.
 
 With `automatic_coordination` explicitly set to `true`, the add-in republishes
@@ -91,7 +91,7 @@ things the tick did:
 | `cached` | nothing moved — the tick was free |
 | `deferred` | it moved, but the last measurement was expensive enough that another one is not due yet |
 | `unavailable` | a measurement is not due yet *and* the cached one does not describe this document, or is older than the sixty-second ceiling — so the tick publishes no signature and no fingerprints rather than another document's, or a stale one |
-| `not-linked` | the active document contains no WGLink records, so the tick deliberately does no export-scope walk or geometry measurement |
+| `not-linked` | the active document contains no Waveguide Generator records, so the tick deliberately does no export-scope walk or geometry measurement |
 
 A healthy idle document reads `cached` with `geometry_state_ms` near zero. A
 run of `measured` ticks at hundreds of milliseconds on a document nobody is

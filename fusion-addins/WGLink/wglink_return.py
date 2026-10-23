@@ -19,7 +19,7 @@ if __package__:
 else:
     import wglink_protocol
 
-MANAGE_DROPDOWN_NAME = "Manage WG Link…"
+MANAGE_DROPDOWN_NAME = "Manage Link…"
 SCOPE_REASON_UNCLASSIFIED_VISIBLE_SURFACE = "unclassified_visible_surface"
 
 SUPPORTED_RETURN_FEATURES = wglink_protocol.SUPPORTED_RETURN_FEATURES
@@ -544,12 +544,12 @@ def plan_export_scope(
                         candidate,
                         index,
                         reason=(
-                            f"WGLink helper body {name!r} is left out of the return "
+                            f"Waveguide Generator helper body {name!r} is left out of the return "
                             "inventory but is still visible, and Fusion's STEP export "
                             "writes every visible body of the exported component, so "
                             "it would reach the solver as a second radiating surface; "
                             "hide the body itself in the Fusion browser and send "
-                            "again, or run Insert again to have WGLink hide it. "
+                            "again, or run Insert again to have the Waveguide Generator add-in hide it. "
                             "Hiding a folder that contains it will not work: Autodesk "
                             "documents that objects invisible only because their group "
                             "is hidden are exported as if they were visible"
@@ -561,7 +561,7 @@ def plan_export_scope(
                 candidate,
                 index,
                 kind="wglink_helper",
-                reason="WGLink-managed helpers are excluded because the final body carries the solve exterior",
+                reason="Waveguide Generator-managed helpers are excluded because the final body carries the solve exterior",
                 severity="info",
             )
             skipped.append((record, candidate))
@@ -629,7 +629,7 @@ def plan_export_scope(
                             "visible surface body is declared as an exterior shell "
                             "and is included"
                             if declared_shell
-                            else "visible WGLink-managed surface body is included"
+                            else "visible Waveguide Generator-managed surface body is included"
                         )
                         + external_note
                     ),

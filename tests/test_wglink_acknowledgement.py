@@ -130,7 +130,7 @@ def test_refused_shows_wg_reason_verbatim(monkeypatch, tmp_path: Path, reason: s
     # A conflict refusal carries digest null, like the others' refusals.
     _write_ack(fixture.ipc, request_id, _ack_payload(request_id, "refused", reason))
 
-    assert _tick(fixture) == ["WGLink request refused"]
+    assert _tick(fixture) == ["Waveguide Generator request refused"]
 
     assert fixture.ui.messages[-1][1] == reason
     assert fixture.module._recent_outcomes[-1]["outcome"] == "refused"
@@ -166,7 +166,7 @@ def test_no_ack_after_the_wait_is_taken_not_confirmed(monkeypatch, tmp_path: Pat
     _claim(fixture, request_id)
     monkeypatch.setattr(fixture.module.wglink_inbox, "ACK_WAIT_SECONDS", 0.0)
 
-    assert _tick(fixture) == ["WGLink request not confirmed"]
+    assert _tick(fixture) == ["Waveguide Generator request not confirmed"]
 
     text = fixture.ui.messages[-1][1].lower()
     assert "took the request but has not confirmed" in text and "cad link panel" in text
@@ -181,7 +181,7 @@ def test_a_request_still_in_the_inbox_after_a_minute_is_the_not_picked_up_notice
     fixture, request_id = _acknowledging(monkeypatch, tmp_path, "WGLink_ack_untaken")
     monkeypatch.setattr(fixture.module.wglink_inbox, "SOLVE_PICKUP_NOTICE_SECONDS", 0.0)
 
-    assert _tick(fixture) == ["WGLink request waiting"]
+    assert _tick(fixture) == ["Waveguide Generator request waiting"]
     assert fixture.module._recent_outcomes[-1]["outcome"] == "notTaken"
     assert len(_inbox(fixture.ipc)) == 1
 
@@ -264,7 +264,7 @@ def test_without_the_capability_the_legacy_path_stays_and_never_says_solving(
     assert f"(request {payload['operationId'][:8]})" in text
     [(delay, _function)] = fixture.timers
     assert delay == wglink_inbox.SOLVE_PICKUP_NOTICE_SECONDS
-    assert _tick(fixture) == ["WGLink request waiting"]  # today's not-taken notice only
+    assert _tick(fixture) == ["Waveguide Generator request waiting"]  # today's not-taken notice only
 
 
 # -- packaged pair: files written by WG's real write_acknowledgement() ------------
@@ -330,5 +330,5 @@ def test_a_packaged_ack_drives_the_ui(monkeypatch, tmp_path: Path, name: str) ->
     if PACKAGED[name] == "accepted":
         assert titles == [] and len(logged) == 1
     else:
-        assert titles == ["WGLink request refused"]
+        assert titles == ["Waveguide Generator request refused"]
         assert fixture.ui.messages[-1][1] == payload["reason"]

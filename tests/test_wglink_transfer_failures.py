@@ -196,7 +196,7 @@ def _paused(monkeypatch, fixture) -> list[float]:
     return pauses
 
 
-_UNCONFIRMED = "WGLink request unconfirmed"
+_UNCONFIRMED = "Waveguide Generator request unconfirmed"
 
 
 def _assert_unconfirmed(fixture, request_id: str) -> None:
@@ -271,7 +271,7 @@ def test_a_rename_that_landed_and_raised_is_not_reported_as_not_asked(
     assert payload["kind"] == SOLVE and payload["returnId"] == "wgr_1"
     assert _staging(fixture.ipc / ".wg-solve-requests") == []
     title, text = fixture.ui.messages[-1]
-    assert title == "WGLink" and "Sent to WG (request" in text and "solving" not in text
+    assert title == "Waveguide Generator" and "Sent to WG (request" in text and "solving" not in text
     assert _outcome(fixture) == "requested"
     assert len(fixture.timers) == 1
 
@@ -318,7 +318,7 @@ def test_a_known_failure_on_every_attempt_is_still_a_visible_refusal(
     _run(fixture.module, "send")
 
     title, text = fixture.ui.messages[-1]
-    assert title == "WGLink refused"
+    assert title == "Waveguide Generator refused"
     assert "was not asked to take it" in text
     assert _outcome(fixture) == "writeFailed"
     assert fixture.timers == []
@@ -395,7 +395,7 @@ def test_a_write_that_fails_every_time_is_refused_and_leaves_nothing(
     _run(fixture.module, "solve")
 
     assert _names(fixture.ipc / ".wg-solve-requests") == []
-    assert fixture.ui.messages[-1][0] == "WGLink refused"
+    assert fixture.ui.messages[-1][0] == "Waveguide Generator refused"
     assert _outcome(fixture) == "writeFailed"
 
 
@@ -592,7 +592,7 @@ def test_the_command_says_sent_only_for_its_own_complete_request(
     _run(fixture.module, operation)
 
     if variant == "control: complete":
-        assert fixture.ui.messages[-1][0] == "WGLink"
+        assert fixture.ui.messages[-1][0] == "Waveguide Generator"
         assert "Sent to Waveguide Generator" in fixture.ui.messages[-1][1]
         assert _outcome(fixture) == "requested"
     else:
@@ -788,7 +788,7 @@ def test_control_a_capability_refusal_with_nothing_attempted_is_still_refused(
     _run(fixture.module, "send")
 
     title, text = fixture.ui.messages[-1]
-    assert title == "WGLink refused" and "not collecting requests from Fusion" in text
+    assert title == "Waveguide Generator refused" and "not collecting requests from Fusion" in text
     assert fixture.module._request_trace is None  # Refused before planning a request.
     assert fixture.timers == []
 
@@ -952,7 +952,7 @@ def _start(monkeypatch, tmp_path: Path, name: str, *, coordination: bool | None 
     return types.SimpleNamespace(module=module, ui=ui, app=app, ipc=ipc, timers=timers)
 
 
-_EARLIER = "WGLink earlier requests waiting"
+_EARLIER = "Waveguide Generator earlier requests waiting"
 
 
 @pytest.mark.parametrize("coordination", [False, None], ids=["off", "on"])
@@ -976,7 +976,7 @@ def test_a_conversion_that_raises_is_shown_and_start_up_carries_on(
         assert "the outbox index is unreadable" in text and "Nothing was dropped" in text
         # A failed migration never stops the panel from loading.
         assert module._owned is True
-        assert "WGLink start error" not in titles
+        assert "Waveguide Generator start error" not in titles
         assert sorted(item["operationId"] for item in _outbox(fixture.ipc)) == ["snap-1", "solve-1"]
     finally:
         module.stop(None)
@@ -1031,8 +1031,8 @@ def test_items_start_up_could_not_convert_are_reported_and_converted_next_start_
 # -- start-up: requests a restart left waiting (brief 5) ------------------------------
 
 
-_WAITING = "WGLink request waiting"
-_CAUSES = ("closed", "older than this WGLink add-in", "not collecting requests")
+_WAITING = "Waveguide Generator request waiting"
+_CAUSES = ("closed", "older than this Waveguide Generator add-in", "not collecting requests")
 
 
 def _leave_request(ipc: Path, command_id: str, *, kind: str = SNAPSHOT, age: float = 3600.0) -> Path:

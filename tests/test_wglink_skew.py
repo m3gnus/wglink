@@ -47,7 +47,7 @@ def test_incompatible_wg_refuses_before_export_picker_or_mutation(
     assert fixture.timers == []
     assert fixture.ui.progress_dialogs == []
     title, text = fixture.ui.messages[-1]
-    assert title == "WGLink refused" and "Update Waveguide Generator" in text
+    assert title == "Waveguide Generator refused" and "Update Waveguide Generator" in text
 
 
 @pytest.mark.parametrize("operation", ["send", "solve", "insert", "update"])
@@ -89,7 +89,7 @@ def test_unavailable_wg_consumer_requires_starting_wg_and_checking_folder(
 
     assert calls == [] and _inbox(fixture.ipc) == []
     title, text = fixture.ui.messages[-1]
-    assert title == "WGLink refused"
+    assert title == "Waveguide Generator refused"
     assert "not collecting requests from Fusion" in text
     assert "Start Waveguide Generator" in text and "check its CAD Link folder" in text
     assert "Update Waveguide Generator" not in text
@@ -112,7 +112,7 @@ def test_manual_insert_and_update_do_not_require_wgs_solve_consumer(
     _run(module, operation)
 
     assert calls == [operation]
-    assert fixture.ui.messages[-1] == ("WGLink", "Applied")
+    assert fixture.ui.messages[-1] == ("Waveguide Generator", "Applied")
     assert _inbox(fixture.ipc) == [] and _outbox(fixture.ipc) == []
 
 
@@ -276,4 +276,4 @@ def test_file_request_errors_name_the_current_service(monkeypatch, tmp_path: Pat
 
     module.WatchEventHandler().notify(None)
 
-    assert reported == [("Servicing WG file requests", "WGLink file request error", "request read failed")]
+    assert reported == [("Servicing WG file requests", "Waveguide Generator file request error", "request read failed")]

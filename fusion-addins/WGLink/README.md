@@ -1,6 +1,6 @@
-# WGLink for Fusion
+# Waveguide Generator for Fusion
 
-WGLink inserts a Waveguide Generator `.wglink` bundle as native, managed
+Waveguide Generator inserts a Waveguide Generator `.wglink` bundle as native, managed
 Fusion history. It supports the two solid WG export modes:
 
 - `enclosure`: the realized enclosure block with one all-edge treatment, minus
@@ -11,7 +11,7 @@ Fusion history. It supports the two solid WG export modes:
 The add-in is licensed under the repository's AGPL-3.0 license. Its manifest
 author is `m3gnus`.
 
-## What WGLink manages
+## What Waveguide Generator manages
 
 Each Assembly insertion owns one movable wrapper occurrence. The wrapper holds
 the WG parameters, datum planes and axis, stable throat and mouth interface
@@ -27,10 +27,10 @@ all twelve original edges at once lets it construct the three-way corner
 mitres; no feature runs over faces made by an earlier chamfer.
 
 Every browser object created by Insert has a deliberate user-facing name.
-Bodies use `WGLink enclosure`, `WGLink freestanding waveguide`, and `WGLink
-waveguide cut tool`; the freestanding construction bodies are named `WGLink
-waveguide surface`, `WGLink throat patch body`, and `WGLink stitched waveguide
-body` while they exist. These names are presentation only. WGLink continues to
+Bodies use `Waveguide Generator enclosure`, `Waveguide Generator freestanding waveguide`, and `Waveguide Generator
+waveguide cut tool`; the freestanding construction bodies are named `Waveguide Generator
+waveguide surface`, `Waveguide Generator throat patch body`, and `Waveguide Generator stitched waveguide
+body` while they exist. These names are presentation only. Waveguide Generator continues to
 resolve ownership and topology exclusively through attributes and entity
 tokens, never names.
 
@@ -40,7 +40,7 @@ a root link cannot be moved or jointed as a unit. Start with an Assembly when
 that behavior matters, or disable `allow_root_fallback` in a head-less call to
 make Insert refuse instead.
 
-WGLink pushes manifest parameters whose role is `interface`. Enclosure links
+Waveguide Generator pushes manifest parameters whose role is `interface`. Enclosure links
 also own `<parameter_prefix>mouth_overshoot` (5 mm by default), which drives the
 join extrude that carries the cavity through the baffle. Existing parameters
 are updated by assigning their expression; they are never deleted and
@@ -75,7 +75,7 @@ labelling it `original`.
 ## Commands
 
 The panel promotes the three everyday commands, **Set WG Source…**, **Solve in
-WG** and **Send to WG**. **Manage WG Link…** contains **Declare Body…**,
+WG** and **Send to WG**. **Manage Link…** contains **Declare Body…**,
 **Insert**, **Update**, and **Detach**.
 Insert and Update are ordinarily automatic — WG's *Send to CAD* publishes a
 handoff the add-in applies on its own — so the dropdown is maintenance,
@@ -144,12 +144,12 @@ Relink remain full head-less APIs but are not panel commands.
 - **Insert** offers the bundles already sitting in Waveguide Generator's
   workspace, validates the chosen one before Fusion mutation, and builds the
   full WG viewport model. **Send to CAD** in Waveguide Generator also publishes
-  a one-shot handoff beside the completed bundle: WGLink inserts a new link into
+  a one-shot handoff beside the completed bundle: Waveguide Generator inserts a new link into
   the active Fusion design automatically, including after a cold start. If that
   bundle is already linked, WG must send an explicit Update handoff for its
   exact target; an Insert refuses the duplicate. Exports are no longer watched. For assemblies
   containing repeated placements of one design, WG includes the chosen
-  `expectedInstanceId` beside the expected document id. WGLink updates only the
+  `expectedInstanceId` beside the expected document id. Waveguide Generator updates only the
   uniquely matching managed instance. A missing selection for repeated links,
   a stale id, a duplicated id, or an instance target without its document target
   leaves the handoff unacknowledged and changes no geometry. Legacy and current
@@ -164,7 +164,7 @@ Relink remain full head-less APIs but are not panel commands.
   window before the assignment in which a process it started would escape,
   and where the job cannot be created or assigned the timeout kills only the
   resampler itself, as before. Either way the wait for its output is bounded,
-  and WGLink never signals a process it did not start. Before its first mutation it also verifies that
+  and Waveguide Generator never signals a process it did not start. Before its first mutation it also verifies that
   the tagged throat face remains in the component-local link frame. It creates
   and deletes no document features. The locator must have exactly the immutable
   schema keys, a positive integer sequence, a confined non-symlink export
@@ -182,7 +182,7 @@ Relink remain full head-less APIs but are not panel commands.
   publishes the exact body entity tokens, assembly-transform hash, source ids,
   and drive-channel ids that its next validated return would use. Those fields
   are optional: if Fusion cannot resolve a stable entity token, strict
-  transform, or complete source contract, WGLink omits that identity instead
+  transform, or complete source contract, Waveguide Generator omits that identity instead
   of inventing a name or defaulting a transform.
 - **Send to WG** observes the root or one occurrence subtree without changing
   the document, applies the explicit return-scope policy, and writes an atomic,
@@ -203,7 +203,7 @@ Relink remain full head-less APIs but are not panel commands.
 - The head-less **`relink` API** records a manually moved or renamed bundle
   path outside the current WG workspace. The design id must match unless the
   caller explicitly forces the operation.
-- **Detach** removes `WGLink` attributes only. Bodies, sketches, features, and
+- **Detach** removes Waveguide Generator link data only (stored in `WGLink` attributes). Bodies, sketches, features, and
   appearances remain in the document. The panel command requires confirmation:
   identity removal is permanent, and inserting a fresh WG copy is the only way
   to obtain a managed link again.
@@ -292,8 +292,8 @@ regions on). Clear the declarations to send without them."
 
 ## The workspace is WG's setting
 
-The WGLink folder is chosen once, under **Settings → CAD Link** in Waveguide
-Generator. It is separate from WG's run-output folder. WGLink reads it from
+The CAD Link folder is chosen once, under **Settings → CAD Link** in Waveguide
+Generator. It is separate from WG's run-output folder. Waveguide Generator reads it from
 WG's own `cadlink_settings.json` — resolved the way WG resolves it,
 `WG2_DATA_DIR` included — and lists the bundles in `<workspace>/wglink` in the
 Insert dropdown, newest first, labelled by design name and export sequence.
@@ -311,7 +311,7 @@ behaves as it always did.
 
 Commands and requests cross through WG's machine-local IPC folder,
 `<WG data folder>/ipc/wglink`. The contract is WG's
-`docs/architecture/CAD-OPERATIONS.md`; WGLink implements the add-in's half.
+`docs/architecture/CAD-OPERATIONS.md`; Waveguide Generator implements the add-in's half.
 
 - **Capability gate before export or mutation.** Insert, Update, WG handoffs
   and return requests require a schema-1 `wg-capabilities.json` advertising
@@ -332,7 +332,7 @@ Commands and requests cross through WG's machine-local IPC folder,
   advertising only inbox 3 is refused for both commands. A WG that advertises
   nothing is "not collecting requests", and both refuse. The outcome is said at
   command time: "Written to WG's inbox (request …)" when WG advertises
-  `solveAcknowledgement` (then WGLink looks for WG's
+  `solveAcknowledgement` (then Waveguide Generator looks for WG's
   `.wg-solve-acks/<requestId>.json` every few seconds and says "WG accepted the
   request", WG's own refusal reason, or after two minutes with the file gone and
   no acknowledgement "taken but not confirmed" -- never "solving"), "Sent to
@@ -347,7 +347,7 @@ Commands and requests cross through WG's machine-local IPC folder,
   themselves have no deadline). If none succeeds, the outcome depends on how
   they failed. When no attempt reached the rename, nothing was written and
   the command is refused ("not asked"). When a rename raised, the file may
-  still have landed -- and WG may take it at once -- so WGLink reads the inbox
+  still have landed -- and WG may take it at once -- so Waveguide Generator reads the inbox
   once more: a file equal to the planned request, field for field and type for
   type, is "Sent"; anything else is **Unconfirmed** -- the short request id,
   "WG may already have it", and a pointer to WG's CAD Link panel before
@@ -357,9 +357,9 @@ Commands and requests cross through WG's machine-local IPC folder,
   name.
 - **The pickup check.** A minute after a Send or Solve, a one-shot timer asks
   on the main thread whether the request file is still there, and only that;
-  if it is, WGLink says once that WG is closed, older than the add-in, or not
+  if it is, Waveguide Generator says once that WG is closed, older than the add-in, or not
   collecting requests. It is counted under the command that wrote the file.
-  The timer does not survive a restart, so at start-up WGLink looks once at
+  The timer does not survive a restart, so at start-up Waveguide Generator looks once at
   the inbox for its own request files WG has not taken -- reading nothing in
   Fusion, counted under `startup` -- and says once, with the same three causes,
   how many are waiting. Files already older than a minute are checked at once;
@@ -381,7 +381,7 @@ Commands and requests cross through WG's machine-local IPC folder,
   has a fresh `uuid4` id and its own file. Return bundle names are reserved
   with an exclusive create, so two processes never publish over each other.
   Windows answers that create with a permission error while another process
-  holds the name or has just deleted it; WGLink retries that name for about a
+  holds the name or has just deleted it; Waveguide Generator retries that name for about a
   tenth of a second, then takes the next name, and after eight held names in a
   row refuses visibly. On macOS and Linux a permission error is the folder's
   and is refused at once.
@@ -389,14 +389,14 @@ Commands and requests cross through WG's machine-local IPC folder,
   so two Fusion processes overwrite each other's status for WG. Panel ownership
   is elected within each Fusion process.
 - **WG's requests.** Return requests and handoffs arrive as
-  `.fusion-return-requests/<id>.json` and `.fusion-handoffs/<id>.json`. WGLink
+  `.fusion-return-requests/<id>.json` and `.fusion-handoffs/<id>.json`. Waveguide Generator
   takes them in `deliverySequence` order, claims each by renaming it to a
   hidden name, runs it at most once and deletes the claim, also when the
   request is refused.
 - **Exact targets.** An update names the Fusion document, the exact instance
   and the model state WG measured. A handoff that names no instance is an
   insert, and it is refused if the active document already links that design:
-  WGLink never picks "the one matching link" for WG. A return request names
+  Waveguide Generator never picks "the one matching link" for WG. A return request names
   its document, instance and baseline too.
 - **The target, immediately before mutating.** Update and Insert take a
   precondition and run it after their last read and before their first write:
@@ -419,13 +419,13 @@ Commands and requests cross through WG's machine-local IPC folder,
 - **Insert destination and expiry.** A new WG can bind an insert to the active
   document with `destination: {kind: "document", value: <document id>}`, or to a
   new document with `{kind: "new_document", value: <request id>}` when none is
-  active. WGLink consumes and refuses a different destination, and consumes an
+  active. Waveguide Generator consumes and refuses a different destination, and consumes an
   insert more than 30 minutes after `requestedAt` as `expired`, without touching
   the document. A request with no `destination` keeps the version-3 behaviour for
   a pinned older WG.
 - **Supersession.** An update that has not started yet is dropped when a newer
   one for the same document and instance arrives; only the newest runs. WG
-  withdraws the older file itself; WGLink covers a file WG could not remove.
+  withdraws the older file itself; Waveguide Generator covers a file WG could not remove.
   The heartbeat's `diagnostics.recentOutcomes` names the dropped request with
   the outcome `superseded`.
 - **Leftover claims.** The first tick with an active document settles every
@@ -438,7 +438,7 @@ Commands and requests cross through WG's machine-local IPC folder,
   open none of them can be established, and reporting "never started" would
   cancel an operation that may have applied or may need recovery. Such a claim
   waits — in this session or a later one — until its document is active, and
-  WGLink logs that the target document must be opened.
+  Waveguide Generator logs that the target document must be opened.
   *Target document unavailable* and *operation never started* stay different
   things.
 - **Correlation.** The heartbeat's `diagnostics.lastRequest` names the last
@@ -483,7 +483,7 @@ exact-target handoff without one. The tokens are what an age ceiling used to
 approximate, and they are exact.
 
 A measurement is asked for only when a linked document has no observation worth
-publishing, or when a WGLink command the user completed may have moved one —
+publishing, or when a Waveguide Generator command the user completed may have moved one —
 and by every guarded operation WG asks for, which measures inline. "Has no
 observation" rather than "has just changed" is deliberate: a request can be
 spent without answering anything (the document stopped being nameable, its
@@ -496,14 +496,14 @@ rest of the session. An observation stops the asking entirely. A document whose
 observation is merely *stale* asks for nothing.
 
 Each request names the document it is about, and is dropped without measuring
-if that document is no longer active, cannot be named, or has no WGLink links.
+if that document is no longer active, cannot be named, or has no Waveguide Generator links.
 At most one refresh is pending per add-in instance — a second request for the
 same document is dropped, and one for a different document replaces it, so the
 live question is never stuck behind a dead one. It is paid for on the next
 tick, the only main thread the Fusion API allows.
 
 A guarded update or return measures inline and refuses a document that has
-moved or that WGLink cannot read, so a stale published token can cost a refusal
+moved or that the Waveguide Generator add-in cannot read, so a stale published token can cost a refusal
 but never an overwrite; that refusal refreshes the cache, so the next heartbeat
 carries the current state.
 
@@ -557,11 +557,11 @@ Admission never retries another launcher or data folder.
 ### Cold start before WG's first launch
 
 A valid capabilities launcher takes precedence. If that advertisement is missing
-or invalid, including when the IPC folder does not exist yet, WGLink falls back
+or invalid, including when the IPC folder does not exist yet, Waveguide Generator falls back
 to the WG that installed this add-in: `wglink_install.json` already records the
 bundle's `waveguideGeneratorRoot`. Its unchanged marker schema supplies the
 Windows or macOS installed entry. WG creates the data and IPC folders at startup;
-WGLink only reads their paths. The fresh capabilities and delivery versions are
+Waveguide Generator only reads their paths. The fresh capabilities and delivery versions are
 checked before any export or request is written.
 
 Windows requires both the installer-owned `ensure-backend-v1` marker and the
@@ -630,14 +630,14 @@ The builder itself needs no code change; set `addinVersion` to 0.3.1.
 
 ## Automatic coordination, and switching it on
 
-WGLink runs two engines that act without a user command: the four-second
+Waveguide Generator runs two engines that act without a user command: the four-second
 watch tick and owner-candidate promotion. Together they resolve every managed link
 on a timer, publish status every tick, apply WG's handoffs and return requests,
 from explicit requests. Exports are no longer watched and no newer-export
 prompt is offered. That is **automatic coordination**, and it is off by
 default.
 
-The owner can switch it on in WGLink's own settings file,
+The owner can switch it on in the Waveguide Generator add-in's own settings file,
 `~/.hornlab/WGLink/settings.json` (Fusion does not inherit a shell, so this is
 not an environment variable):
 
@@ -659,7 +659,7 @@ change it. A missing or invalid value leaves coordination off; only a JSON
 - interrupted claims are settled once at start-up, read-only and never re-run.
   One whose document is not open, or whose links cannot be read, is kept and
   settled after a later command once it can be;
-- a follow-up delivered while another WGLink command holds the main thread
+- a follow-up delivered while another Waveguide Generator command holds the main thread
   waits, and that command's completion runs it.
 
 The heartbeat's `diagnostics.activation` states the setting, and
@@ -683,13 +683,13 @@ no status claiming it has no links is published.
 
 ## Duplicate-registration ownership and recovery
 
-Fusion may load several registered WGLink paths into one Python process. Each
+Fusion may load several registered Waveguide Generator paths into one Python process. Each
 entry point now loads **all** of its executable `wglink_*` helpers beneath a
 registration-unique package name; no registration borrows a helper module that
 another checkout put in Python's ordinary import cache.
 
 One deliberately shared, data-only broker elects the registration allowed to
-own WGLink's machine-local IPC in that Fusion process. The model is a renewable
+own the Waveguide Generator add-in's machine-local IPC in that Fusion process. The model is a renewable
 lease with two phases:
 
 1. A registration atomically claims an absent or expired lease as
@@ -764,7 +764,7 @@ when its selected scope contains several linked instances.
 ## Update atomicity and recovery
 
 Fusion offers no transaction covering parameter edits and sketch fit-point
-moves. WGLink validates identity, build mode, bundle content, resampler output,
+moves. Waveguide Generator validates identity, build mode, bundle content, resampler output,
 ring counts, points per ring, interface sketches, and rollback availability
 before the first mutation. It also compares the tagged throat face centre with
 `(0, vertical_offset)` and its plane with the stored throat z. If a body Move
@@ -819,7 +819,7 @@ The same applies to faces of the managed body. In the UI this is automatic —
 clicking the datum inside the occurrence picks the proxy for you.
 
 Fusion grounds the first component created in a design to its parent. On Insert,
-WGLink clears that flag from its wrapper so the component can be placed and
+Waveguide Generator clears that flag from its wrapper so the component can be placed and
 jointed. For a document built before this change, right-click the wrapper in the
 browser and choose **Unground From Parent**, or re-run Insert.
 
@@ -851,7 +851,7 @@ volume still require the Fusion verification fixture.
 **Not verified:** §5.6's moved-wrapper case. Setting `occurrence.transform2`
 from a script reads the new matrix straight back, but after
 `design.snapshots.add()` the occurrence is at identity again and nothing has
-moved — reproduced on a plain component with no WGLink involvement, so it is
+moved — reproduced on a plain component with no Waveguide Generator involvement, so it is
 Fusion's scripted-move behaviour rather than the add-in's. Dragging the wrapper
 in the UI and pressing Update is therefore still an unchecked path.
 
@@ -873,7 +873,7 @@ the scientific interpolation stack. A copied install can still work when
 `HORNLAB_FUSION_ADDIN_REPO` points to the checkout, or when a head-less caller
 passes `repo_root` and `python_path` options.
 
-Restart Fusion and use the WGLink toolbar panel under **Utilities**. The
+Restart Fusion and use the Waveguide Generator toolbar panel under **Utilities**. The
 manifest sets `runOnStartup` to `true`: start-up only registers a panel and its
 command definitions, and every piece of geometry work happens when a command is
 executed, so there is nothing heavy to defer. Leaving it `false` meant the panel

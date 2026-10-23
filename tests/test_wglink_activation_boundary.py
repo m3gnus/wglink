@@ -836,7 +836,7 @@ def test_a_cad_link_folder_that_no_longer_exists_is_named_at_command_time(
     _command(module, "send")
 
     title, text = ui.messages[-1]
-    assert title == "WGLink refused"
+    assert title == "Waveguide Generator refused"
     assert "no longer exists" in text
     assert str(gone) in text
     assert "Settings → CAD Link" in text
@@ -1014,7 +1014,7 @@ def test_a_pickup_check_held_behind_any_busy_holder_is_re_driven_when_it_ends(
     assert module.FOLLOWUP_EVENT_ID in fired
     before = len(fixture.ui.messages)
     module._run_followups()
-    assert [title for title, _text in fixture.ui.messages[before:]] == ["WGLink request waiting"]
+    assert [title for title, _text in fixture.ui.messages[before:]] == ["Waveguide Generator request waiting"]
     assert module._followups == []
 
 
@@ -1112,7 +1112,7 @@ def test_a_refused_send_still_publishes_status_after_the_command(
     module.run(None)
     try:
         _command(module, "send")  # WG stops collecting after the export, before delivery
-        assert fixture.ui.messages[-1][0] == "WGLink refused"
+        assert fixture.ui.messages[-1][0] == "Waveguide Generator refused"
         _deliver_every_event(fixture.app)
         assert _count(module, "status_publication", "command:send") == 1
 

@@ -76,7 +76,7 @@ class DispatchReceipt:
                 if not self.cancel():
                     return  # Main claimed it while the worker checked expiry.
                 reason = ("WG startup dispatch was cancelled." if is_cancelled else
-                          "WGLink's main-thread event was not delivered before its deadline.")
+                          "The Waveguide Generator add-in's main-thread event was not delivered before its deadline.")
                 raise LauncherError(reason)
             self.received.wait(min(0.05, remaining))
 
@@ -373,7 +373,7 @@ class BackendAdmission:
                 callback: Callable, dispatch: Callable, starting: Callable | None = None) -> None:
         with self._lock:
             if self._cancelled.is_set():
-                raise LauncherError("WGLink is stopping; start WG manually.")
+                raise LauncherError("The Waveguide Generator add-in is stopping; start WG manually.")
             if self._undelivered_error is not None:
                 error, self._undelivered_error = self._undelivered_error, None
                 raise LauncherError(error)

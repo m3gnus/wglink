@@ -1,4 +1,4 @@
-# Naming a WGLink link
+# Naming a Waveguide Generator link
 
 *Investigation and recommendation, 2026-09-06.*
 
@@ -58,7 +58,7 @@ Traced, not guessed. The surprise is how little it carries.
 | Site | Use |
 |---|---|
 | `wglink_bundle.py:1340` | copies `design.name` into the stored attribute `design_name` |
-| `wglink_core.py:~530` | the Fusion parameter *comment* ("WGLink interface parameter for …") |
+| `wglink_core.py:~530` | the Fusion parameter *comment* ("Waveguide Generator interface parameter for …") |
 | `wglink_core.py:~2754` | the timeline group's name |
 | `wglink_core.py:3176` | rewritten from the bundle on every Update |
 | `wglink_core.py:~3481` | `bundle_design_name` in the Audit report |
@@ -123,9 +123,9 @@ of the document.
 
 ### 2d. One more name-derived artifact, purely cosmetic
 
-The wrapper component is named `WGLink_<slug>_<n>` (`_next_wrapper_name`,
+The wrapper component is named `Waveguide Generator <slug> <n>` (`_next_wrapper_name`,
 `wglink_core.py:2364`) — so the user's Fusion browser reads
-`WGLink_260308tritonia_m_1`. Links are resolved by the stored `instance_id`
+`Waveguide Generator 260308tritonia_m 1`. Links are resolved by the stored `instance_id`
 attribute (`_link_records` / `_resolve_link`), never by component or timeline
 name, so the user may rename it freely and nothing notices.
 
@@ -136,7 +136,7 @@ name, so the user may rename it freely and nothing notices.
 `update()` refuses outright when the incoming bundle's slug differs from the
 one the document stored (`wglink_core.py:~2932`):
 
-> WGLink parameter namespace mismatch: the document owns `…`, while the bundle
+> Waveguide Generator parameter namespace mismatch: the document owns `…`, while the bundle
 > owns `…`. Force cannot retarget the existing datum and enclosure expressions
 > to another namespace. To recover: Detach this link and delete its component,
 > then Insert the bundle …
@@ -291,7 +291,7 @@ Deliberately left alone:
   while fixing a label.
 - **The `.wglink` bundle folder name and `archive_stem`.** Frozen per lineage
   by WG. Cheap to change but pointless without a reason.
-- **The wrapper component name `WGLink_<slug>_<n>`.** Renameable by the user in
+- **The wrapper component name `Waveguide Generator <slug> <n>`.** Renameable by the user in
   Fusion already, and nothing keys on it.
 - **The WG side.** Reading `linkName` in `ParamPanel.tsx:668` is a one-line
   follow-up in `waveguide-generator`, out of scope for a single branch here.

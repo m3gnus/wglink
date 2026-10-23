@@ -1,6 +1,6 @@
-# WGLink
+# Waveguide Generator for Fusion
 
-WGLink 0.3.1 is the maintained Fusion add-in for sending Fusion geometry to Waveguide Generator (WG), solving it there, and inserting or updating native WG geometry in Fusion. The add-in lives in `fusion-addins/WGLink/`. WG's platform installers package WGLink for macOS and Windows.
+The Waveguide Generator Fusion add-in (0.3.1) is maintained for sending Fusion geometry to Waveguide Generator (WG), solving it there, and inserting or updating native WG geometry in Fusion. The add-in lives in `fusion-addins/WGLink/`. WG's platform installers package the Fusion add-in for macOS and Windows.
 
 Send, Solve, Insert/Update handoffs, acknowledgements and status exchange use files in WG's IPC folder. Send imports a snapshot; Solve also requests a solve. Each explicit command has its own request id. Exports are no longer watched: the user presses Send, or explicitly requests Insert/Update. A new export alone never prompts Fusion.
 
@@ -8,20 +8,22 @@ WG exports immutable `<export-id>.wglink/` bundles and a `<design-id>.latest.jso
 
 File delivery is split into `wglink_inbox.py` (capabilities, requests and acknowledgements), `wglink_handoff.py` (Insert/Update and return requests) and `wglink_status.py` (Fusion status). Insert, Update, WG handoffs and return requests require capability schema 1 and Fusion delivery 3. Send and Solve additionally require WG request inbox 4. Unsupported schemas or delivery versions ask for "Update Waveguide Generator"; an unavailable inbox asks you to start WG and check its CAD Link folder. See the implementation guide for the WG packaged-pair references and R-2 re-pin changes.
 
-The former WG Metal pipeline is maintained separately as a frozen fallback. It is not part of this repository or WGLink's updater.
+The former WG Metal pipeline is maintained separately as a frozen fallback. It is not part of this repository or the Waveguide Generator add-in's updater.
 
 Send and Solve can start an installed WG backend through its advertised launcher when needed, falling back to the WG that installed this add-in (`wglink_install.json`) when no valid launcher advertisement is available, including before WG's first start. Concurrent commands share startup; export and submission resume through Fusion's main-thread custom event after fresh capability and version checks. Startup errors show WG's reason before any export or request is written. With `WG2_DATA_DIR`, Fusion must inherit the same override, and a fresh installation still needs a root chosen in WG before Send can export. See the implementation guide's packaged-pair references for the launcher and backend-owner contracts.
+
+Fusion's Scripts and Add-Ins list keeps the registration name `WGLink`. The folder, manifest, stored attributes and protocol identifiers keep their names so updates and existing documents continue to work.
 
 ## Docs
 
 - [Release notes](CHANGES.md)
-- [WGLink user guide](docs/WGLINK-GUIDE.md)
-- [WGLink implementation and development guide](fusion-addins/WGLink/README.md)
-- [Naming a WGLink link](docs/WGLINK-LINK-NAMING.md)
-- [Validating a WGLink change without a release](docs/WGLINK-DEV-LOOP.md)
+- [Waveguide Generator user guide](docs/WGLINK-GUIDE.md)
+- [Waveguide Generator implementation and development guide](fusion-addins/WGLink/README.md)
+- [Naming a Waveguide Generator link](docs/WGLINK-LINK-NAMING.md)
+- [Validating a Waveguide Generator change without a release](docs/WGLINK-DEV-LOOP.md)
 - [Headless workflow status](docs/HEADLESS.md)
 
-WGLink's Send and Solve dialogs use an automatic model domain; there is no manual Model dropdown. With a current WG, explicit exports also record surviving Fusion origin-plane cut history and the Y-up/Z-up modelling orientation. Send/Solve also require WG to advertise those manifest capabilities before a return is exported.
+The Waveguide Generator add-in's Send and Solve dialogs use an automatic model domain; there is no manual Model dropdown. With a current WG, explicit exports also record surviving Fusion origin-plane cut history and the Y-up/Z-up modelling orientation. Send/Solve also require WG to advertise those manifest capabilities before a return is exported.
 
 ## FEM regions
 
@@ -49,11 +51,11 @@ python3 -m venv .venv
 .venv/bin/python scripts/install_wglink_addin.py --symlink
 ```
 
-Restart Fusion, then enable WGLink under Utilities > Add-Ins. A symlinked development install uses this repository's active environment for Update resampling. It does not depend on a sibling or legacy checkout.
+Restart Fusion, enable `WGLink` under Utilities > Add-Ins, then use the **Waveguide Generator** panel. A symlinked development install uses this repository's active environment for Update resampling. It does not depend on a sibling or legacy checkout.
 
 ## Dependencies
 
-`requirements.txt` installs WGLink's development and test dependencies into the active environment. The packaged add-in uses WG's pinned runtime.
+`requirements.txt` installs the Waveguide Generator add-in's development and test dependencies into the active environment. The packaged add-in uses WG's pinned runtime.
 
 ## Tests
 

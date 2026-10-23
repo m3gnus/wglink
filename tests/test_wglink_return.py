@@ -476,7 +476,7 @@ def test_a_stale_link_still_degrades_a_skip_that_is_otherwise_informational():
         [
             Candidate(
                 "helper",
-                "WGLink jig",
+                "Waveguide Generator jig",
                 "solid",
                 False,
                 external_reference="resolved-stale",
@@ -695,7 +695,7 @@ def test_s10_visible_brep_solid_includes_with_reason():
                 wglink_managed=True,
                 wglink_role="waveguide",
             ),
-            "WGLink-managed surface",
+            "Waveguide Generator-managed surface",
         ),
         (
             Candidate(
@@ -733,12 +733,12 @@ def test_s12_two_unclassified_visible_surfaces_refuse_with_both_remedies():
     assert [reason["reason"] for reason in reasons] == [
         "visible surface body 'horn shell' is not classified. If it is a modelling "
         "or cutting helper, hide the body itself in the browser; if it is part of "
-        "the acoustic exterior, select it and use Manage WG Link… → "
+        "the acoustic exterior, select it and use Manage Link… → "
         "Declare Body… → Exterior shell",
         "visible surface body 'mystery helper' is not classified. If it is a "
         "modelling or cutting helper, hide the body itself in the browser; if it "
         "is part of the acoustic exterior, select it and use "
-        "Manage WG Link… → Declare Body… → Exterior shell",
+        "Manage Link… → Declare Body… → Exterior shell",
     ]
     assert [reason["reason_code"] for reason in reasons] == [
         "unclassified_visible_surface",

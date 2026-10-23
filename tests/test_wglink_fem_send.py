@@ -56,9 +56,9 @@ class Occurrences(Collection):
                 return True
 
         occurrence = _Occurrence(
-            component=component("WGLink FEM export"),
+            component=component("Waveguide Generator FEM export"),
             isVisible=True,
-            name="WGLink FEM export:1",
+            name="Waveguide Generator FEM export:1",
         )
         occurrence.component.objectType = "adsk::fusion::Component"
         self.append(occurrence)
@@ -480,7 +480,7 @@ def test_cleanup_failure_refuses_send_and_names_leftover(send_module, tmp_path, 
         def fail(_occurrence):
             raise RuntimeError("copy failed")
         air.copyToComponent = fail
-    with pytest.raises(send_module.wglink_core.WgLinkError, match="temporary FEM export component 'WGLink FEM export:1'"):
+    with pytest.raises(send_module.wglink_core.WgLinkError, match="temporary FEM export component 'Waveguide Generator FEM export:1'"):
         send_module.send(app, {"output_folder": str(tmp_path), "capture_document": False, "fem_regions": True})
     assert len(root.occurrences) == 1
     assert list(tmp_path.iterdir()) == []
@@ -522,7 +522,7 @@ def test_leftover_region_copy_refuses_next_send_before_export(
     else:
         assert "Two bodies declare FEM region 'rear-chamber'" in message
         assert "Speaker/air" in message
-        assert "WGLink FEM export:1/air copy" in message
+        assert "Waveguide Generator FEM export:1/air copy" in message
         assert "delete the leftover copy" in message.lower()
     assert exports == []
     assert list(tmp_path.iterdir()) == []

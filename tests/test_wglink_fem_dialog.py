@@ -166,7 +166,7 @@ def test_backend_resume_drops_a_withdrawn_fem_capability(monkeypatch, tmp_path, 
         _finish(fixture)
         assert len(fixture.exports) == 1
         assert "fem_regions" not in fixture.exports[0]
-        assert [title for title, _text in fixture.ui.messages] == ["WGLink"]
+        assert [title for title, _text in fixture.ui.messages] == ["Waveguide Generator"]
         assert "FEM" not in fixture.ui.messages[0][1]
         assert [request["kind"] for request in _inbox(fixture.ipc)] == [
             "receive_snapshot" if operation == "send" else "prepare_and_solve"

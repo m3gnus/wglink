@@ -373,12 +373,12 @@ def _freestanding_insertion(
     """
 
     core = send_module.wglink_core
-    final = body("WGLink freestanding waveguide", solid=True, faces=[face("HF")])
+    final = body("Waveguide Generator freestanding waveguide", solid=True, faces=[face("HF")])
     core._set_attribute(final, "instance_id", instance_id)
     core._set_attribute(final, "role", "waveguide")
     core._set_attribute(final, "face_role", "HF")
     stitched = body(
-        "WGLink stitched waveguide body",
+        "Waveguide Generator stitched waveguide body",
         solid=False,
         visible=helper_visible,
         faces=list(helper_faces),
@@ -411,7 +411,7 @@ def test_managed_helper_does_not_block_the_return_it_helped_build(send_module):
     assert [reason["reason"] for reason in plan.refusals] == []
     scope = plan.manifest_scope()
     assert [record["name"] for record in scope["included"]] == [
-        "WGLink freestanding waveguide"
+        "Waveguide Generator freestanding waveguide"
     ]
     assert [record["kind"] for record in scope["skipped"]] == ["wglink_helper"]
 
@@ -430,8 +430,8 @@ def test_the_anchor_and_the_source_land_on_the_final_body_only(send_module):
         for item in walk["candidates"]
     }
 
-    assert flags["WGLink freestanding waveguide"] == (True, True, True)
-    assert flags["WGLink stitched waveguide body"] == (False, False, False)
+    assert flags["Waveguide Generator freestanding waveguide"] == (True, True, True)
+    assert flags["Waveguide Generator stitched waveguide body"] == (False, False, False)
 
 
 def test_a_helper_repeating_the_final_bodys_own_source_does_not_refuse(send_module):
@@ -459,7 +459,7 @@ def test_a_helper_repeating_the_final_bodys_own_source_does_not_refuse(send_modu
     assert [reason["reason"] for reason in plan.refusals] == []
     scope = plan.manifest_scope()
     assert [record["name"] for record in scope["included"]] == [
-        "WGLink freestanding waveguide"
+        "Waveguide Generator freestanding waveguide"
     ]
     assert [record["kind"] for record in scope["skipped"]] == ["wglink_helper"]
 
@@ -506,7 +506,7 @@ def test_a_role_only_another_helper_carries_is_still_a_loss(send_module):
         send_module, helper_faces=[face("LF")]
     )
     twin = body(
-        "WGLink throat patch", solid=False, visible=False, faces=[face("LF")]
+        "Waveguide Generator throat patch", solid=False, visible=False, faces=[face("LF")]
     )
     core._set_attribute(twin, "instance_id", "wgi-free")
     core._set_attribute(twin, "role", "cut_tool")
@@ -654,7 +654,7 @@ def test_two_visible_undeclared_surfaces_still_refuse(send_module, monkeypatch):
     assert "not classified" in report["scope_error"]
     assert "hide the body itself in the browser" in report["scope_error"]
     assert (
-        "select it and use Manage WG Link… → Declare Body… → Exterior shell"
+        "select it and use Manage Link… → Declare Body… → Exterior shell"
         in report["scope_error"]
     )
     assert report["included"] == [] and report["sources"] == []
@@ -837,8 +837,8 @@ def test_unclassified_surface_name_does_not_add_exclusion_advice(
         in report["scope_error"]
     )
     assert "exclude" not in summary.text().casefold()
-    assert "Manage WG Link… → Declare Body… → Exterior shell" in summary.text()
-    assert "Declare Body… is under Manage WG Link…." not in summary.text()
+    assert "Manage Link… → Declare Body… → Exterior shell" in summary.text()
+    assert "Declare Body… is under Manage Link…." not in summary.text()
 
 
 def test_step_body_counter_handles_solid_shell_mixed_and_ignores_names(send_module):
@@ -3378,10 +3378,10 @@ def test_the_walk_and_the_file_disagree_about_a_visible_helper(
     assert stitched.isVisible is True
     assert exported_step_bodies(design.rootComponent) == ["solid", "surface"]
     assert [record["name"] for record in plan.included] == [
-        "WGLink freestanding waveguide"
+        "Waveguide Generator freestanding waveguide"
     ]
     assert [refusal["name"] for refusal in plan.refusals] == [
-        "WGLink stitched waveguide body"
+        "Waveguide Generator stitched waveguide body"
     ]
     with pytest.raises(send_module.WgReturnError) as refusal:
         plan.manifest_scope()
@@ -3412,7 +3412,7 @@ def test_a_freestanding_insertion_names_its_leftover_shell_instead_of_counting(
         )
 
     message = str(refusal.value)
-    assert "WGLink stitched waveguide body" in message
+    assert "Waveguide Generator stitched waveguide body" in message
     assert "count gate" not in message
     assert stitched.isVisible is True
     assert not (tmp_path / "Freestanding.wgreturn").exists()

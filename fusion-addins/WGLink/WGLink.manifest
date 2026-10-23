@@ -4,7 +4,7 @@
   "id": "0cdbb593-fc6c-4615-96b5-1f05a5e18d3a",
   "author": "m3gnus",
   "description": {
-    "": "Insert, update, audit, send, relink, and detach native Waveguide Generator links."
+    "": "Waveguide Generator for Fusion: insert, update, audit, send, relink, and detach native links."
   },
   "version": "0.3.1",
   "runOnStartup": true,

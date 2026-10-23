@@ -335,12 +335,12 @@ def test_observed_parameters_normalize_lengths_to_mm_and_reject_other_units(core
 
 def test_body_naming_table_covers_every_insert_body_role(core):
     assert core.BODY_NAMES == {
-        "cut_tool": "WGLink waveguide cut tool",
-        "enclosure": "WGLink enclosure",
-        "throat_patch": "WGLink throat patch body",
-        "stitched_waveguide": "WGLink stitched waveguide body",
-        "waveguide": "WGLink freestanding waveguide",
-        "waveguide_surface": "WGLink waveguide surface",
+        "cut_tool": "Waveguide Generator waveguide cut tool",
+        "enclosure": "Waveguide Generator enclosure",
+        "throat_patch": "Waveguide Generator throat patch body",
+        "stitched_waveguide": "Waveguide Generator stitched waveguide body",
+        "waveguide": "Waveguide Generator freestanding waveguide",
+        "waveguide_surface": "Waveguide Generator waveguide surface",
     }
 
 
@@ -364,7 +364,7 @@ def test_create_wrapper_clears_ground_to_parent(core):
 
     assert created is occurrence
     assert component is occurrence.component
-    assert component.name == "WGLink_tiny_1"
+    assert component.name == "Waveguide Generator tiny 1"
     assert occurrence.isGroundToParent is False
     assert mode == "occurrence"
     assert warnings == []
@@ -1096,7 +1096,7 @@ def test_a_helper_fusion_will_not_hide_reports_failure_rather_than_success(core)
     """
 
     class ReadOnlyVisibility:
-        name = "WGLink stitched waveguide body"
+        name = "Waveguide Generator stitched waveguide body"
 
         @property
         def isVisible(self):
@@ -1307,7 +1307,7 @@ def _install_fusion_geometry(core, *, patch_hideable=True):
     features = _FakeFeatures(
         patch_hideable=patch_hideable, surface_body=surface_body
     )
-    component = _Entity("Component", "WGLink probe")
+    component = _Entity("Component", "Waveguide Generator probe")
     component.features = features
     return component, surface_body, features
 
@@ -1519,7 +1519,7 @@ def _managed_link_record(core, *, hideable=True, visible=True, instance_id="prob
     if not visible:
         shell.isVisible = False
         patch.isVisible = False
-    sketch = _Entity("Sketch", "WGLink ring 0")
+    sketch = _Entity("Sketch", "Waveguide Generator ring 0")
     core._set_attribute(sketch, "role", "ring")
 
     record = {
@@ -2221,7 +2221,7 @@ def test_a_duplicated_instance_id_still_refuses_the_resolving_entry_points(core)
     with pytest.raises(core.WgLinkError) as refusal:
         core._resolve_link(design, {"instance_id": "wg-1"})
 
-    assert "Duplicate WGLink instance id" in str(refusal.value)
+    assert "Duplicate Waveguide Generator instance id" in str(refusal.value)
 
 
 def test_targeted_detach_unmanages_one_copy_and_leaves_the_other_resolvable(core):
@@ -2298,7 +2298,7 @@ def test_detach_refuses_a_target_that_carries_none_of_the_link(core):
         _copied_component_document(core)
     )
 
-    with pytest.raises(core.WgLinkError, match="carries no WGLink attributes"):
+    with pytest.raises(core.WgLinkError, match="carries no Waveguide Generator attributes"):
         core.detach(app, {"instance_id": "wg-1", "entity_token": "tok-bracket"})
 
     with pytest.raises(core.WgLinkError, match="is not in this document"):
@@ -2824,7 +2824,7 @@ def _root_links_document(core, links, *, stamp_datums=True, record_datums=True):
     for index, (instance_id, origin_cm) in enumerate(links.items()):
         prefix = f"wg_horn{index + 1}_"
         body = _LiveEntity(
-            "BRepBody", "WGLink freestanding waveguide", f"tok-body-{instance_id}", root
+            "BRepBody", "Waveguide Generator freestanding waveguide", f"tok-body-{instance_id}", root
         )
         plane = _Datum(
             "ConstructionPlane", "WG_THROAT_PLANE", f"tok-plane-{instance_id}", root,
@@ -2940,6 +2940,31 @@ def test_link_records_keep_every_payload_on_one_parent(core):
         assert record["payload"]["parameter_prefix"] == prefix
         assert record["wrappers"] == [root]
         assert record["entities"] == [root]
+
+
+def test_legacy_wglink_stamps_resolve_without_renaming_document_objects(core):
+    root = _LiveEntity("Component", "WGLink_tiny_1", "tok-legacy-root")
+    body = _LiveEntity("BRepBody", "WGLink freestanding waveguide", "tok-legacy-body", root)
+    payload = {"instance_id": "wg-legacy", "topology": "{}", "wrapper": "root"}
+    for name, value in dict(payload, role="waveguide").items():
+        body.attributes.add("WGLink", name, value)
+    root.attributes.add("WGLink", "link_wg_legacy", json.dumps(payload))
+    attributes = root.attributes.items + body.attributes.items
+    design = types.SimpleNamespace(
+        findAttributes=lambda group, name: [
+            attribute for attribute in attributes
+            if attribute.groupName == group and (not name or attribute.name == name)
+        ]
+    )
+
+    record = core._resolve_link(design, {"instance_id": "wg-legacy"})
+
+    assert record["body"] is body
+    assert record["wrapper_component"] is root
+    assert record["payload"]["topology"] == "{}"
+    assert root.name == "WGLink_tiny_1"
+    assert body.name == "WGLink freestanding waveguide"
+    assert all(attribute.groupName == "WGLink" for attribute in attributes)
 
 
 def test_two_root_fallback_links_each_carry_their_own_axis(core, monkeypatch):

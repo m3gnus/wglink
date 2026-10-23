@@ -223,7 +223,7 @@ def test_an_overwrite_of_a_name_another_process_is_publishing_is_refused(
 
     theirs = _reserve_in_another_process(tmp_path, target, "overwrite")
 
-    assert "Another WGLink export is already publishing speaker.wgreturn" in theirs["refused"]
+    assert "Another Waveguide Generator export is already publishing speaker.wgreturn" in theirs["refused"]
 
 
 def test_control_a_released_name_is_given_to_the_next_process(send_module, tmp_path: Path) -> None:

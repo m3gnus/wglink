@@ -901,7 +901,7 @@ def test_detach_requires_confirmation_before_calling_the_core_api(
 
     assert bool(calls) is detaches
     title, text = ui.messages[0]
-    assert title == "WGLink — confirm Detach"
+    assert title == "Waveguide Generator — confirm Detach"
     assert "permanently removes" in text
     assert "Geometry stays" in text
     assert "cannot be re-attached" in text
@@ -1003,7 +1003,7 @@ def test_solve_confirms_the_handoff_and_shows_only_one_progress_dialog(
     assert dialog.events[-1][0] == "hide"
 
     title, text = ui.messages[-1]
-    assert title == "WGLink"
+    assert title == "Waveguide Generator"
     assert "Progress and results appear in Waveguide Generator." in text
 
 
@@ -1330,10 +1330,10 @@ def test_an_unexpected_failure_shows_one_line_and_logs_the_traceback(
     try:
         raise RuntimeError("Fusion refused the appearance")
     except RuntimeError as exc:
-        module._report_error("Set WG Source…", "WGLink error", exc)
+        module._report_error("Set WG Source…", "Waveguide Generator error", exc)
 
     (title, text), = ui.messages
-    assert title == "WGLink error"
+    assert title == "Waveguide Generator error"
     assert text.startswith("Set WG Source… hit an unexpected error: ")
     assert "Fusion refused the appearance" in text
     assert "Traceback" not in text
@@ -2424,12 +2424,12 @@ def test_a_cached_token_does_not_authorize_an_edited_managed_body(
     if channel == "return":
         effects = _pending_return(fixture, monkeypatch, tmp_path)
         assert module._apply_pending_return_request(snapshot) == module.HANDLED
-        expected_title = "WGLink return to WG refused"
+        expected_title = "Waveguide Generator return to WG refused"
         fragment = "changed after WG displayed its status"
     else:
         effects = _pending_update(fixture, monkeypatch, tmp_path)
         assert module._apply_pending_handoff(snapshot) == module.HANDLED
-        expected_title = "WGLink automatic update refused"
+        expected_title = "Waveguide Generator automatic update refused"
         fragment = "changed after WG prepared this update"
 
     assert effects == []
@@ -2729,11 +2729,11 @@ def test_a_guard_that_cannot_measure_refuses_the_operation(
     if channel == "return":
         effects = _pending_return(fixture, monkeypatch, tmp_path)
         assert module._apply_pending_return_request(snapshot) == module.HANDLED
-        expected_title = "WGLink return to WG refused"
+        expected_title = "Waveguide Generator return to WG refused"
     else:
         effects = _pending_update(fixture, monkeypatch, tmp_path)
         assert module._apply_pending_handoff(snapshot) == module.HANDLED
-        expected_title = "WGLink automatic update refused"
+        expected_title = "Waveguide Generator automatic update refused"
 
     assert effects == []
     assert [title for title, _text in fixture.ui.messages] == [expected_title]
@@ -3968,7 +3968,7 @@ def test_a_pending_new_bundle_is_inserted_once_and_acknowledged(
             insert(active_app, path, options)
             or {
                 "instance_id": "horn-1",
-                "wrapper": "WGLink horn",
+                "wrapper": "Waveguide Generator horn",
                 "tag": {},
                 "deviation": {},
                 "warnings": [],
@@ -4072,7 +4072,7 @@ def test_a_handoff_without_an_exact_instance_never_updates_a_linked_design(
 
     assert mutations == []
     assert not marker.exists()
-    assert [title for title, _text in ui.messages] == ["WGLink automatic insert refused"]
+    assert [title for title, _text in ui.messages] == ["Waveguide Generator automatic insert refused"]
     assert "already linked in the active Fusion document" in ui.messages[0][1]
 
 
@@ -4305,7 +4305,7 @@ def test_a_targeted_return_refuses_if_the_active_document_changed(
 
     assert sent == []
     assert ui.messages == [(
-        "WGLink return to WG refused",
+        "Waveguide Generator return to WG refused",
         "The active Fusion document changed after WG requested the model. "
         "Reopen CAD Link and try again."
         f"\n\n{module._RETURN_RETRY_HINT}",
@@ -4355,8 +4355,8 @@ def test_a_refused_return_request_is_attempted_once_until_its_id_changes(
 
     assert attempts == ["request-a", "request-b"]
     assert [title for title, _text in ui.messages] == [
-        "WGLink return to WG refused",
-        "WGLink return to WG refused",
+        "Waveguide Generator return to WG refused",
+        "Waveguide Generator return to WG refused",
     ]
 
 
@@ -4454,7 +4454,7 @@ def test_a_refused_automatic_insert_is_not_retried_every_tick(
     assert attempts == [str(bundle)]
     assert not marker.exists()
     assert ui.messages == [(
-        "WGLink automatic insert refused",
+        "Waveguide Generator automatic insert refused",
         f"bad bundle\n\n{module._HANDOFF_RETRY_HINT}",
     )]
 
@@ -4560,7 +4560,7 @@ def test_a_refused_handoff_does_not_starve_a_pending_return_request(
     # told about it exactly once -- that suppression is the correct half.
     assert not marker.exists()
     assert [title for title, _text in ui.messages] == [
-        "WGLink automatic insert refused",
+        "Waveguide Generator automatic insert refused",
     ]
 
 
@@ -4595,7 +4595,7 @@ def test_a_start_that_fails_partway_rolls_back_panel_and_lease(
 
     assert calls["n"] == 2
     assert module._owned is False
-    assert ui.messages and ui.messages[0][0] == "WGLink start error"
+    assert ui.messages and ui.messages[0][0] == "Waveguide Generator start error"
     assert panels.itemById(module.PANEL_ID) is None
     assert not [definition for definition in definitions.items.values() if definition.isValid]
     assert module._ipc_lease_snapshot()["owner"] is None
@@ -5376,7 +5376,7 @@ def test_an_update_without_a_baseline_never_changes_the_model(
     assert module._apply_pending_handoff(_shared_snapshot()) == module.HANDLED
 
     assert updated == []
-    assert [title for title, _text in ui.messages] == ["WGLink automatic update refused"]
+    assert [title for title, _text in ui.messages] == ["Waveguide Generator automatic update refused"]
     assert "model state it expects" in ui.messages[0][1]
 
 
@@ -5495,7 +5495,7 @@ def test_a_request_from_an_older_wg_is_never_run_and_asks_once_for_an_update(
     module._on_watch_tick()
 
     assert mutations == []
-    assert [title for title, _text in ui.messages] == ["WGLink cannot read this request"]
+    assert [title for title, _text in ui.messages] == ["Waveguide Generator cannot read this request"]
     assert "Update Waveguide Generator" in ui.messages[0][1]
     # The older WG's file is its own; this add-in neither runs nor deletes it.
     assert (ipc / ".fusion-handoff.json").exists()

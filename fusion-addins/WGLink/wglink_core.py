@@ -91,12 +91,12 @@ ADDIN_DIR = Path(__file__).resolve().parent
 MOUTH_OVERSHOOT_SUFFIX = "mouth_overshoot"
 LINK_FRAME_TOLERANCE_MM = 0.01
 BODY_NAMES = {
-    "cut_tool": "WGLink waveguide cut tool",
-    "enclosure": "WGLink enclosure",
-    "throat_patch": "WGLink throat patch body",
-    "stitched_waveguide": "WGLink stitched waveguide body",
-    "waveguide": "WGLink freestanding waveguide",
-    "waveguide_surface": "WGLink waveguide surface",
+    "cut_tool": "Waveguide Generator waveguide cut tool",
+    "enclosure": "Waveguide Generator enclosure",
+    "throat_patch": "Waveguide Generator throat patch body",
+    "stitched_waveguide": "Waveguide Generator stitched waveguide body",
+    "waveguide": "Waveguide Generator freestanding waveguide",
+    "waveguide_surface": "Waveguide Generator waveguide surface",
 }
 ROLE_COLOURS = {
     "HF": (255, 0, 0, 255),
@@ -176,11 +176,11 @@ def normalize_link_name(value: object) -> str:
         ord(character) < 0x20 or ord(character) == 0x7F for character in text
     ):
         raise WgLinkError(
-            "A WGLink link name must be a single line without control characters."
+            "A Waveguide Generator link name must be a single line without control characters."
         )
     if len(text) > LINK_NAME_LIMIT:
         raise WgLinkError(
-            f"A WGLink link name must be at most {LINK_NAME_LIMIT} characters; "
+            f"A Waveguide Generator link name must be at most {LINK_NAME_LIMIT} characters; "
             f"got {len(text)}."
         )
     return text
@@ -232,7 +232,7 @@ def _design(app: adsk.core.Application) -> adsk.fusion.Design:
         raise WgLinkError("No active Fusion design. Open or create a design and try again.")
     if design.designType != adsk.fusion.DesignTypes.ParametricDesignType:
         raise WgLinkError(
-            "WGLink requires a parametric design with a timeline. In the Browser, "
+            "The Waveguide Generator add-in requires a parametric design with a timeline. In the Browser, "
             "right-click the root component and choose 'Capture Design History', "
             "then try again."
         )
@@ -357,7 +357,7 @@ def _mark_applying(
     root = getattr(design, "rootComponent", None)
     if root is None:
         raise WgLinkError(
-            "WGLink cannot mark this document before changing it, so it will not "
+            "The Waveguide Generator add-in cannot mark this document before changing it, so it will not "
             "change it."
         )
     _set_attribute(
@@ -483,7 +483,7 @@ def _verify_update(
         )
         _write_progress(progress_path, report)
         raise WgLinkError(
-            "WGLink update caused feature-health regressions: "
+            "Waveguide Generator update caused feature-health regressions: "
             f"{names}. Freshness evidence was not committed; Undo the update or "
             "repair every named feature before trying again."
         )
@@ -718,7 +718,7 @@ def _all_link_attributes(design: adsk.fusion.Design) -> list[object]:
     try:
         return _items(design.findAttributes(ATTRIBUTE_GROUP, ""))
     except Exception as exc:  # noqa: BLE001
-        raise WgLinkError(f"Could not inspect WGLink attributes: {exc}") from exc
+        raise WgLinkError(f"Could not inspect Waveguide Generator attributes: {exc}") from exc
 
 
 def _parent(attribute: object) -> object | None:
@@ -888,7 +888,7 @@ def _resolve_link(
     records = _link_records(design)
     if not records:
         raise WgLinkError(
-            "No complete WGLink attributes were found. Insert a fresh copy from "
+            "No complete Waveguide Generator attributes were found. Insert a fresh copy from "
             "WG to create a managed link; existing geometry was not changed."
         )
     requested = options.get("instance_id")
@@ -896,7 +896,7 @@ def _resolve_link(
         requested = str(requested)
         if requested not in records:
             raise WgLinkError(
-                f"WGLink instance {requested!r} was not found. Choose an instance "
+                f"Waveguide Generator instance {requested!r} was not found. Choose an instance "
                 "id published in .fusion-status.json or returned by the headless "
                 "wglink_core.audit API."
             )
@@ -906,7 +906,7 @@ def _resolve_link(
     else:
         names = ", ".join(sorted(records))
         raise WgLinkError(
-            f"The document contains multiple WGLink instances ({names}). Pass "
+            f"The document contains multiple Waveguide Generator instances ({names}). Pass "
             "options['instance_id'] to choose one."
         )
 
@@ -916,24 +916,24 @@ def _resolve_link(
     if clashes and not allow_duplicates:
         labels = ", ".join(_entity_label(entity) for entity in clashes)
         raise WgLinkError(
-            f"Duplicate WGLink instance id {record['instance_id']!r} belongs to "
+            f"Duplicate Waveguide Generator instance id {record['instance_id']!r} belongs to "
             f"multiple managed objects: {labels}. Update and Send need one "
             "managed object per instance and will not guess. Detach does run "
             "on this document and never changes geometry: with no target it "
-            "removes every copy's WGLink metadata, and with "
+            "removes every copy's Waveguide Generator metadata, and with "
             "options['entity_token'] or options['entity'] naming one copy it "
             "removes only that copy's, leaving the other a working link. Add "
             "options['preview'] to list what it would remove first."
         )
     if not record["payload"].get("topology"):
         raise WgLinkError(
-            f"WGLink instance {record['instance_id']!r} is missing its topology "
+            f"Waveguide Generator instance {record['instance_id']!r} is missing its topology "
             "attributes. Its incomplete metadata cannot be repaired; insert a "
             "fresh copy from WG to create a managed link."
         )
     if record["body"] is None and not allow_missing_body:
         raise WgLinkError(
-            f"The managed body for WGLink instance {record['instance_id']!r} was "
+            f"The managed body for Waveguide Generator instance {record['instance_id']!r} was "
             "deleted. Recreate the link; Update cannot rebuild a missing body."
         )
     return record
@@ -993,7 +993,7 @@ def _assembly_from_link(design: adsk.fusion.Design, record: dict[str, Any]) -> l
         return _matrix_rows(transform)
     if len(occurrences) > 1:
         raise WgLinkError(
-            f"WGLink instance {record['instance_id']!r} has multiple wrapper "
+            f"Waveguide Generator instance {record['instance_id']!r} has multiple wrapper "
             "occurrences. Detach copies or give each insertion its own component."
         )
     return [list(row) for row in IDENTITY_MATRIX]
@@ -1082,7 +1082,7 @@ def _record_parameter_prefix(payload: Mapping[str, Any]) -> str:
 def _refuse_parameter_takeover(prefix: str, names: Sequence[str]) -> None:
     listed = ", ".join(sorted(names))
     raise WgLinkError(
-        "WGLink Insert creates parameters; it never takes over ones it did not "
+        "The Waveguide Generator add-in creates parameters on Insert; it never takes over ones it did not "
         f"create. This document already holds {listed}, so inserting into the "
         f"{prefix!r} namespace would reassign those expressions and every "
         "feature driven by them. Rename or delete those parameters, or keep "
@@ -1122,7 +1122,7 @@ def _push_parameters(
                 parameter.name,
                 adsk.core.ValueInput.createByString(parameter.expression),
                 "mm",
-                f"WGLink interface parameter for {design_name}",
+                f"Waveguide Generator interface parameter for {design_name}",
             )
             created.append(parameter.name)
         else:
@@ -1148,7 +1148,7 @@ def _push_mouth_overshoot_parameter(
             name,
             adsk.core.ValueInput.createByString(expression),
             "mm",
-            "WGLink mouth punch-through depth",
+            "Waveguide Generator mouth punch-through depth",
         )
         return name, {"created": [name], "updated": []}
     existing.expression = expression
@@ -1262,7 +1262,7 @@ def _build_loft(
         loft_input.loftSections.add(sections.item(index))
     loft_input.isSolid = bool(solid and planar)
     loft = lofts.add(loft_input)
-    loft.name = "WGLink waveguide loft"
+    loft.name = "Waveguide Generator waveguide loft"
     _stamp_managed(loft, instance_id, "feature", "loft")
     if not loft.bodies.count:
         raise WgLinkError("The waveguide loft produced no body.")
@@ -1332,7 +1332,7 @@ def _extrude_mouth_overshoot(
         adsk.fusion.ExtentDirections.PositiveExtentDirection,
     )
     extrude = extrudes.add(extrude_input)
-    extrude.name = "WGLink mouth overshoot"
+    extrude.name = "Waveguide Generator mouth overshoot"
     _stamp_managed(extrude, instance_id, "feature", "mouth_overshoot")
     if not extrude.bodies.count:
         raise WgLinkError("The mouth overshoot join extrude produced no body.")
@@ -1440,7 +1440,7 @@ def _close_and_thicken(
         edge, adsk.fusion.FeatureOperations.NewBodyFeatureOperation
     )
     patch = features.patchFeatures.add(patch_input)
-    patch.name = "WGLink throat patch"
+    patch.name = "Waveguide Generator throat patch"
     _stamp_managed(patch, instance_id, "feature", "patch")
     patch_body = _name_body(patch.bodies.item(0), "throat_patch")
     _stamp_managed(patch_body, instance_id, "role", "cut_tool")
@@ -1455,7 +1455,7 @@ def _close_and_thicken(
         adsk.fusion.FeatureOperations.NewBodyFeatureOperation,
     )
     stitch = features.stitchFeatures.add(stitch_input)
-    stitch.name = "WGLink stitched waveguide"
+    stitch.name = "Waveguide Generator stitched waveguide"
     _stamp_managed(stitch, instance_id, "feature", "stitch")
     made.append(stitch)
     stitched = _name_body(stitch.bodies.item(0), "stitched_waveguide")
@@ -1485,7 +1485,7 @@ def _close_and_thicken(
             # The mesher STEP intentionally has throat_opened=true, while this
             # patch/stitch path retains the driver-seat disc; roughly
             # pi * 12.7^2 * wall_t mm^3 residual volume is therefore expected.
-            thicken.name = "WGLink outward wall"
+            thicken.name = "Waveguide Generator outward wall"
             _stamp_managed(thicken, instance_id, "feature", "thicken")
             made.append(thicken)
             # Every helper body this operation can leave behind, hidden before
@@ -1802,7 +1802,7 @@ def _add_chamfer(
         True,
     )
     feature = chamfers.add(chamfer_input)
-    feature.name = f"WGLink {role} chamfer"
+    feature.name = f"Waveguide Generator {role} chamfer"
     _stamp_managed(feature, instance_id, "feature", role)
     return feature
 
@@ -1825,7 +1825,7 @@ def _add_fillet(
         True,
     )
     feature = fillets.add(fillet_input)
-    feature.name = f"WGLink {role} fillet"
+    feature.name = f"Waveguide Generator {role} fillet"
     _stamp_managed(feature, instance_id, "feature", role)
     return feature
 
@@ -1874,7 +1874,7 @@ def _build_enclosure(
         ),
     )
     extrude = extrudes.add(extrude_input)
-    extrude.name = "WGLink enclosure block"
+    extrude.name = "Waveguide Generator enclosure block"
     _stamp_managed(extrude, instance_id, "feature", "extrude")
     made.append(extrude)
     box = _name_body(extrude.bodies.item(0), "enclosure")
@@ -1914,7 +1914,7 @@ def _build_enclosure(
     combine_input.operation = adsk.fusion.FeatureOperations.CutFeatureOperation
     combine_input.isKeepToolBodies = False
     combine = combines.add(combine_input)
-    combine.name = "WGLink enclosure minus waveguide"
+    combine.name = "Waveguide Generator enclosure minus waveguide"
     _stamp_managed(combine, instance_id, "feature", "combine")
     made.append(combine)
     # Fusion mutates the target BRepBody in place for Combine.  Keeping that
@@ -2475,7 +2475,7 @@ def _refuse_bad_link_frame(frame: dict[str, object], *, force: bool) -> None:
         expected = frame["expected_center_mm"]
         offset = frame["offset_mm"]
         raise WgLinkError(
-            "WGLink refuses Update because the managed body has left the link frame: "
+            "The Waveguide Generator add-in refuses Update because the managed body has left the link frame: "
             f"tagged throat centre is ({center[0]:.3f}, {center[1]:.3f}) mm, "
             f"expected ({expected[0]:.3f}, {expected[1]:.3f}) mm; measured "
             f"offset is ({offset[0]:+.3f}, {offset[1]:+.3f}, {offset[2]:+.3f}) mm "
@@ -2483,7 +2483,7 @@ def _refuse_bad_link_frame(frame: dict[str, object], *, force: bool) -> None:
             "genuinely yours. A caller that intentionally accepts this can pass force=True."
         )
     raise WgLinkError(
-        "WGLink refuses Update because it could not verify the managed body's link "
+        "The Waveguide Generator add-in refuses Update because it could not verify the managed body's link "
         f"frame ({frame.get('error', 'unknown reason')}). Restore/recreate the managed "
         "link, or Detach if the body is now yours. A caller may pass force=True only "
         "if proceeding intentionally."
@@ -2506,23 +2506,23 @@ def _packaged_runtime() -> tuple[Path, Path] | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise WgLinkError(f"Packaged WGLink runtime metadata is unreadable: {exc}") from exc
+        raise WgLinkError(f"Packaged Waveguide Generator runtime metadata is unreadable: {exc}") from exc
     if not isinstance(value, dict) or value.get("schema") != 1:
         raise WgLinkError(
-            "Packaged WGLink runtime metadata has an unsupported schema; "
+            "Packaged Waveguide Generator runtime metadata has an unsupported schema; "
             "re-run Waveguide Generator's platform installer."
         )
     raw_root = value.get("root")
     raw_python = value.get("python")
     if not isinstance(raw_root, str) or not raw_root.strip():
-        raise WgLinkError("Packaged WGLink runtime metadata has no runtime root.")
+        raise WgLinkError("Packaged Waveguide Generator runtime metadata has no runtime root.")
     if not isinstance(raw_python, str) or not raw_python.strip():
-        raise WgLinkError("Packaged WGLink runtime metadata has no Python interpreter.")
+        raise WgLinkError("Packaged Waveguide Generator runtime metadata has no Python interpreter.")
     root = Path(raw_root).expanduser()
     python = Path(raw_python).expanduser()
     if not root.is_absolute() or not python.is_absolute():
         raise WgLinkError(
-            "Packaged WGLink runtime paths must be absolute; re-run Waveguide "
+            "Packaged Waveguide Generator runtime paths must be absolute; re-run Waveguide "
             "Generator's platform installer."
         )
     return root.resolve(), python.resolve()
@@ -2541,7 +2541,7 @@ def _repo_root(options: dict[str, Any]) -> Path:
             return candidate.resolve()
     raise WgLinkError(
         "Could not locate scripts/wglink_resample.py. Re-run Waveguide Generator's "
-        "platform installer, install WGLink by symlink from its developer repository, "
+        "platform installer, install the Waveguide Generator add-in by symlink from its developer repository, "
         "or set HORNLAB_FUSION_ADDIN_REPO to that checkout."
     )
 
@@ -2573,7 +2573,7 @@ def _python_for_resampler(repo_root: Path, options: dict[str, Any]) -> Path:
         if candidate.is_file():
             return candidate
     raise WgLinkError(
-        "No Python interpreter for WGLink resampling was found. Re-run Waveguide "
+        "No Python interpreter for Waveguide Generator resampling was found. Re-run Waveguide "
         "Generator's platform installer, create the developer repository .venv, "
         "or pass options['python_path']."
     )
@@ -2637,9 +2637,9 @@ def _verify_resample_identity(bundle: object, payload: Mapping[str, Any]) -> Non
     observed = payload.get("bundle_identity")
     if not isinstance(observed, Mapping):
         raise WgLinkError(
-            "WGLink refuses this operation because the resampler did not report "
+            "The Waveguide Generator add-in refuses this operation because the resampler did not report "
             "which export it read, so the resampled geometry cannot be bound to "
-            "the bundle WGLink validated. Re-run Waveguide Generator's platform "
+            "the bundle the Waveguide Generator add-in validated. Re-run Waveguide Generator's platform "
             "installer so the add-in and scripts/wglink_resample.py come from the "
             "same release. Nothing in the document was changed."
         )
@@ -2660,9 +2660,9 @@ def _verify_resample_identity(bundle: object, payload: Mapping[str, Any]) -> Non
     if not changed:
         return
     raise WgLinkError(
-        "WGLink refuses this operation because the bundle on disk changed while "
+        "The Waveguide Generator add-in refuses this operation because the bundle on disk changed while "
         "it was being used, so the resampled geometry belongs to a different "
-        "export than the one WGLink checked: "
+        "export than the one the Waveguide Generator add-in checked: "
         + "; ".join(changed)
         + ". Nothing in the document was changed. Wait for Waveguide Generator to "
         "finish writing the export, then run Update again."
@@ -2908,7 +2908,7 @@ def _resample_payload(
             )
         except subprocess.TimeoutExpired as exc:
             raise WgLinkError(
-                f"WGLink resampling exceeded {timeout:g} seconds; retry or increase "
+                f"Waveguide Generator resampling exceeded {timeout:g} seconds; retry or increase "
                 "options['timeout_seconds']."
             ) from exc
         if completed.returncode:
@@ -2916,15 +2916,15 @@ def _resample_payload(
             if machine_error:
                 raise WgLinkError(machine_error)
             raise WgLinkError(
-                "WGLink resampling failed without a JSON error. stderr: "
+                "Waveguide Generator resampling failed without a JSON error. stderr: "
                 + completed.stderr.strip()
             )
         try:
             payload = json.loads(output_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            raise WgLinkError(f"Could not read WGLink resampling output: {exc}") from exc
+            raise WgLinkError(f"Could not read Waveguide Generator resampling output: {exc}") from exc
     if not isinstance(payload, dict):
-        raise WgLinkError("WGLink resampling output was not a JSON object.")
+        raise WgLinkError("Waveguide Generator resampling output was not a JSON object.")
     _verify_resample_identity(bundle, payload)
     return payload
 
@@ -3110,7 +3110,7 @@ def _validate_rebuild_topology(
         and actual_counts == [points]
     ):
         raise WgLinkError(
-            "This WGLink link predates the mouth face-extrude change and still "
+            "This Waveguide Generator link predates the mouth face-extrude change and still "
             f"contains {walls} synthetic overshoot ring sketch(es). The current "
             f"topology requires {expected_rings} real ring sketches. Recreate the "
             "link before updating."
@@ -3256,9 +3256,9 @@ def _next_wrapper_name(root: object, slug: str) -> str:
         except Exception:  # noqa: BLE001
             continue
     index = 1
-    while f"WGLink_{slug}_{index}" in existing:
+    while f"Waveguide Generator {slug} {index}" in existing:
         index += 1
-    return f"WGLink_{slug}_{index}"
+    return f"Waveguide Generator {slug} {index}"
 
 
 def _create_wrapper(
@@ -3286,7 +3286,7 @@ def _create_wrapper(
                 "fallback."
             ) from exc
         warnings.append(
-            "LOUD: Fusion Part Design permits only one component, so WGLink was "
+            "LOUD: Fusion Part Design permits only one component, so the Waveguide Generator add-in was "
             "placed in the root component. This link cannot be moved or jointed as "
             "a unit; use an Assembly document for a movable wrapper."
         )
@@ -3297,7 +3297,7 @@ def _create_wrapper(
         occurrence.isGroundToParent = False
     except Exception as exc:  # noqa: BLE001 - a grounded link remains usable
         warnings.append(
-            "LOUD: Fusion refused to clear Ground to Parent on the WGLink wrapper: "
+            "LOUD: Fusion refused to clear Ground to Parent on the Waveguide Generator wrapper: "
             f"{exc}. It cannot be moved or jointed as a unit until you right-click "
             "the component in the browser and choose Unground From Parent."
         )
@@ -3321,7 +3321,7 @@ def _validate_enclosure_placement(bundle: object) -> None:
             else ""
         )
         raise WgLinkError(
-            "WGLink refuses enclosure placement because the realized origin values "
+            "The Waveguide Generator add-in refuses enclosure placement because the realized origin values "
             f"do not straddle the waveguide axis: enc_x0={x0:g} mm and "
             f"enc_y0={y0:g} mm; both must be negative. Correct the WG enclosure "
             f"bounds and export again.{vertical_recovery}"
@@ -3368,7 +3368,7 @@ def _group_timeline(design: object, start: int, name: str, warnings: list[str]) 
         group = design.timeline.timelineGroups.add(start, end)
         group.name = name
     except Exception as exc:  # noqa: BLE001 - grouping is presentation, not geometry
-        warnings.append(f"Could not group the WGLink timeline range: {exc}")
+        warnings.append(f"Could not group the Waveguide Generator timeline range: {exc}")
 
 
 @wglink_activity.counted(wglink_activity.MUTATION_INSERT)
@@ -3415,7 +3415,7 @@ def insert(
     existing_records = _link_records(design)
     if instance_id in existing_records:
         raise WgLinkError(
-            f"WGLink instance id {instance_id!r} already exists. Choose a unique id."
+            f"Waveguide Generator instance id {instance_id!r} already exists. Choose a unique id."
         )
     # Allocate against the parameters the document HOLDS, not only against the
     # namespaces its link records claim.  Detach leaves a namespace and its
@@ -3659,7 +3659,7 @@ def insert(
         # The timeline group is a label the user reads in their own document,
         # so their own name for the link wins over WG's name for the design.
         group_name = link_name or str(
-            bundle.manifest.get("design", {}).get("name") or f"WGLink {slug}"
+            bundle.manifest.get("design", {}).get("name") or f"Waveguide Generator {slug}"
         )
         _group_timeline(design, timeline_start, group_name, warnings)
         checks = _insert_check_points(bundle, plan, int(opts.get("max_checks", 400)))
@@ -3720,7 +3720,7 @@ def insert(
     except WgLinkError as exc:
         if mutated:
             raise WgLinkError(
-                f"{exc} A partial WGLink insertion exists; Undo will clear it."
+                f"{exc} A partial Waveguide Generator insertion exists; Undo will clear it."
             ) from exc
         # Nothing was built, so there is nothing to recover: no mark.
         _clear_applying(design, instance_id=instance_id)
@@ -3729,7 +3729,7 @@ def insert(
         if not mutated:
             _clear_applying(design, instance_id=instance_id)
         remedy = " Use Undo to recover the partial insertion." if mutated else ""
-        raise WgLinkError(f"Fusion refused WGLink Insert: {exc}.{remedy}") from exc
+        raise WgLinkError(f"Fusion refused Insert from the Waveguide Generator add-in: {exc}.{remedy}") from exc
 
 
 def _relink_record(
@@ -3913,7 +3913,7 @@ def update(
         )
     if stored_mode != incoming_mode:
         raise WgLinkError(
-            f"WGLink build mode mismatch: the document is {stored_mode!r}, while "
+            f"Waveguide Generator build mode mismatch: the document is {stored_mode!r}, while "
             f"the bundle is {incoming_mode!r}. Recreate the link in the intended "
             "mode; force cannot make these topologies interchangeable."
         )
@@ -3921,7 +3921,7 @@ def update(
     incoming_slug = parameter_slug(bundle)
     if stored_slug != incoming_slug:
         raise WgLinkError(
-            f"WGLink parameter namespace mismatch: the document owns {stored_slug!r}, "
+            f"Waveguide Generator parameter namespace mismatch: the document owns {stored_slug!r}, "
             f"while the bundle owns {incoming_slug!r}. Force cannot retarget the "
             "existing datum and enclosure expressions to another namespace. To "
             "recover: Detach this link and delete its component, then Insert the "
@@ -3937,7 +3937,7 @@ def update(
     _validate_mouth_outline(bundle)
     if state.verdict == "corrupt_export":
         raise WgLinkError(
-            "WGLink export identity is corrupt: stored sequence "
+            "Waveguide Generator export identity is corrupt: stored sequence "
             f"{state.stored_sequence} names export {state.stored_export_id!r}, but "
             f"the selected bundle names {state.bundle_export_id!r}. One sequence "
             "must identify one export; use the headless wglink_core.relink API "
@@ -3949,12 +3949,12 @@ def update(
             "wglink_core.relink API; pass force=True only after confirming the "
             "replacement."
         )
-        raise WgLinkError(f"WGLink refuses {state.verdict}: {remedy}")
+        raise WgLinkError(f"The Waveguide Generator add-in refuses {state.verdict}: {remedy}")
     no_op = state.verdict == "same_export" and not opts.get("force")
     try:
         topology = json.loads(record["payload"]["topology"])
     except (TypeError, ValueError, KeyError) as exc:
-        raise WgLinkError("Stored WGLink topology is invalid. Recreate the link.") from exc
+        raise WgLinkError("Stored Waveguide Generator topology is invalid. Recreate the link.") from exc
     # The identity check inside _resample_payload binds the geometry this
     # returns to the bundle validated above, and it refuses before the
     # timeline marker moves or a single parameter is pushed.
@@ -3989,7 +3989,7 @@ def update(
     if "last_managed_sketch_index" not in record["payload"]:
         raise WgLinkError(
             "This link predates scoped timeline metadata. Recreate it before Update; "
-            "WGLink will not roll back across unrelated document features."
+            "The Waveguide Generator add-in will not roll back across unrelated document features."
         )
     last_sketch_index = _last_managed_sketch_index(
         *(entry[2] for entry in rings),
@@ -3997,7 +3997,7 @@ def update(
     )
     if last_sketch_index is None:
         raise WgLinkError(
-            "WGLink could not locate its own sketches in the timeline, so it cannot "
+            "The Waveguide Generator add-in could not locate its own sketches in the timeline, so it cannot "
             "tell which features depend on them. Refusing to edit; Recreate the link."
         )
     target_index = rollback_target(entries, after_index=last_sketch_index)
@@ -4007,7 +4007,7 @@ def update(
     )
     if target_index is None or target_entry is None:
         raise WgLinkError(
-            "WGLink could not find a timeline rollback target after the managed "
+            "The Waveguide Generator add-in could not find a timeline rollback target after the managed "
             "Sketch and Occurrence entries. Refusing to edit; Recreate the link "
             "or inspect the timeline."
         )
@@ -4128,7 +4128,7 @@ def update(
             tag_failure = str(exc)
         tag_note = f" Tag repair also failed: {tag_failure}." if tag_failure else ""
         raise WgLinkError(
-            f"WGLink rebuild failed after {report['sections_done']} sections: {failure}. "
+            f"Waveguide Generator rebuild failed after {report['sections_done']} sections: {failure}. "
             f"Fusion has no transaction for this operation; use Undo to recover.{tag_note}"
         ) from failure
 
@@ -4367,7 +4367,7 @@ def audit(
     ground_to_parent = _ground_to_parent(design, record)
     if ground_to_parent:
         warnings.append(
-            "The WGLink wrapper is grounded to its parent and cannot be moved or "
+            "The Waveguide Generator wrapper is grounded to its parent and cannot be moved or "
             "jointed as a unit. Right-click the component in the browser and choose "
             "Unground From Parent, or re-run Insert."
         )
@@ -4397,12 +4397,12 @@ def audit(
     ]
     if still_visible:
         warnings.append(
-            "WGLink helper bodies are still visible: "
+            "Waveguide Generator helper bodies are still visible: "
             + ", ".join(repr(name) for name in still_visible)
             + ". They sit on top of the exported body and can be picked and "
             "solved in its place, and Fusion's STEP export writes every "
             "visible body of the exported component. Run Update to have "
-            "WGLink hide them, or hide each body itself in the browser; "
+            "the Waveguide Generator add-in hide them, or hide each body itself in the browser; "
             "hiding a folder that contains them will not work."
         )
     role = payload.get("source_role", "HF")
@@ -4638,7 +4638,7 @@ def detach(
         scoped = [entity for entity in entities if _target_covers(target, entity)]
         if not scoped:
             raise WgLinkError(
-                f"The selected {_entity_label(target)} carries no WGLink "
+                f"The selected {_entity_label(target)} carries no Waveguide Generator "
                 f"attributes for instance {instance_id!r}, so a targeted "
                 "Detach would remove nothing. Select the copy that carries "
                 "the link, or Detach with no target to unmanage every copy."
@@ -4681,14 +4681,14 @@ def detach(
     if clashing and target is None:
         outcome = "would be unmanaged" if preview else "was unmanaged"
         warnings.append(
-            f"WGLink instance {instance_id!r} covered {len(clashing)} managed "
+            f"Waveguide Generator instance {instance_id!r} covered {len(clashing)} managed "
             f"objects and every copy {outcome}. To keep one of them linked, "
             "Detach with options['entity_token'] or options['entity'] naming "
             "only the copy you are giving up."
         )
     if preview:
         warnings.append(
-            "Preview only: no WGLink attributes were removed. Repeat this call "
+            "Preview only: no Waveguide Generator attributes were removed. Repeat this call "
             "without options['preview'] to apply it."
         )
     return {

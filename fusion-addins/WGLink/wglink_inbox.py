@@ -74,9 +74,9 @@ _PLAIN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 SOLVE_PICKUP_NOTICE_SECONDS = 60.0
 REQUEST_NOT_TAKEN_MESSAGE = (
     "Waveguide Generator has not picked up the request from Fusion for a minute. "
-    "Either WG is closed, or it is older than this WGLink add-in, or it is not "
+    "Either WG is closed, or it is older than this Waveguide Generator add-in, or it is not "
     "collecting requests from Fusion. Open Waveguide Generator (update it if an "
-    "older version is running). The request waits in the WGLink folder and is "
+    "older version is running). The request waits in the CAD Link folder and is "
     "handled once WG takes it."
 )
 WG_NOT_COLLECTING_MESSAGE = (
@@ -87,13 +87,13 @@ WG_NOT_COLLECTING_MESSAGE = (
 )
 WG_OUTDATED_MESSAGE = (
     "This Waveguide Generator does not advertise the delivery capabilities this "
-    "WGLink add-in needs (WG request inbox 4 and Fusion request delivery 3). "
-    "Update Waveguide Generator; it installs the WGLink that matches it."
+    "Waveguide Generator add-in needs (WG request inbox 4 and Fusion request delivery 3). "
+    "Update Waveguide Generator; it installs the matching Fusion add-in."
 )
 WG_FUSION_OUTDATED_MESSAGE = (
     "This Waveguide Generator does not advertise the delivery capabilities this "
-    "WGLink add-in needs (Fusion request delivery 3 under capability schema 1). "
-    "Update Waveguide Generator; it installs the WGLink that matches it."
+    "Waveguide Generator add-in needs (Fusion request delivery 3 under capability schema 1). "
+    "Update Waveguide Generator; it installs the matching Fusion add-in."
 )
 
 
@@ -102,10 +102,10 @@ WG_FUSION_OUTDATED_MESSAGE = (
 def requests_not_taken_at_startup_message(count: int) -> str:
     return (
         f"{count} request(s) from Fusion to Waveguide Generator that were waiting "
-        "when WGLink started have not been picked up. Either WG is closed, or it "
-        "is older than this WGLink add-in, or it is not collecting requests from "
+        "when the Waveguide Generator add-in started have not been picked up. Either WG is closed, or it "
+        "is older than this Waveguide Generator add-in, or it is not collecting requests from "
         "Fusion. Open Waveguide Generator (update it if an older version is "
-        "running). The requests wait in the WGLink folder and are handled once WG "
+        "running). The requests wait in the CAD Link folder and are handled once WG "
         "takes them."
     )
 
@@ -629,7 +629,7 @@ def return_reference(bundle_path: Path, workspace_root: Path) -> tuple[str, str]
         relative = bundle.relative_to(root)
     except ValueError as exc:
         raise OSError(
-            f"Return bundle {bundle} is not inside the WGLink workspace {root}."
+            f"Return bundle {bundle} is not inside the Waveguide Generator workspace {root}."
         ) from exc
     digest = hashlib.sha256((bundle / "wgreturn.json").read_bytes()).hexdigest()
     return relative.as_posix(), f"sha256:{digest}"

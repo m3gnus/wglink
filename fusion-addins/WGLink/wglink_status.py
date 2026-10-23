@@ -44,7 +44,7 @@ def write_fusion_status(
 
     root = bundle_root.expanduser().resolve()
     if not root.is_dir():
-        raise OSError(f"WGLink bundle folder is unavailable: {root}")
+        raise OSError(f"Waveguide Generator bundle folder is unavailable: {root}")
     payload = fusion_status_payload(
         session_id=session_id,
         document_name=document_name,
@@ -225,7 +225,7 @@ def write_fusion_status_payload(bundle_root: Path, payload: Mapping[str, Any]) -
 
     root = bundle_root.expanduser().resolve()
     if not root.is_dir():
-        raise OSError(f"WGLink bundle folder is unavailable: {root}")
+        raise OSError(f"Waveguide Generator bundle folder is unavailable: {root}")
     marker = root / FUSION_STATUS_FILENAME
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f"{FUSION_STATUS_FILENAME}.", dir=root

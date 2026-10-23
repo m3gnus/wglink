@@ -33,7 +33,7 @@ def test_pipeline_guides_do_not_offer_removed_commands():
     for rel_path in ("docs/HEADLESS.md",):
         text = (ROOT / rel_path).read_text(encoding="utf-8")
         assert "python scripts/" not in text
-        assert "WGLink" in text
+        assert "Waveguide Generator" in text
 
 
 def test_wglink_repin_docs_name_wgs_packaged_pair_provenance_and_both_pins():

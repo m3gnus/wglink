@@ -255,7 +255,7 @@ def test_send_and_solve_write_one_request_differing_only_in_kind(
     assert ("returnId" in payload) is (kind == SOLVE)
     assert _outbox(fixture.ipc) == []
     title, text = fixture.ui.messages[-1]
-    assert title == "WGLink"
+    assert title == "Waveguide Generator"
     if operation == "solve":
         assert "Progress and results appear in Waveguide Generator." in text
     else:
@@ -285,7 +285,7 @@ def test_a_send_to_a_wg_that_reads_only_schema_3_is_refused_visibly(
 
     assert _inbox(fixture.ipc) == [] and _outbox(fixture.ipc) == []
     title, text = fixture.ui.messages[-1]
-    assert title == "WGLink refused"
+    assert title == "Waveguide Generator refused"
     assert "Update Waveguide Generator" in text
     assert fixture.timers == []
 
@@ -307,7 +307,7 @@ def test_a_wg_not_collecting_requests_is_named_at_command_time(
 
     assert _inbox(fixture.ipc) == []
     title, text = fixture.ui.messages[-1]
-    assert title == "WGLink refused"
+    assert title == "Waveguide Generator refused"
     assert "not collecting requests from Fusion" in text
 
 
@@ -353,7 +353,7 @@ def test_a_write_that_keeps_failing_is_a_visible_refusal(monkeypatch, tmp_path: 
 
     assert len(calls) == fixture.module.WG_REQUEST_WRITE_ATTEMPTS
     title, text = fixture.ui.messages[-1]
-    assert title == "WGLink refused"
+    assert title == "Waveguide Generator refused"
     assert "could not write the request for WG" in text and "disk full" in text
 
 
@@ -422,9 +422,9 @@ def test_a_request_wg_leaves_untaken_is_reported_once_under_its_command(
     _deliver_followups(module, fixture.app)
 
     titles = [title for title, _text in fixture.ui.messages[before:]]
-    assert titles == ["WGLink request waiting"]
+    assert titles == ["Waveguide Generator request waiting"]
     text = fixture.ui.messages[-1][1]
-    for cause in ("closed", "older than this WGLink add-in", "not collecting requests"):
+    for cause in ("closed", "older than this Waveguide Generator add-in", "not collecting requests"):
         assert cause in text
     assert "solve" not in text.lower()
     # The request is not moved or dropped, and nothing in Fusion was read.
@@ -471,7 +471,7 @@ def test_a_pickup_check_held_behind_a_command_runs_when_it_ends(monkeypatch, tmp
     _run(module, "detach")
     assert module.FOLLOWUP_EVENT_ID in fired
     _deliver_followups(module, fixture.app)
-    assert [title for title, _text in fixture.ui.messages] [-1] == "WGLink request waiting"
+    assert [title for title, _text in fixture.ui.messages] [-1] == "Waveguide Generator request waiting"
 
 
 @pytest.mark.parametrize("coordination", [False, None], ids=["off", "on"])
@@ -491,7 +491,7 @@ def test_the_pickup_check_rides_its_own_event_in_both_gate_states(
         _fire_timers(fixture)
         before = len(fixture.ui.messages)
         _deliver_followups(module, fixture.app)
-        assert [title for title, _text in fixture.ui.messages[before:]] == ["WGLink request waiting"]
+        assert [title for title, _text in fixture.ui.messages[before:]] == ["Waveguide Generator request waiting"]
     finally:
         module.stop(None)
 
@@ -744,7 +744,7 @@ def test_a_failure_between_the_bundle_and_the_request_leaves_no_request_file(
     assert _request_files(fixture.ipc) == []  # no request, and no staging litter
     [bundle] = [p for p in (fixture.workspace / "wgreturn").iterdir() if not p.name.startswith(".")]
     assert (bundle / "wgreturn.json").is_file() and (bundle / "assembly.step").is_file()
-    assert fixture.ui.messages[-1][0] == "WGLink refused"
+    assert fixture.ui.messages[-1][0] == "Waveguide Generator refused"
 
 
 def test_a_failure_taking_the_return_reference_leaves_no_request_file(
@@ -760,7 +760,7 @@ def test_a_failure_taking_the_return_reference_leaves_no_request_file(
     _run(fixture.module, "send")
 
     assert _request_files(fixture.ipc) == []
-    assert fixture.ui.messages[-1][0] == "WGLink refused"
+    assert fixture.ui.messages[-1][0] == "Waveguide Generator refused"
 
 
 def test_a_bundle_that_could_not_be_published_is_never_requested(monkeypatch, tmp_path: Path) -> None:
@@ -782,7 +782,7 @@ def test_a_bundle_that_could_not_be_published_is_never_requested(monkeypatch, tm
     assert requested == []
     assert _request_files(fixture.ipc) == []
     assert not [p for p in (fixture.workspace / "wgreturn").iterdir() if p.name.endswith(".wgreturn")]
-    assert fixture.ui.messages[-1][0] == "WGLink refused"
+    assert fixture.ui.messages[-1][0] == "Waveguide Generator refused"
 
 
 @pytest.mark.parametrize("outcome", ["delivered", "rejected", "conflict", "expired"])
