@@ -138,7 +138,7 @@ def test_startup_registers_the_command_and_icon_only_under_the_capability(
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_manifest_options_add_fem_only_when_advertised(fixture, enabled):
-    payload = {"schemaVersion": 1, "automaticDomain": 1, "documentUp": 1}
+    payload = {"schemaVersion": 1, "automaticDomain": 1, "meshSizing": 1, "documentUp": 1}
     expected = {"automatic_domain": True, "document_up": True}
     if enabled:
         payload["femRegions"] = 1

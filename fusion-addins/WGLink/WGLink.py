@@ -783,7 +783,7 @@ def _require_fem_regions() -> None:
 
 
 def _required_manifest_features() -> dict[str, bool]:
-    """The M1 manifest features this add-in requires WG to understand."""
+    """Manifest features required before exporting any Send or Solve."""
 
     missing = [
         label
@@ -800,7 +800,11 @@ def _required_manifest_features() -> dict[str, bool]:
             + " and ".join(missing)
             + ". Update and restart WG, then try again."
         )
-    # FEM regions are optional: a design that declares none sends to any WG,
+    if not _manifest_feature_enabled(wglink_inbox.MESH_SIZING):
+        raise wglink_core.WgLinkError(
+            wglink_send.wglink_protocol.MESH_SIZING_UNAVAILABLE_MESSAGE
+        )
+    # FEM regions are optional: a design that declares none sends to a compatible WG,
     # and wglink_send refuses one that does when WG cannot solve them.
     features = {
         "automatic_domain": True,

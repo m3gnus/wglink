@@ -51,7 +51,7 @@ def _advertise(ipc: Path, value: object, *, live: bool = False) -> None:
         "schemaVersion": 1,
         "fusionRequestDelivery": 3,
         "automaticDomain": 1,
-        "documentUp": 1,
+        "meshSizing": 1, "documentUp": 1,
     }
     if value is not None:
         payload["solveCommandDelivery"] = value

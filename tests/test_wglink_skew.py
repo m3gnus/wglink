@@ -195,7 +195,7 @@ def test_handoffs_apply_and_are_consumed_without_wgs_solve_consumer(
     assert fixture.ui.messages == [] and _inbox(fixture.ipc) == []
 
 
-@pytest.mark.parametrize("missing_feature", [None, "automaticDomain", "documentUp"])
+@pytest.mark.parametrize("missing_feature", [None, "automaticDomain", "documentUp", "meshSizing"])
 def test_return_request_needs_manifest_features_but_not_wgs_solve_consumer(
     monkeypatch, tmp_path: Path, missing_feature: str | None
 ) -> None:
@@ -224,7 +224,7 @@ def test_return_request_needs_manifest_features_but_not_wgs_solve_consumer(
     assert _inbox(fixture.ipc) == []
     if missing_feature is not None:
         assert sent == [] and module._request_trace["outcome"] == "refused"
-        assert "newer Waveguide Generator" in fixture.ui.messages[-1][1]
+        assert ("too old for Fusion-side mesh settings" if missing_feature == "meshSizing" else "newer Waveguide Generator") in fixture.ui.messages[-1][1]
         return
     assert [options["request_id"] for options in sent] == ["return-channel"]
     assert sent[0]["automatic_domain"] is True and sent[0]["document_up"] is True
@@ -277,3 +277,65 @@ def test_file_request_errors_name_the_current_service(monkeypatch, tmp_path: Pat
     module.WatchEventHandler().notify(None)
 
     assert reported == [("Servicing WG file requests", "Waveguide Generator file request error", "request read failed")]
+
+
+@pytest.mark.parametrize('operation', ['send', 'solve'])
+@pytest.mark.parametrize('value', [None, False, True, 0, -1, '1', 1.0])
+def test_mesh_capability_is_required_before_export(monkeypatch, tmp_path, operation, value):
+    fixture = _transfer(monkeypatch, tmp_path, 'WGLink_mesh_skew')
+    path = fixture.ipc / 'wg-capabilities.json'
+    payload = json.loads(path.read_text())
+    if value is None:
+        del payload['meshSizing']
+    else:
+        payload['meshSizing'] = value
+    payload['version'] = '999.0.0'
+    path.write_text(json.dumps(payload))
+    calls = []
+    monkeypatch.setattr(fixture.module.wglink_send, 'send', lambda *_a, **_k: calls.append(1))
+    _run(fixture.module, operation)
+    assert calls == [] and _inbox(fixture.ipc) == []
+    assert fixture.module.wglink_send.wglink_protocol.MESH_SIZING_UNAVAILABLE_MESSAGE in fixture.ui.messages[-1][1]
+
+
+@pytest.mark.parametrize('version', ['wg-0.3.5', 'wg-0.3.6-old'])
+@pytest.mark.parametrize('operation', ['send', 'solve'])
+def test_old_capability_fixtures_refuse_new_sends(monkeypatch, tmp_path, version, operation):
+    fixture = _transfer(monkeypatch, tmp_path, 'WGLink_old_mesh_peer')
+    root = Path(__file__).parent / 'fixtures/mesh-sizing-v1'
+    (fixture.ipc / 'wg-capabilities.json').write_bytes((root / f'{version}-capabilities.json').read_bytes())
+    calls = []
+    monkeypatch.setattr(fixture.module.wglink_send, 'send', lambda *_a, **_k: calls.append(1))
+    _run(fixture.module, operation)
+    assert calls == [] and _inbox(fixture.ipc) == []
+    assert 'Update and restart Waveguide Generator' in fixture.ui.messages[-1][1]
+
+
+@pytest.mark.parametrize('value', [1, 2])
+def test_mesh_capability_version_one_or_newer_allows_send(monkeypatch, tmp_path, value):
+    fixture = _transfer(monkeypatch, tmp_path, 'WGLink_mesh_peer')
+    path = fixture.ipc / 'wg-capabilities.json'
+    payload = json.loads(path.read_text())
+    payload['meshSizing'] = value
+    path.write_text(json.dumps(payload))
+    _run(fixture.module, 'send')
+    assert [request['kind'] for request in _inbox(fixture.ipc)] == ['receive_snapshot']
+
+
+def test_backend_resume_refuses_a_withdrawn_mesh_capability(monkeypatch, tmp_path):
+    from test_wglink_launcher import _advertise_launcher, _checked_fixture, _finish, _installed_entry
+    fixture = _checked_fixture(monkeypatch, tmp_path, 'WGLink_mesh_resume')
+    path = fixture.ipc / 'wg-capabilities.json'
+    _advertise_launcher(fixture, [str(_installed_entry(tmp_path))])
+    monkeypatch.setattr(fixture.module.wglink_launcher, 'collecting', lambda *_a: True)
+    try:
+        _run(fixture.module, 'send')
+        assert fixture.exports == []
+        payload = json.loads(path.read_text())
+        del payload['meshSizing']
+        path.write_text(json.dumps(payload))
+        _finish(fixture)
+        assert fixture.exports == [] and _inbox(fixture.ipc) == []
+        assert 'Update and restart Waveguide Generator' in fixture.ui.messages[-1][1]
+    finally:
+        fixture.module.stop(None)

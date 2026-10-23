@@ -22,6 +22,7 @@ Fusion's Scripts and Add-Ins list keeps the registration name `WGLink`. The fold
 - [Naming a Waveguide Generator link](docs/WGLINK-LINK-NAMING.md)
 - [Validating a Waveguide Generator change without a release](docs/WGLINK-DEV-LOOP.md)
 - [Headless workflow status](docs/HEADLESS.md)
+- [Mesh snapshot protocol](docs/MESH-SIZING-V1.md)
 
 The Waveguide Generator add-in's Send and Solve dialogs use an automatic model domain; there is no manual Model dropdown. With a current WG, explicit exports also record surviving Fusion origin-plane cut history and the Y-up/Z-up modelling orientation. Send/Solve also require WG to advertise those manifest capabilities before a return is exported.
 

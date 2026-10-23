@@ -50,6 +50,7 @@ FUSION_REQUEST_DELIVERY = "fusionRequestDelivery"
 SOURCE_IDENTITY = "sourceIdentity"
 AUTOMATIC_DOMAIN = "automaticDomain"
 DOCUMENT_UP = "documentUp"
+MESH_SIZING = wglink_protocol.MESH_SIZING_CAPABILITY
 # Optional: a WG that solves declared FEM regions (fem-regions-v1).
 FEM_REGIONS = "femRegions"
 # The schema-3 solve writer retained for the WG packaged-pair contract.

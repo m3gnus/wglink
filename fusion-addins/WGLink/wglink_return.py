@@ -762,6 +762,7 @@ def build_return_manifest(
     scope: Mapping[str, Any] | ScopePlan,
     instances: Sequence[Mapping[str, Any]],
     sources: Sequence[Mapping[str, Any]],
+    mesh: Mapping[str, Any] | None = None,
     acoustics: None = None,
     wgreturn_version: str = "1.1",
     required_features: Sequence[str] | None = None,
@@ -782,6 +783,8 @@ def build_return_manifest(
         and REDUCED_DOMAIN_FEATURE not in features
     ):
         features.append(REDUCED_DOMAIN_FEATURE)
+    if mesh is not None and wglink_protocol.MESH_SIZING_FEATURE not in features:
+        features.append(wglink_protocol.MESH_SIZING_FEATURE)
     manifest = {
         "wgreturn_version": wgreturn_version,
         "required_features": features,
@@ -796,6 +799,8 @@ def build_return_manifest(
         "sources": list(sources),
         "acoustics": acoustics,
     }
+    if mesh is not None:
+        manifest["mesh"] = dict(mesh)
     detached = deepcopy(manifest)
     validate_return_manifest(detached)
     return detached

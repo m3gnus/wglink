@@ -83,13 +83,6 @@ FEM_COMPONENT_NAME = "FEM_MF_AIR"
 # original role.
 SOURCE_ROLES = wglink_protocol.SOURCE_ROLES
 RECOGNISED_SOURCE_ROLES = wglink_protocol.RECOGNISED_SOURCE_ROLES
-SOURCE_RESOLUTION_MM = {
-    "HF": 4.0,
-    "MF": 15.0,
-    "LF": 30.0,
-    "PASSIVE_CARDIOID": 25.0,
-    "PORT_EXIT": 25.0,  # legacy spelling; same physical role
-}
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # One top-level Part 21 body entity, in all three spellings a CAD kernel writes.
 # BREP_WITH_VOIDS is the ISO 10303-42 subtype of MANIFOLD_SOLID_BREP used for a
@@ -3232,7 +3225,7 @@ def _sources(
                     "appearance_labels": [role],
                 },
                 "observed": _observed(faces, face_bodies),
-                "suggested_resolution_mm": SOURCE_RESOLUTION_MM[role],
+                "suggested_resolution_mm": wglink_protocol.default_source_size_mm(role),
             }
         )
 
@@ -3262,7 +3255,7 @@ def _sources(
                 "expected_connected_components": _connected_components(faces),
                 "selectors": {"appearance_labels": [role]},
                 "observed": _observed(faces, face_bodies),
-                "suggested_resolution_mm": SOURCE_RESOLUTION_MM[role],
+                "suggested_resolution_mm": wglink_protocol.default_source_size_mm(role),
             }
         )
     if not sources and not allow_empty:
@@ -4433,6 +4426,7 @@ def send(
             scope=scope,
             instances=instance_records,
             sources=sources,
+            mesh=wglink_protocol.default_mesh(sources),
             required_features=[
                 *BASE_RETURN_FEATURES,
                 *([SOURCE_IDENTITY_FEATURE] if source_identity else []),

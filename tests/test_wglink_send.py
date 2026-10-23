@@ -1534,7 +1534,7 @@ def _no_fem_export(
                          ids=["readable-attributes", "unavailable-attributes"])
 @pytest.mark.parametrize("fem_options", [{}, {"fem_regions": False}, {"fem_regions": True}],
                          ids=["capability-absent", "capability-off", "capability-on"])
-def test_no_declared_regions_keep_e9f0dfb_bundle_bytes(
+def test_no_declared_regions_change_only_the_mesh_contract_from_e9f0dfb(
     send_module, monkeypatch, tmp_path, profile, fem_options, attributes_unavailable
 ):
     report = _no_fem_export(
@@ -1553,17 +1553,16 @@ def test_no_declared_regions_keep_e9f0dfb_bundle_bytes(
 
     actual_members = members(actual)
     golden_members = members(golden)
-    # Keep the e9f0dfb fixtures intact and compare every other byte, including
-    # manifest whitespace and the STEP members, across add-in version bumps.
-    current_version = report["manifest"]["generator"]["adapter_version"]
-    assert current_version == send_module.ADAPTER_VERSION
-    golden_version = json.loads(golden_members["wgreturn.json"])["generator"]["adapter_version"]
-    current_field = b'"adapter_version": ' + json.dumps(current_version).encode("utf-8")
-    golden_field = b'"adapter_version": ' + json.dumps(golden_version).encode("utf-8")
-    assert actual_members["wgreturn.json"].count(current_field) == 1
-    actual_members["wgreturn.json"] = actual_members["wgreturn.json"].replace(
-        current_field, golden_field, 1
-    )
+    # Retain the old fixtures. New exports intentionally add the mesh snapshot
+    # and use the role defaults; all other evidence and STEP bytes stay equal.
+    expected = json.loads(golden_members["wgreturn.json"])
+    expected["generator"]["adapter_version"] = send_module.ADAPTER_VERSION
+    for source in expected["sources"]:
+        source["suggested_resolution_mm"] = send_module.wglink_protocol.MESH_DEFAULTS["source_size_mm"][source["role"]]
+    expected["mesh"] = send_module.wglink_protocol.default_mesh(expected["sources"])
+    expected["required_features"].append(send_module.wglink_protocol.MESH_SIZING_FEATURE)
+    text = sys.modules["wglink_return"].dumps_return_manifest(expected)
+    golden_members["wgreturn.json"] = text.replace("\n", "\r\n").encode() if os.name == "nt" else text.encode()
     assert actual_members == golden_members
     assert "fem_regions" not in report["manifest"]["scope"]
     assert "fem-regions-v1" not in report["manifest"]["required_features"]

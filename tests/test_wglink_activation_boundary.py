@@ -83,7 +83,7 @@ def _boundary(monkeypatch, tmp_path: Path, name: str, *, coordination: bool | No
         "solveCommandDelivery": 4,
         "fusionRequestDelivery": 3,
         "automaticDomain": 1,
-        "documentUp": 1,
+        "meshSizing": 1, "documentUp": 1,
     }))
     monkeypatch.setattr(module.wglink_workspace, "ipc_folder", lambda **_kwargs: ipc)
     design, body = _linked_document(module)

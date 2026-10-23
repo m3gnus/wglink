@@ -438,7 +438,7 @@ def test_every_source_path_declares_identity_only_when_wg_advertises_it(
         _UI(_Panels(), _Definitions(reserve_ids=False)),
     )
     capabilities = {"schemaVersion": 1, **dict(capabilities or {})}
-    capabilities.update({"solveCommandDelivery": 4, "fusionRequestDelivery": 3, "automaticDomain": 1, "documentUp": 1})
+    capabilities.update({"solveCommandDelivery": 4, "fusionRequestDelivery": 3, "automaticDomain": 1, "meshSizing": 1, "documentUp": 1})
     (tmp_path / "wg-capabilities.json").write_text(
         json.dumps(capabilities), encoding="utf-8"
     )
@@ -479,7 +479,7 @@ def test_send_options_negotiate_automatic_domain_and_document_up_together(
     (tmp_path / "wg-capabilities.json").write_text(json.dumps({
         "schemaVersion": 1,
         "automaticDomain": 1,
-        "documentUp": 1,
+        "meshSizing": 1, "documentUp": 1,
     }), encoding="utf-8")
     monkeypatch.setattr(module.wglink_workspace, "ipc_folder", lambda **_kwargs: tmp_path)
     monkeypatch.setattr(module.wglink_workspace, "return_folder", lambda: tmp_path)
@@ -4484,7 +4484,7 @@ def _refusing_handoff(monkeypatch, module, tmp_path: Path) -> Path:
         module.wglink_workspace, "ipc_folder", lambda **_kwargs: bundle_root
     )
     (bundle_root / "wg-capabilities.json").write_text(
-        json.dumps({"schemaVersion": 1, "solveCommandDelivery": 4, "fusionRequestDelivery": 3, "automaticDomain": 1, "documentUp": 1}), encoding="utf-8"
+        json.dumps({"schemaVersion": 1, "solveCommandDelivery": 4, "fusionRequestDelivery": 3, "automaticDomain": 1, "meshSizing": 1, "documentUp": 1}), encoding="utf-8"
     )
 
     def refuse(*_args: object, **_kwargs: object) -> None:
@@ -4711,7 +4711,7 @@ def _per_request_folders(monkeypatch, module, tmp_path: Path) -> tuple[Path, Pat
     # it: these tests are about delivery, not the state guard.
     (ipc / "wg-capabilities.json").write_text(json.dumps({
         "schemaVersion": 1, "solveCommandDelivery": 4, "fusionRequestDelivery": 3,
-        "automaticDomain": 1, "documentUp": 1,
+        "automaticDomain": 1, "meshSizing": 1, "documentUp": 1,
     }))
     _unmoved_live_state(monkeypatch, module, "sha256:state-b")
     return ipc, bundles
@@ -5136,7 +5136,7 @@ def test_a_return_wg_asked_for_declares_source_identity_when_wg_reads_it(
     (ipc / "wg-capabilities.json").write_text(json.dumps({
         "schemaVersion": 1, "solveCommandDelivery": 4, "fusionRequestDelivery": 3,
         "sourceIdentity": 1,
-        "automaticDomain": 1, "documentUp": 1,
+        "automaticDomain": 1, "meshSizing": 1, "documentUp": 1,
     }))
     _publish_like_wg(
         ipc,
