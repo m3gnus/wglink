@@ -54,10 +54,11 @@ def scene(monkeypatch, tmp_path):
 
 def build(scene, *, activate=True):
     module = scene.module
-    inputs, items = _building_inputs(module)
+    inputs, items = _building_inputs(module, phase="commandCreated")
     state = module.MeshDialogState()
     module._build_mesh_dialog(inputs, state)
     if activate:
+        inputs.activate()
         module.MeshDialogActivateHandler(state).notify(types.SimpleNamespace(
             command=types.SimpleNamespace(commandInputs=inputs)))
     assert scene.ui.messages == []
@@ -170,9 +171,9 @@ def test_failed_construction_keeps_handlers_and_refuses_save_once(
     command, _, _ = _dialog_command(inputs)
     monkeypatch.setattr(module, "_require_fem_regions", lambda: None)
     original_build = getattr(module, builder)
-    events = ("inputChanged", "validateInputs", "execute")
+    events = ("activate", "inputChanged", "validateInputs", "execute")
     if operation == "source":
-        events += ("activate", "destroy")
+        events += ("destroy",)
 
     def refuse_partial_dialog():
         for _ in range(2):
@@ -183,8 +184,7 @@ def test_failed_construction_keeps_handlers_and_refuses_save_once(
             execute_args = types.SimpleNamespace(isValidResult=True)
             command.execute.handlers[0].notify(execute_args)
             assert execute_args.isValidResult is False
-            if operation == "source":
-                command.activate.handlers[0].notify(types.SimpleNamespace())
+            command.activate.handlers[0].notify(types.SimpleNamespace())
 
     def broken_build(inputs, state):
         assert all(len(getattr(command, event).handlers) == 1 for event in events)
@@ -515,7 +515,7 @@ def test_first_activate_clears_preselection_and_reports_failed_saved_faces(scene
         member.selectable = False
     inputs, items, state = build(scene, activate=False)
     selection = items["mesh_source_faces_1"]
-    selection.addSelection(scene.faces[2])  # Fusion's automatic preselection.
+    inputs.activate([scene.faces[2]])  # Fusion's automatic preselection.
     scene.module.MeshDialogActivateHandler(state).notify(types.SimpleNamespace(
         command=selection.parentCommand))
     assert selection.selectionCount == 0

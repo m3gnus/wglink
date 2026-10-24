@@ -249,22 +249,26 @@ def face_identity(face: object) -> object:
     return ("object", id(native))
 
 
-def read_fem_region(body: object) -> dict[str, Any] | None:
+def read_fem_region(body: object, *, strict: bool = False) -> dict[str, Any] | None:
     native = getattr(body, "nativeObject", None) or body
-    return wglink_fem.read_region_attribute(
-        wglink_core._attribute_value(native, wglink_fem.REGION_ATTRIBUTE)
-    )
+    text = wglink_core._attribute_value(native, wglink_fem.REGION_ATTRIBUTE, strict=strict)
+    region = wglink_fem.read_region_attribute(text)
+    if strict and text is not None and region is None:
+        raise wglink_core.WgLinkError("The saved FEM region is unreadable.")
+    return region
 
 
-def fem_region_faces(body: object, region_id: str) -> dict[str, list[object]]:
+def fem_region_faces(body: object, region_id: str, *, strict: bool = False) -> dict[str, list[object]]:
     """The body's faces grouped by the FEM surface group they carry."""
 
     grouped: dict[str, list[object]] = {}
-    for face in _collection(body, "faces"):
+    faces = wglink_core._items(body.faces, strict=True) if strict else _collection(body, "faces")
+    for face in faces:
         native = getattr(face, "nativeObject", None) or face
-        current = wglink_fem.read_face_attribute(
-            wglink_core._attribute_value(native, wglink_fem.FACE_ATTRIBUTE)
-        )
+        text = wglink_core._attribute_value(native, wglink_fem.FACE_ATTRIBUTE, strict=strict)
+        current = wglink_fem.read_face_attribute(text)
+        if strict and text is not None and current is None:
+            raise wglink_core.WgLinkError("A saved FEM surface group is unreadable.")
         if current is not None and current[0] == region_id:
             grouped.setdefault(current[1], []).append(face)
     return grouped

@@ -239,8 +239,10 @@ def _design(app: adsk.core.Application) -> adsk.fusion.Design:
     return design
 
 
-def _items(collection: object) -> list[object]:
+def _items(collection: object, *, strict: bool = False) -> list[object]:
     if collection is None:
+        if strict:
+            raise WgLinkError("The Fusion collection is unavailable.")
         return []
     try:
         return [collection.item(index) for index in range(collection.count)]
@@ -248,6 +250,8 @@ def _items(collection: object) -> list[object]:
         try:
             return list(collection)
         except Exception:  # noqa: BLE001
+            if strict:
+                raise
             return []
 
 
@@ -263,30 +267,38 @@ def _json(value: object) -> str:
     return wglink_protocol.canonical_json(value, wglink_protocol.ASCII_STRICT)
 
 
-def _attributes(entity: object) -> object | None:
+def _attributes(entity: object, *, strict: bool = False) -> object | None:
     try:
         return entity.attributes
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return None
 
 
-def _attribute(entity: object, name: str) -> object | None:
-    attributes = _attributes(entity)
+def _attribute(entity: object, name: str, *, strict: bool = False) -> object | None:
+    attributes = _attributes(entity, strict=strict)
     if attributes is None:
+        if strict:
+            raise WgLinkError("The Fusion attribute collection is unavailable.")
         return None
     try:
         return attributes.itemByName(ATTRIBUTE_GROUP, name)
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return None
 
 
-def _attribute_value(entity: object, name: str) -> str | None:
-    attribute = _attribute(entity, name)
+def _attribute_value(entity: object, name: str, *, strict: bool = False) -> str | None:
+    attribute = _attribute(entity, name, strict=strict)
     if attribute is None:
         return None
     try:
         return str(attribute.value)
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return None
 
 

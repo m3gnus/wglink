@@ -1757,6 +1757,8 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 else PANEL_NAME,
             )
         except (wglink_core.WgLinkError, wglink_author.AuthorError) as exc:
+            if self.fem_state is not None and self.fem_state.restoration_error:
+                args.isValidResult = False
             # A Send or Solve refused after its export ran (WG outdated or not
             # collecting, a failed request write) may already have changed the
             # document -- an adopted source -- and has published a return.
@@ -1915,7 +1917,8 @@ class FemDialogState:
         self.next_group_id = 1
         self.region_id: str | None = None
         self.restoring = False
-        self.body_key = None
+        self.loaded_body = None
+        self.restoration_error: str | None = None
 
 
 def _fem_input_id(prefix: str, group_id: int) -> str:
@@ -2041,8 +2044,11 @@ def _add_fem_group(
     selection.setSelectionLimits(0, 0)
     for face in faces or ():
         try:
-            selection.addSelection(face)
+            if selection.addSelection(face) is False and state.restoring:
+                raise RuntimeError("A saved surface-group face could not be selected.")
         except Exception:  # noqa: BLE001 - a stale face is reported by validation
+            if state.restoring:
+                raise
             pass
     if not state.restoring:
         selection.hasFocus = True
@@ -2077,11 +2083,15 @@ def _restore_fem_region(inputs: object, state: FemDialogState, body: object) -> 
     """Fill the dialog from the body's stored region, like a saved preset."""
 
     state.restoring = True
+    state.loaded_body = None
+    state.restoration_error = "Loading the saved FEM region and surface groups. Wait before saving."
     try:
-        state.body_key = wglink_send.face_identity(body)
+        # Read before replacing rows. Failed API access is not an empty region.
+        region = wglink_send.read_fem_region(body, strict=True)
+        faces = (wglink_send.fem_region_faces(body, str(region["region_id"]), strict=True)
+                 if region else {})
         for group_id in list(state.group_ids):
             _remove_fem_group(inputs, state, group_id)
-        region = wglink_send.read_fem_region(body)
         state.region_id = region.get("region_id") if region else None
         name = _input(inputs, "fem_name")
         if name is not None:
@@ -2093,16 +2103,11 @@ def _restore_fem_region(inputs: object, state: FemDialogState, body: object) -> 
             ) / wglink_fem.CM_TO_MM
         loss = _input(inputs, "fem_loss")
         wanted = float(((region or {}).get("medium") or {}).get("bulk_loss_factor", 0.0))
-        try:
+        if loss is not None:
             for index in range(loss.listItems.count):
                 item = loss.listItems.item(index)
                 item.isSelected = abs(float(item.name) - wanted) < 1e-12
-        except Exception:  # noqa: BLE001
-            pass
-        if region is None:
-            return
-        faces = wglink_send.fem_region_faces(body, str(region["region_id"]))
-        for group in region.get("groups") or ():
+        for group in (region or {}).get("groups") or ():
             _add_fem_group(
                 inputs,
                 state,
@@ -2114,6 +2119,14 @@ def _restore_fem_region(inputs: object, state: FemDialogState, body: object) -> 
                 lining=group.get("lining"),
                 relative_level_db=float(group.get("relative_level_db", wglink_fem.DEFAULT_RELATIVE_LEVEL_DB)),
             )
+        state.loaded_body = _native(body)
+        state.restoration_error = None
+    except Exception as exc:  # noqa: BLE001 - refuse partial or unreadable restoration
+        state.restoration_error = (
+            "Could not load the saved FEM region and surface groups. "
+            "Reselect the air body to retry before saving. " + str(exc)
+        )
+        raise
     finally:
         state.restoring = False
 
@@ -2179,6 +2192,8 @@ def _other_region_ids(body: object) -> list[str]:
 
 
 def _plan_fem_region(inputs: object, state: FemDialogState) -> tuple[object, "wglink_fem.RegionDeclaration", list[dict[str, object]]]:
+    if state.restoration_error:
+        raise wglink_fem.FemDeclarationError(state.restoration_error)
     bodies = _selected_entities(inputs, "fem_body")
     if not bodies:
         raise wglink_fem.FemDeclarationError("Select one closed solid body of air.")
@@ -2201,6 +2216,8 @@ def _fem_clearing(inputs: object) -> bool:
 
 
 def _fem_validation_error(inputs: object, state: FemDialogState) -> str | None:
+    if state.restoration_error:
+        return state.restoration_error
     if _fem_clearing(inputs):
         return None if _selected_entities(inputs, "fem_body") else "Select the body to clear."
     try:
@@ -2222,6 +2239,8 @@ def _sync_fem_validation(inputs: object, state: FemDialogState) -> bool:
 
 def _apply_fem_region(inputs: object, state: FemDialogState | None) -> dict[str, object]:
     state = state or FemDialogState()
+    if state.restoration_error:
+        raise wglink_author.AuthorError(state.restoration_error)
     if _fem_clearing(inputs):
         bodies = _selected_entities(inputs, "fem_body")
         if not bodies:
@@ -2266,7 +2285,9 @@ class FemInputChangedHandler(adsk.core.InputChangedEventHandler):
                 bodies = _selected_entities(inputs, "fem_body")
                 # Selection-input focus changes also reach inputChanged. Only
                 # switching bodies may replace rows and discard unsaved edits.
-                if bodies and wglink_send.face_identity(bodies[0]) != self.state.body_key:
+                if bodies and (self.state.loaded_body is None or not wglink_send._same_fusion_entity(
+                    bodies[0], self.state.loaded_body, wglink_core._design(_app())
+                )):
                     _restore_fem_region(inputs, self.state, bodies[0])
             elif input_id.startswith(("fem_kind_", "fem_lining_")):
                 group_id = int(input_id.rsplit("_", 1)[-1])
@@ -2274,6 +2295,23 @@ class FemInputChangedHandler(adsk.core.InputChangedEventHandler):
             _sync_fem_validation(inputs, self.state)
         except Exception as exc:  # noqa: BLE001 - the dialog must keep working
             _log(f"Declare FEM Region input update failed: {exc}")
+            _sync_fem_validation(inputs, self.state)
+
+
+class FemDialogActivateHandler(adsk.core.CommandEventHandler):
+    def __init__(self, state: FemDialogState):
+        super().__init__()
+        self.state = state
+
+    def notify(self, args: object) -> None:
+        # Native preselection may populate the body without inputChanged.
+        # Restore only once running, when addSelection is legal.
+        if self.state.construction_failed:
+            return
+        inputs = args.command.commandInputs
+        FemInputChangedHandler(self.state)._changed(types.SimpleNamespace(
+            input=_input(inputs, "fem_body"), inputs=inputs,
+        ))
 
 
 class FemValidateInputsHandler(adsk.core.ValidateInputsEventHandler):
@@ -2836,7 +2874,8 @@ def _initialize_authoring_dialog(command, operation):
         state = FemDialogState()
         execute.fem_state = state
         build = _build_fem_dialog
-        handlers = ((command.inputChanged, FemInputChangedHandler(state)),
+        handlers = ((command.activate, FemDialogActivateHandler(state)),
+                    (command.inputChanged, FemInputChangedHandler(state)),
                     (command.validateInputs, FemValidateInputsHandler(state)))
     # Keep events inert during construction too: Fusion may dispatch them while
     # inputs are being added, or while the outer reporter displays an error.

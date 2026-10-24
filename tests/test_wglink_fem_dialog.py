@@ -375,14 +375,14 @@ def test_dialog_accepts_relative_level_boundaries(fixture, level):
     assert group.get("relative_level_db", 0) == level
 
 
-def _building_inputs(module):
+def _building_inputs(module, *, phase="running"):
     """Mirror installed adsk/core.py getters and collection ownership.
 
     Command.commandInputs can resolve all command IDs. Group children are local:
     an inputChanged collection cannot resolve a sibling or nested group's IDs.
     """
     items = {}
-    command = types.SimpleNamespace(focused=None, onInputChanged=None)
+    command = types.SimpleNamespace(focused=None, onInputChanged=None, phase=phase)
 
     def changed(item):
         if command.onInputChanged is not None:
@@ -468,6 +468,10 @@ def _building_inputs(module):
                     command.focused = None
 
         def addSelection(self, face):
+            if command.phase == "commandCreated":
+                raise RuntimeError("addSelection is invalid during commandCreated")
+            if getattr(face, "selection_error", False):
+                raise RuntimeError("Fusion could not select the saved face")
             if getattr(face, "selectable", True) is False:
                 return False
             if self.limits and self.limits[1] and len(self._entities) >= self.limits[1]:
@@ -507,6 +511,18 @@ def _building_inputs(module):
         def pick(self, entity):
             assert command.focused is not None, "No selection input has focus"
             return command.focused.addSelection(entity)
+
+        def activate(self, preselected=()):
+            # Native preselection does not call addSelection or inputChanged.
+            # It is available when the command's activate handlers run.
+            command.phase = "running"
+            for entity in preselected:
+                kind = "SolidBodies" if hasattr(entity, "faces") else "Faces"
+                for item in list(items.values()):
+                    if isinstance(item, Selection) and kind in item.filters:
+                        if not item.limits or not item.limits[1] or len(item._entities) < item.limits[1]:
+                            item._entities.append(entity)
+                            break
 
         def choose(self, input_id, label):
             item = items[input_id]
@@ -684,3 +700,175 @@ def test_body_focus_events_preserve_unsaved_group_controls_and_face_selections(f
     assert inputs.pick(other)
     assert state.group_ids == [] and not selection.isValid
     assert 'fem_faces_1' not in items
+
+
+class _FailingAttributes(_Attributes):
+    """Fail a real attribute API operation once, without erasing its data."""
+
+    def __init__(self, original, stage):
+        self.values = original.values
+        self.stage = stage
+        self.failures = 1
+
+    def itemByName(self, group, name):
+        if self.stage == "lookup" and self.failures:
+            self.failures -= 1
+            raise RuntimeError("Injected attribute lookup failure")
+        attribute = super().itemByName(group, name)
+        if self.stage != "value" or attribute is None:
+            return attribute
+        owner = self
+
+        class Attribute:
+            @property
+            def value(self):
+                if owner.failures:
+                    owner.failures -= 1
+                    raise RuntimeError("Injected attribute value failure")
+                return attribute.value
+
+        return Attribute()
+
+
+def _live_fem_dialog(module):
+    inputs, items = _building_inputs(module, phase="commandCreated")
+    state = module.FemDialogState()
+    module._build_fem_dialog(inputs, state)
+    inputs.command.onInputChanged = module.FemInputChangedHandler(state)._changed
+    inputs.activate()
+    return inputs, items, state
+
+
+@pytest.mark.parametrize("stage", ["lookup", "value", "face-value", "selection-false", "selection-error"])
+def test_failed_restoration_blocks_save_and_reselection_retries(fixture, stage):
+    module = fixture.module
+    air, faces = _air(module)
+    module._apply_fem_region(_inputs(module, air, faces), _state(module, 1, 2))
+    saved = [dict(entity.attributes.values) for entity in [air, *faces]]
+    if stage in ("lookup", "value"):
+        air.attributes = _FailingAttributes(air.attributes, stage)
+    elif stage == "face-value":
+        faces[1].attributes = _FailingAttributes(faces[1].attributes, "value")
+    elif stage == "selection-false":
+        faces[1].selectable = False
+    else:
+        faces[1].selection_error = True
+    inputs, items, state = _live_fem_dialog(module)
+    assert inputs.pick(air)
+    assert state.loaded_body is None and not state.restoring
+    assert "Could not load the saved FEM region" in items["fem_validation"].formattedText
+    assert "Reselect the air body to retry before saving" in state.restoration_error
+    # A subsequent edit/validation must not accept the partially restored rows.
+    inputs.click("fem_name")
+    validation = types.SimpleNamespace(inputs=inputs, areInputsValid=True)
+    module.FemValidateInputsHandler(state).notify(validation)
+    assert not validation.areInputsValid
+    with pytest.raises(module.wglink_author.AuthorError, match="Could not load"):
+        module._apply_fem_region(inputs, state)
+    # Execute repeats the refusal, even if the UI allowed an OK click.
+    execute = module.CommandExecuteHandler("fem")
+    execute.fem_state = state
+    args = types.SimpleNamespace(command=inputs.command, isValidResult=True)
+    execute.notify(args)
+    assert not args.isValidResult
+    assert [entity.attributes.values for entity in [air, *faces]] == saved
+    faces[1].selectable = True
+    faces[1].selection_error = False
+    items["fem_body"].clearSelection()
+    inputs.click("fem_body")
+    assert inputs.pick(air)
+    assert state.loaded_body is air and state.restoration_error is None
+    assert module._sync_fem_validation(inputs, state)
+    assert [items[module._fem_input_id("faces", row)]._entities for row in state.group_ids] == [[faces[0]], [faces[1]]]
+    module._apply_fem_region(inputs, state)
+    restored = module.wglink_send.read_fem_region(air)
+    original = json.loads(saved[0][("WGLink", "fem_region")])
+    # Saving regenerates face IDs; group declarations and membership survive.
+    for region in (restored, original):
+        for group in region["groups"]:
+            group.pop("declared_face_ids")
+    assert restored == original
+    assert module.wglink_send.fem_region_faces(air, restored["region_id"]) == {
+        "cone": [faces[0]], "port": [faces[1]],
+    }
+
+
+class _BodyHandle:
+    """Fresh wrappers can have different tokens and resolve to one body."""
+
+    def __init__(self, body, token):
+        self.body = body
+        self.entityToken = token
+
+    def __getattr__(self, name):
+        return getattr(self.body, name)
+
+    def __eq__(self, other):
+        return self.body is (other.body if isinstance(other, _BodyHandle) else other)
+
+
+def test_changed_body_token_preserves_rows_but_different_body_reloads(fixture):
+    module = fixture.module
+    air, faces = _air(module)
+    other, other_faces = _air(module)
+    module._apply_fem_region(_inputs(module, other, other_faces), _state(module, 1, 2))
+    first = _BodyHandle(air, "air-before")
+    again = _BodyHandle(air, "air-after")
+    different = _BodyHandle(other, "other")
+    resolved = {first.entityToken: [air], again.entityToken: [air], different.entityToken: [other]}
+    design = module.wglink_core._design(None)
+    lookups = []
+    def find(token):
+        lookups.append(token)
+        return resolved[token]
+    design.findEntityByToken = find
+    inputs, items, state = _live_fem_dialog(module)
+    assert inputs.pick(first)
+    inputs.click("fem_add_group")
+    row = state.group_ids[0]
+    selection = items[module._fem_input_id("faces", row)]
+    items[module._fem_input_id("name", row)].value = "Unsaved cone"
+    assert inputs.pick(faces[0])
+    items["fem_body"].clearSelection()
+    inputs.click("fem_body")
+    assert inputs.pick(again)
+    assert "air-before" in lookups and "air-after" in lookups
+    assert items[module._fem_input_id("faces", row)] is selection and selection.isValid
+    assert selection._entities == [faces[0]]
+    assert items[module._fem_input_id("name", row)].value == "Unsaved cone"
+    items["fem_body"].clearSelection()
+    inputs.click("fem_body")
+    assert inputs.pick(different)
+    assert not selection.isValid
+    assert len(state.group_ids) == 2
+    assert [items[module._fem_input_id("name", row)].value for row in state.group_ids] == ["Cone", "Port"]
+    assert module._sync_fem_validation(inputs, state)
+
+
+def test_fem_native_preselection_restores_on_activate_and_keeps_edits_on_reactivation(fixture):
+    from test_wglink_mesh_dialog import _dialog_command
+
+    module = fixture.module
+    air, faces = _air(module)
+    module._apply_fem_region(_inputs(module, air, faces), _state(module, 1, 2))
+    inputs, items = _building_inputs(module, phase="commandCreated")
+    command, _, _ = _dialog_command(inputs)
+    module.CommandCreatedHandler("fem").notify(types.SimpleNamespace(command=command))
+    execute = command.execute.handlers[0]
+    state = execute.fem_state
+    assert state.loaded_body is None and state.group_ids == []
+    with pytest.raises(RuntimeError, match="invalid during commandCreated"):
+        items["fem_body"].addSelection(air)
+    inputs.command.onInputChanged = command.inputChanged.handlers[0]._changed
+    inputs.activate([air])  # No inputChanged event accompanies native preselection.
+    assert state.loaded_body is None
+    args = types.SimpleNamespace(command=command)
+    command.activate.handlers[0].notify(args)
+    assert state.loaded_body is air
+    selection = items["fem_faces_1"]
+    assert selection._entities == [faces[0]]
+    items["fem_name_1"].value = "Edited after activation"
+    command.activate.handlers[0].notify(args)  # e.g. Orbit/Pan has ended.
+    assert items["fem_faces_1"] is selection
+    assert items["fem_name_1"].value == "Edited after activation"
+    assert fixture.ui.messages == []
