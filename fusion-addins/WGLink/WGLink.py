@@ -2699,15 +2699,21 @@ def _apply_mesh_dialog(inputs, state):
     # Source reassignment can also repair stamps outside the selected faces.
     # Reuse its transaction journal for a single atomic dialog Save.
     stamps = wglink_send._StampEdit()
-    for attribute in wglink_core._items(design.findAttributes(
-            wglink_core.ATTRIBUTE_GROUP, wglink_send.SOURCE_IDENTITY_ATTRIBUTE)):
-        stamps._remember(attribute.parent)
-    for face in faces:
-        native = _native(face)
-        stamps.remember_appearance(native)
-        stamps._remember(native)
-        stamps.remember_attribute(native, wglink_send.GROUP_ORIGINAL_APPEARANCE_ATTRIBUTE)
-    stamps.remember_attribute(design.rootComponent, wglink_mesh.SETTINGS_ATTRIBUTE)
+    try:
+        for attribute in wglink_core._items(design.findAttributes(
+                wglink_core.ATTRIBUTE_GROUP, wglink_send.SOURCE_IDENTITY_ATTRIBUTE), strict=True):
+            stamps._remember(attribute.parent)
+        for face in faces:
+            native = _native(face)
+            stamps.remember_appearance(native)
+            stamps._remember(native)
+            stamps.remember_attribute(native, wglink_send.GROUP_ORIGINAL_APPEARANCE_ATTRIBUTE)
+        stamps.remember_attribute(design.rootComponent, wglink_mesh.SETTINGS_ATTRIBUTE)
+    except Exception as exc:
+        raise wglink_author.AuthorError(
+            "Could not read the original sources and mesh settings from this document. "
+            "Close and reopen Sources & Mesh… to retry before saving."
+        ) from exc
     try:
         return _save_mesh_dialog(design, app, state, sources, groups, mesh)
     except Exception as exc:

@@ -605,6 +605,53 @@ def test_failed_settings_read_blocks_save_preserves_metadata_and_reopen_retries(
     assert module.wglink_send.read_mesh_settings(scene.design) == saved
 
 
+@pytest.mark.parametrize("stage", ["lookup", "value"])
+def test_failed_journal_read_aborts_before_mutation_or_settings_write_refusal(scene, monkeypatch, stage):
+    module = scene.module
+    inputs, items, state = build(scene)
+    items["mesh_source_size_1"].value = 1.1
+    change(scene, inputs, items, state, "mesh_add_group")
+    items["mesh_group_name_2"].value = "Saved back panel"
+    items["mesh_group_size_2"].value = 4
+    items["mesh_group_faces_2"].addSelection(scene.faces[1])
+    module._apply_mesh_dialog(inputs, state)
+
+    inputs, items, state = build(scene)
+    items["mesh_source_size_1"].value = 2.2
+    items["mesh_group_name_2"].value = "Unsaved panel"
+    items["mesh_group_size_2"].value = 5
+    entities = [scene.design.rootComponent, *scene.faces]
+    original_attributes = [dict(entity.attributes.values) for entity in entities]
+    original_overrides = [member.override for member in scene.faces]
+    saved = module.wglink_send.read_mesh_settings(scene.design)
+    attributes = FailingMeshAttributes(entities[0].attributes, stage)
+    scene.design.rootComponent.attributes = attributes
+    mutations = []
+    save = module._save_mesh_dialog
+    def record_save(*args):
+        mutations.append("save")
+        return save(*args)
+    def refuse(*_args):
+        mutations.append("settings write")
+        raise module.wglink_core.WgLinkError("settings write refused")
+    monkeypatch.setattr(module, "_save_mesh_dialog", record_save)
+    monkeypatch.setattr(module.wglink_send, "save_mesh_settings", refuse)
+
+    with pytest.raises(module.wglink_author.AuthorError, match="Close and reopen Sources & Mesh") as caught:
+        module._apply_mesh_dialog(inputs, state)
+    assert "changes were restored" not in str(caught.value)
+    assert attributes.failures == 0
+    assert mutations == []
+    assert [entity.attributes.values for entity in entities] == original_attributes
+    assert all(member.override is old for member, old in zip(scene.faces, original_overrides))
+    _, items, _ = build(scene)
+    assert items["mesh_source_size_1"].value == pytest.approx(1.1)
+    assert items["mesh_group_name_2"].value == "Saved back panel"
+    assert items["mesh_group_size_2"].value == 4
+    assert items["mesh_group_faces_2"]._entities == [scene.faces[1]]
+    assert module.wglink_send.read_mesh_settings(scene.design) == saved
+
+
 def test_existing_settings_do_not_reconstruct_extra_groups_from_paint(scene):
     module = scene.module
     inputs, _, state = build(scene)
@@ -739,6 +786,45 @@ def test_incomplete_rollback_does_not_claim_restoration(scene, monkeypatch):
     with pytest.raises(module.wglink_author.AuthorError, match="some changes could not be restored") as caught:
         module._apply_mesh_dialog(inputs, state)
     assert "This dialog's changes were restored" not in str(caught.value)
+
+
+@pytest.mark.parametrize("stage", ["lookup", "value"])
+@pytest.mark.parametrize("check", ["before-restore", "after-restore"])
+def test_unreadable_rollback_check_after_write_refusal_never_claims_restoration(scene, monkeypatch, stage, check):
+    module = scene.module
+    inputs, _items, state = build(scene)
+    assert not scene.design.rootComponent.attributes.values
+    save = module.wglink_send.save_mesh_settings
+    failed_attributes = []
+    def refuse(design, mesh):
+        # A refused write can have persisted a value before raising.
+        save(design, mesh)
+        attributes = FailingMeshAttributes(design.rootComponent.attributes, stage)
+        failed_attributes.append(attributes)
+        if check == "after-restore":
+            attributes.failures = 0
+            lookup = attributes.itemByName
+            def item_by_name(group, name):
+                attribute = lookup(group, name)
+                if name == module.wglink_mesh.SETTINGS_ATTRIBUTE and attribute is not None:
+                    def pretend_delete():
+                        # Fusion acknowledges deletion but leaves an unreadable value.
+                        attributes.failures = 1
+                        return True
+                    attribute.deleteMe = pretend_delete
+                return attribute
+            attributes.itemByName = item_by_name
+        design.rootComponent.attributes = attributes
+        raise module.wglink_core.WgLinkError("settings write refused")
+    monkeypatch.setattr(module.wglink_send, "save_mesh_settings", refuse)
+
+    with pytest.raises(module.wglink_author.AuthorError, match="some changes could not be restored") as caught:
+        module._apply_mesh_dialog(inputs, state)
+    assert "settings write refused" in str(caught.value)
+    assert "Undo this command in Fusion" in str(caught.value)
+    assert "This dialog's changes were restored" not in str(caught.value)
+    assert failed_attributes[0].failures == 0
+    assert scene.design.rootComponent.attributes.values  # Restoration really failed.
 
 
 def test_failure_never_repaints_read_only_linked_sources(scene, monkeypatch):

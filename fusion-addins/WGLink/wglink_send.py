@@ -2783,6 +2783,8 @@ class _StampEdit:
 
     A face in an externally referenced (read-only) component refuses the write;
     without this, the faces written before it would keep a half-applied source.
+    Only a strictly absent attribute can be journaled as absent; failed reads
+    must never turn rollback into deletion or count as verified restoration.
     """
 
     def __init__(self) -> None:
@@ -2795,7 +2797,7 @@ class _StampEdit:
     def remember_attribute(self, entity: object, name: str) -> None:
         if any(entity is seen and name == key for seen, key, _value in self._originals):
             return
-        self._originals.append((entity, name, wglink_core._attribute_value(entity, name)))
+        self._originals.append((entity, name, wglink_core._attribute_value(entity, name, strict=True)))
 
     def remember_appearance(self, face: object) -> None:
         if any(face is seen for seen, _value in self._appearances):
@@ -2809,7 +2811,7 @@ class _StampEdit:
         wglink_core._set_attribute(face, SOURCE_IDENTITY_ATTRIBUTE, wglink_core._json(stamp))
 
     def delete(self, face: object) -> None:
-        attribute = wglink_core._attribute(face, SOURCE_IDENTITY_ATTRIBUTE)
+        attribute = wglink_core._attribute(face, SOURCE_IDENTITY_ATTRIBUTE, strict=True)
         if attribute is None:
             return
         self._remember(face)
@@ -2826,15 +2828,15 @@ class _StampEdit:
         for face, name, value in reversed(self._originals):
             try:
                 # Unedited attributes can belong to read-only linked geometry.
-                if wglink_core._attribute_value(face, name) == value:
+                if wglink_core._attribute_value(face, name, strict=True) == value:
                     continue
                 if value is None:
-                    attribute = wglink_core._attribute(face, name)
+                    attribute = wglink_core._attribute(face, name, strict=True)
                     if attribute is not None and attribute.deleteMe() is False:
                         raise wglink_core.WgLinkError("Fusion refused to remove a stamp this command wrote")
                 else:
                     wglink_core._set_attribute(face, name, value)
-                if wglink_core._attribute_value(face, name) != value:
+                if wglink_core._attribute_value(face, name, strict=True) != value:
                     problems.append(f"Fusion did not restore {name}")
             except Exception as exc:  # noqa: BLE001 - report every face we could not restore
                 problems.append(str(exc))
