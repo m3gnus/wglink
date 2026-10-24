@@ -69,6 +69,58 @@ def change(scene, inputs, items, state, input_id):
     assert scene.ui.messages == []
 
 
+def test_live_face_and_dropdown_events_on_new_source_save_and_reopen(scene):
+    module = scene.module
+    inputs, items, state = build(scene)
+    inputs.command.onInputChanged = module.MeshInputChangedHandler(state).notify
+    inputs.click("mesh_add_source")
+    inputs.click("mesh_source_faces_2")
+    assert inputs.pick(scene.faces[1])  # Real Fusion fires inputChanged here.
+    assert scene.ui.messages == []
+    inputs.choose("mesh_source_role_2", "LF")
+    sources, _, _ = module._mesh_dialog_values(inputs, state)
+    assert sources[1]["selectors"] == {"appearance_labels": ["LF"]}
+    assert scene.ui.messages == []
+    assert module._sync_mesh_dialog(inputs, state)
+    module._apply_mesh_dialog(inputs, state)
+    _, reopened, state = build(scene)
+    assert len(state.sources) == 2
+    row = next(row for row, source in state.sources.items() if source['role'] == 'LF')
+    assert reopened[f"mesh_source_role_{row}"].selectedItem.name == "LF"
+    assert reopened[f"mesh_source_faces_{row}"]._entities == [scene.faces[1]]
+
+
+def test_row_click_routes_picks_and_presets_without_rebuilding_inputs(scene):
+    module = scene.module
+    inputs, items, state = build(scene)
+    inputs.command.onInputChanged = module.MeshInputChangedHandler(state).notify
+    inputs.click("mesh_add_group")
+    first = items["mesh_group_faces_2"]
+    assert first.hasFocus
+    items["mesh_group_name_2"].value = "Back"
+    assert inputs.pick(scene.faces[1])
+    inputs.click("mesh_add_group")
+    second = items["mesh_group_faces_3"]
+    assert second.hasFocus and not first.hasFocus
+    items["mesh_group_name_3"].value = "Side"
+    assert inputs.pick(scene.faces[2])
+    inputs.choose("mesh_group_preset_2", "Coarse 40 mm")
+    assert items["mesh_group_size_2"].value == 4
+    inputs.choose("mesh_group_preset_3", "Fine 15 mm")
+    inputs.click("mesh_group_faces_2")
+    assert first.hasFocus and not second.hasFocus
+    assert items["mesh_group_faces_2"] is first
+    assert first._entities == [scene.faces[1]]
+    assert second._entities == [scene.faces[2]]
+    module.MeshDialogActivateHandler(state).notify(types.SimpleNamespace(command=inputs.command))
+    assert first.hasFocus  # Orbit/Pan activation must not restore or steal focus.
+    assert scene.ui.messages == []
+    module._apply_mesh_dialog(inputs, state)
+    _, reopened, _ = build(scene)
+    assert reopened["mesh_group_faces_2"]._entities == [scene.faces[1]]
+    assert reopened["mesh_group_faces_3"]._entities == [scene.faces[2]]
+
+
 def _dialog_command(inputs):
     class Event:
         def __init__(self):

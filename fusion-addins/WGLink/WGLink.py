@@ -1915,6 +1915,7 @@ class FemDialogState:
         self.next_group_id = 1
         self.region_id: str | None = None
         self.restoring = False
+        self.body_key = None
 
 
 def _fem_input_id(prefix: str, group_id: int) -> str:
@@ -2043,6 +2044,8 @@ def _add_fem_group(
             selection.addSelection(face)
         except Exception:  # noqa: BLE001 - a stale face is reported by validation
             pass
+    if not state.restoring:
+        selection.hasFocus = True
     remove = _input(inputs, "fem_remove_group")
     if remove is not None:
         remove.isEnabled = True
@@ -2075,6 +2078,7 @@ def _restore_fem_region(inputs: object, state: FemDialogState, body: object) -> 
 
     state.restoring = True
     try:
+        state.body_key = wglink_send.face_identity(body)
         for group_id in list(state.group_ids):
             _remove_fem_group(inputs, state, group_id)
         region = wglink_send.read_fem_region(body)
@@ -2260,7 +2264,9 @@ class FemInputChangedHandler(adsk.core.InputChangedEventHandler):
                 _remove_fem_group(inputs, self.state, self.state.group_ids[-1])
             elif input_id == "fem_body":
                 bodies = _selected_entities(inputs, "fem_body")
-                if bodies:
+                # Selection-input focus changes also reach inputChanged. Only
+                # switching bodies may replace rows and discard unsaved edits.
+                if bodies and wglink_send.face_identity(bodies[0]) != self.state.body_key:
                     _restore_fem_region(inputs, self.state, bodies[0])
             elif input_id.startswith(("fem_kind_", "fem_lining_")):
                 group_id = int(input_id.rsplit("_", 1)[-1])
@@ -2372,7 +2378,10 @@ def _mesh_dropdown(inputs, input_id, name, choices, selected):
 def _mesh_select(dropdown, label):
     for index in range(dropdown.listItems.count):
         item = dropdown.listItems.item(index)
-        item.isSelected = item.name == label
+        if item.name == label:
+            if not item.isSelected:
+                item.isSelected = True  # Fusion deselects the previous item.
+            return
 
 
 def _mesh_button(inputs, input_id, name):
@@ -2424,6 +2433,7 @@ def _add_mesh_row(inputs, state, kind, record=None, faces=()):
         children.addTextBoxCommandInput(f"mesh_linked_faces_{row_id}", "Faces", str(len(faces)), 1, True)
     elif state.activated:
         _restore_mesh_selections(selection, rows[row_id])
+        selection.hasFocus = True
     value = children.addValueInput(f"mesh_{kind}_size_{row_id}", "Mesh size", "mm", _mm_input(size))
     value.isEnabled = not linked
     if not linked:
@@ -2518,9 +2528,9 @@ def _mesh_dialog_values(inputs, state):
                  else _mesh_members(inputs, "source", row_id))
         role = (wglink_author.resolve_source_choice(record["role"]) if record.get("instance_id")
                 else _selected_name(inputs, f"mesh_source_role_{row_id}", "HF"))
-        sources.append({**record, "id": record.get("id", f"new-{row_id}"), "role": role,
+        sources.append(wglink_mesh.normalize_source({**record, "id": record.get("id", f"new-{row_id}"), "role": role,
                         "faces": faces, "size_mm": (record["size_mm"] if record.get("instance_id")
-                            else _mm_value(inputs, f"mesh_source_size_{row_id}"))})
+                            else _mm_value(inputs, f"mesh_source_size_{row_id}"))}))
     for row_id, record in state.groups.items():
         groups.append({**record, "name": str(inputs.itemById(f"mesh_group_name_{row_id}").value).strip(),
                        "size_mm": _mm_value(inputs, f"mesh_group_size_{row_id}"),
@@ -2794,6 +2804,13 @@ class MeshDialogActivateHandler(adsk.core.CommandEventHandler):
                     selection = inputs.itemById(f"mesh_{kind}_faces_{row_id}")
                     _restore_mesh_selections(selection, record)
             state.activated = True
+            # Hidden linked rows cannot receive focus. Choose an editable row
+            # once; subsequent clicks, Orbit/Pan and validation keep user focus.
+            editable = [inputs.itemById(f"mesh_{kind}_faces_{row_id}")
+                        for kind, rows in (("source", state.sources), ("group", state.groups))
+                        for row_id, record in rows.items() if not record.get("instance_id")]
+            if editable:
+                editable[0].hasFocus = True
             _sync_mesh_dialog(inputs, state)
         finally:
             state.restoring = False

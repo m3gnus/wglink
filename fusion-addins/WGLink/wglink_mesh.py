@@ -25,12 +25,41 @@ class MeshSettingsError(ValueError):
     """Invalid document settings; never silently fall back to defaults."""
 
 
+def normalize_source(source: Mapping[str, Any]) -> dict[str, Any]:
+    """Complete a CAD authoring record before any mesh consumer reads it.
+
+    Existing paint (including PORT_EXIT) and linked-throat selectors are
+    authoritative. New dialog rows have only a role and a provisional id;
+    deriving their selectors here also supports older partial CAD records.
+    This does not invent source identities or relax the return protocol.
+    """
+    # CAD records can contain live Fusion entities, which cannot be deep-copied.
+    result = dict(source)
+    if "selectors" not in result:
+        role = result.get("role")
+        if role not in (*protocol.MESH_DEFAULTS["source_size_mm"], *protocol.LEGACY_SOURCE_ROLE_ALIASES):
+            raise MeshSettingsError("Source needs a recognised role. Open Sources & Mesh… and choose its role.")
+        result["selectors"] = {"appearance_labels": [role]}
+        if result.get("instance_id"):
+            result["selectors"]["linked_throat"] = {"instance_id": result["instance_id"]}
+    if not isinstance(result["selectors"], Mapping):
+        raise MeshSettingsError("Source selectors must be a record. Open Sources & Mesh… and review the source.")
+    result["selectors"] = deepcopy(dict(result["selectors"]))
+    return result
+
+
 def validate_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
     """Detach a schema-1 record using the single protocol mesh validator."""
     if not isinstance(settings, Mapping) or type(settings.get("schema")) is not int or settings["schema"] != SETTINGS_SCHEMA:
         raise MeshSettingsError("Mesh settings need schema 1. Open Sources & Mesh… and save again.")
     mesh = deepcopy(dict(settings))
     del mesh["schema"]
+    # A group id completely determines its CAD paint selector. Keep explicit
+    # selectors strict, but complete partial saved definitions in one reader.
+    groups = mesh.get("surface_groups")
+    for group in groups if isinstance(groups, list) else ():
+        if isinstance(group, dict) and "selectors" not in group and group.get("group_id"):
+            group["selectors"] = {"appearance_labels": [f"WGMESH_{group['group_id']}"]}
     sizes = mesh.get("source_size_mm")
     if not isinstance(sizes, Mapping) or any(not isinstance(key, str) or not key.strip() for key in sizes):
         raise MeshSettingsError("Mesh settings need sizes by source id.")
@@ -42,7 +71,8 @@ def validate_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
 
 def _validate(mesh: Mapping[str, Any], sources: Sequence[Mapping[str, Any]]) -> None:
     try:
-        protocol.validate_mesh({"mesh": mesh, "sources": sources}, [protocol.MESH_SIZING_FEATURE])
+        protocol.validate_mesh({"mesh": mesh, "sources": [normalize_source(source) for source in sources]},
+                               [protocol.MESH_SIZING_FEATURE])
     except protocol.ProtocolValidationError as exc:
         raise MeshSettingsError(f"Mesh settings: {exc}. Open Sources & Mesh… and save again.") from exc
 
@@ -73,6 +103,7 @@ def snapshot(
     Callers provide groups measured from the current export scope. Stored
     observations are never emitted as if they described today's geometry.
     """
+    sources = [normalize_source(source) for source in sources]
     mesh = protocol.default_mesh(sources)
     if settings is not None:
         stored = validate_settings(settings)

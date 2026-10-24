@@ -382,7 +382,11 @@ def _building_inputs(module):
     an inputChanged collection cannot resolve a sibling or nested group's IDs.
     """
     items = {}
-    command = types.SimpleNamespace()
+    command = types.SimpleNamespace(focused=None, onInputChanged=None)
+
+    def changed(item):
+        if command.onInputChanged is not None:
+            command.onInputChanged(types.SimpleNamespace(input=item, inputs=item.commandInputs))
 
     class Input:
         readonly = {"id", "name", "parentCommand", "parentCommandInput", "commandInputs",
@@ -400,6 +404,8 @@ def _building_inputs(module):
                 raise AttributeError(key) from None
 
         def __setattr__(self, key, value):
+            if key == "isFocused":
+                raise AttributeError("SelectionCommandInput uses hasFocus")
             if key in self.readonly:
                 raise AttributeError(f"{key} is read-only in Fusion")
             super().__setattr__(key, value)
@@ -409,10 +415,14 @@ def _building_inputs(module):
                 parent = member.parentCommandInput
                 while parent is not None:
                     if parent is self:
+                        if command.focused is member:
+                            command.focused = None
+                        member._readonly["isValid"] = False
                         items.pop(member.id, None)
                         break
                     parent = parent.parentCommandInput
             items.pop(self.id)
+            self._readonly["isValid"] = False
             return True
 
     class Dropdown(Input):
@@ -421,14 +431,57 @@ def _building_inputs(module):
             return next((entry for entry in self._entries if entry.isSelected), None)
 
     class Selection(Input, _SelectionInput):
+        # Fusion's isEnabled is a focus alias for selection inputs; hiding
+        # one clears it. Ordinary value/dropdown inputs use normal enabling.
+        @property
+        def isEnabled(self):
+            return self.hasFocus
+
+        @isEnabled.setter
+        def isEnabled(self, value):
+            self.hasFocus = value
+
+        @property
+        def hasFocus(self):
+            return command.focused is self
+
+        @hasFocus.setter
+        def hasFocus(self, value):
+            if value and not self.isVisible:
+                raise RuntimeError("A hidden selection input cannot receive focus")
+            if value:
+                command.focused = self
+            elif self.hasFocus:
+                command.focused = None
+            changed(self)
+
+        @property
+        def isVisible(self):
+            return getattr(self, "_visible", True)
+
+        @isVisible.setter
+        def isVisible(self, value):
+            self._visible = value
+            if not value:
+                self.clearSelection()
+                if self.hasFocus:
+                    command.focused = None
+
         def addSelection(self, face):
             if getattr(face, "selectable", True) is False:
                 return False
+            if self.limits and self.limits[1] and len(self._entities) >= self.limits[1]:
+                return False
+            kind = "SolidBodies" if hasattr(face, "faces") else "Faces"
+            if self.filters and kind not in self.filters:
+                return False
             self._entities.append(face)
+            changed(self)
             return True
 
         def clearSelection(self):
             self._entities.clear()
+            changed(self)
             return True
 
     class Inputs:
@@ -442,6 +495,24 @@ def _building_inputs(module):
         def itemById(self, input_id):
             item = items.get(input_id)
             return item if self.parent is None or (item is not None and item.parentCommandInput is self.parent) else None
+
+        def click(self, input_id):
+            item = items[input_id]
+            if isinstance(item, Selection):
+                item.hasFocus = True
+            else:
+                assert getattr(item, "isEnabled", True)
+                changed(item)
+
+        def pick(self, entity):
+            assert command.focused is not None, "No selection input has focus"
+            return command.focused.addSelection(entity)
+
+        def choose(self, input_id, label):
+            item = items[input_id]
+            assert getattr(item, "isEnabled", True)
+            next(entry for entry in item._entries if entry.name == label).isSelected = True
+            changed(item)
 
         def addGroupCommandInput(self, input_id, name):
             item = Input(input_id, name, self)
@@ -470,8 +541,24 @@ def _building_inputs(module):
             entries = []
             item = Dropdown(input_id, name, self)
             item._entries = entries
+            class Entry:
+                def __init__(self, label, selected):
+                    self.name, self._selected = label, selected
+
+                @property
+                def isSelected(self):
+                    return self._selected
+
+                @isSelected.setter
+                def isSelected(self, value):
+                    if value:
+                        for entry in entries:
+                            entry._selected = False
+                    self._selected = value
+                    changed(item)
+
             def add(label, selected):
-                entries.append(types.SimpleNamespace(name=label, isSelected=selected))
+                entries.append(Entry(label, selected))
                 item.listItems.count = len(entries)
             item._readonly["listItems"] = types.SimpleNamespace(add=add, item=lambda i: entries[i], count=0)
             items[input_id] = item
@@ -481,6 +568,8 @@ def _building_inputs(module):
             item = Selection(input_id, name, self)
             _SelectionInput.__init__(item, [])
             items[input_id] = item
+            if command.focused is None:
+                command.focused = item
             return item
 
     module.adsk.core.ValueInput = types.SimpleNamespace(createByReal=lambda value: value)
@@ -561,3 +650,37 @@ def test_group_name_edit_keeps_creation_title_and_validation_runs_on_group_event
     args = types.SimpleNamespace(inputs=items["fem_name_1"].commandInputs)
     module.FemValidateInputsHandler(state).notify(args)
     assert args.areInputsValid
+
+
+def test_body_focus_events_preserve_unsaved_group_controls_and_face_selections(fixture):
+    module = fixture.module
+    inputs, items = _building_inputs(module)
+    state = module.FemDialogState()
+    module._build_fem_dialog(inputs, state)
+    air, faces = _air(module)
+    inputs.command.onInputChanged = module.FemInputChangedHandler(state)._changed
+    inputs.click('fem_body')
+    assert inputs.pick(air)
+    inputs.click('fem_add_group')
+    selection = items['fem_faces_1']
+    inputs.click('fem_faces_1')
+    assert selection.hasFocus and not items['fem_body'].hasFocus
+    items['fem_name_1'].value = 'Edited cone'
+    assert inputs.pick(faces[0])
+    inputs.choose('fem_role_1', 'HF')
+    inputs.click('fem_body')  # Focus event, same membership: do not rebuild.
+    assert items['fem_faces_1'] is selection and selection.isValid
+    assert items['fem_name_1'].value == 'Edited cone'
+    assert items['fem_role_1'].selectedItem.name == 'HF'
+    assert selection._entities == [faces[0]]
+    inputs.click('fem_faces_1')
+    assert inputs.pick(faces[1])
+    assert selection._entities == faces[:2]
+    # A different body must still load its own declaration.
+    other, _ = _air(module)
+    other.entityToken = 'other-air'
+    items['fem_body'].clearSelection()
+    inputs.click('fem_body')
+    assert inputs.pick(other)
+    assert state.group_ids == [] and not selection.isValid
+    assert 'fem_faces_1' not in items

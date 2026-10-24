@@ -108,6 +108,54 @@ def test_defaults_and_source_id_reconciliation():
     assert stored['source_size_mm'] == {'old':8, 'removed':30}
 
 
+@pytest.mark.parametrize('role,instance_id', [('HF', None), ('PORT_EXIT', None), ('MF', 'linked')])
+def test_partial_cad_sources_get_selectors_at_the_shared_mesh_boundary(role, instance_id):
+    source = {'id': 'kept-source', 'role': role, 'instance_id': instance_id,
+              'suggested_resolution_mm': protocol.default_source_size_mm(role),
+              'observed': {'total_area_mm2': 100}}
+    snapshot = mesh_model.snapshot([source])
+    completed = mesh_model.normalize_source(source)
+    assert completed['selectors']['appearance_labels'] == [role]
+    if instance_id:
+        assert completed['selectors']['linked_throat'] == {'instance_id': instance_id}
+    assert 'selectors' not in source
+    assert set(snapshot['source_size_mm']) == {'kept-source'}
+    assert mesh_model.estimate_triangles(1000, [source], snapshot)['triangles'] > 0
+
+
+def test_source_normalization_preserves_existing_selectors_and_live_entities():
+    class LiveFace:
+        def __deepcopy__(self, _memo):
+            pytest.fail('Fusion entities must not be deep-copied')
+    member = LiveFace()
+    source = {'id': 'legacy', 'role': 'PASSIVE_CARDIOID', 'faces': [member],
+              'selectors': {'appearance_labels': ['PORT_EXIT'], 'advanced_face_indices': [2]}}
+    result = mesh_model.normalize_source(source)
+    assert result == source and result['faces'][0] is member
+    result['selectors']['appearance_labels'].append('HF')
+    assert source['selectors']['appearance_labels'] == ['PORT_EXIT']
+    with pytest.raises(mesh_model.MeshSettingsError, match='selectors'):
+        mesh_model.normalize_source({**source, 'selectors': None})
+    with pytest.raises(mesh_model.MeshSettingsError, match='role'):
+        mesh_model.snapshot([{'id': 'unresolved', 'role': 'unknown'}])
+
+
+def test_partial_saved_group_is_completed_once_for_all_document_readers(send_module):
+    design = types.SimpleNamespace(rootComponent=types.SimpleNamespace(attributes=Attributes()))
+    value = {'schema': 1, **fixture_mesh()}
+    del value['surface_groups'][0]['selectors']
+    design.rootComponent.attributes.add('WGLink', 'mesh_settings', json.dumps(value))
+    saved = send_module.read_mesh_settings(design)
+    group = saved['surface_groups'][0]
+    assert group['selectors'] == {'appearance_labels': [f"WGMESH_{group['group_id']}"]}
+    assert len(saved['surface_groups']) == len(value['surface_groups'])
+    assert saved['source_size_mm'] == value['source_size_mm']
+    # Reading is non-mutating; Save writes the complete shape.
+    assert json.loads(design.rootComponent.attributes.values[('WGLink', 'mesh_settings')]) == value
+    send_module.save_mesh_settings(design, saved)
+    assert send_module.read_mesh_settings(design) == saved
+
+
 @pytest.mark.parametrize('field,value', [('wall_size_mm', 0), ('grading_distance_mm', True),
                                         ('symmetry', 'full'), ('source_size_mm', {'s':float('inf')})])
 def test_store_uses_protocol_validation(field, value):
