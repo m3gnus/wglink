@@ -120,7 +120,7 @@ def generate(name: str, *, quarter: bool) -> None:
     data = path.read_bytes()
     manifest = build_return_manifest(
         return_record={'id': f'wgr_01J0000000000000000000000{2 if quarter else 1}', 'created_at': '2026-01-01T00:00:00Z'},
-        generator={'adapter': 'synthetic-fixture', 'adapter_version': '0.4.0', 'cad_app': 'fusion360', 'cad_version': 'synthetic'},
+        generator={'adapter': 'synthetic-fixture', 'adapter_version': '0.3.2', 'cad_app': 'fusion360', 'cad_version': 'synthetic'},
         document={'name': 'Synthetic quarter enclosure' if quarter else 'Synthetic single-source enclosure', 'native_id': None},
         coordinate_system={'length_unit': 'mm', 'handedness': 'right', 'matrix_convention': 'row-major-local-to-parent',
                            'export_frame': 'root-component', 'document_up': '+z'},

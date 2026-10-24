@@ -1,6 +1,6 @@
 # Waveguide Generator for Fusion
 
-The Waveguide Generator Fusion add-in (0.3.1) is maintained for sending Fusion geometry to Waveguide Generator (WG), solving it there, and inserting or updating native WG geometry in Fusion. The add-in lives in `fusion-addins/WGLink/`. WG's platform installers package the Fusion add-in for macOS and Windows.
+The Waveguide Generator Fusion add-in (0.3.2) is maintained for sending Fusion geometry to Waveguide Generator (WG), solving it there, and inserting or updating native WG geometry in Fusion. The add-in lives in `fusion-addins/WGLink/`. WG's platform installers package the Fusion add-in for macOS and Windows.
 
 Send, Solve, Insert/Update handoffs, acknowledgements and status exchange use files in WG's IPC folder. Send imports a snapshot; Solve also requests a solve. Each explicit command has its own request id. Exports are no longer watched: the user presses Send, or explicitly requests Insert/Update. A new export alone never prompts Fusion.
 

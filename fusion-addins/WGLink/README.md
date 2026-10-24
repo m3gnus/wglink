@@ -311,7 +311,7 @@ Commands and requests cross through WG's machine-local IPC folder,
   manifest requirements are checked separately (Send/Solve and return requests
   also need `automaticDomain` and `documentUp`; source identity is optional).
   Return requests publish a bundle WG reads directly, without writing WG's
-  Send/Solve inbox. The add-in version is 0.3.1.
+  Send/Solve inbox. The add-in version is 0.3.2.
 - **Send and Solve: one request file each (the WG request inbox).** Both write
   `.wg-solve-requests/<operationId>.json` and nothing else, whatever the activation gate says — and differ only in `kind`
   (`receive_snapshot` or `prepare_and_solve`). Both write schema 4; a WG
@@ -570,7 +570,7 @@ The WG `dev` files `server/tests/test_wglink_packaged_pair.py`,
 | Add-in source path | Referenced symbols or contract |
 |---|---|
 | `fusion-addins/WGLink/WGLink.py` | `_fingerprint_hash` extracted by the shared-protocol test; package builder requires the file |
-| `fusion-addins/WGLink/WGLink.manifest` | `version` must match WG's `integrations/wglink/source.json` `addinVersion` (0.3.1) |
+| `fusion-addins/WGLink/WGLink.manifest` | `version` must match WG's `integrations/wglink/source.json` `addinVersion` (0.3.2) |
 | `fusion-addins/WGLink/wglink_core.py` | literal `PACKAGED_RUNTIME_FILE = "wglink_runtime.json"` |
 | `fusion-addins/WGLink/wglink_return.py` | `build_return_manifest`, `dumps_return_manifest`; standalone loader and its failure/foreign-module checks |
 | `fusion-addins/WGLink/wglink_watch.py` | packaged-pair test: `CAPABILITIES_FILENAME`, `write_solve_request`; shared-protocol test: `write_wg_request` |
@@ -603,7 +603,7 @@ oracle, but now requires advertised inbox 4 and Fusion delivery 3; WG `dev`'s
 always writes schema 4. No compatibility re-export is retained.
 
 When re-pinning, set WG's `integrations/wglink/source.json` `addinVersion`
-to 0.3.1 and update its commit together with
+to 0.3.2 and update its commit together with
 `server/cadlink/wglink_protocol.source.json`'s provenance commit as
 appropriate; the protocol SHA stays the same. WG's `server/tests/fixtures/cadlink-endpoint-oracle/PROVENANCE.json`
 `addin_commit` must match the package pin (its test asserts this), so
@@ -612,7 +612,7 @@ regenerate/update that provenance. The packaged-pair test also pins its
 If the add-in shared-fixture provenance
 changes, re-copy it to WG's `server/tests/fixtures/wglink-shared-protocol/` and
 update that directory's `MANIFEST.sha256` consistently. Rebuild the package and run both WG suites against the new pin.
-The builder itself needs no code change; set `addinVersion` to 0.3.1.
+The builder itself needs no code change; set `addinVersion` to 0.3.2.
 
 ## Automatic coordination, and switching it on
 
