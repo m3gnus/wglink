@@ -2010,13 +2010,24 @@ def _named_appearance(app: object, design: object, name: str) -> object:
 
 
 def _appearance_name(face: object, *, strict: bool = False) -> str | None:
-    # Both fetching the appearance and reading its name can throw assetInst for
-    # an unpainted face or after an applied appearance's colour was repaired.
+    """The face's effective appearance name, or None.
+
+    Both fetching the appearance and reading its name can throw assetInst for
+    an unpainted face or after an applied appearance's colour was repaired.
+    Non-strict, every failure reads as None. Strict (a dialog that will act on
+    the answer), a face with no appearance override still reads as None -- an
+    unpainted face is "no override", not unreadable -- and only a face whose
+    own override cannot be read refuses.
+    """
+
     try:
         appearance = face.appearance
         return appearance.name if appearance else None
     except Exception:  # noqa: BLE001 - measured Fusion behavior
-        if strict:
+        if not strict:
+            return None
+        types = adsk.core.AppearanceSourceTypes
+        if face.appearanceSourceType in (types.OverrideAppearanceSource, types.FaceAppearanceSource):
             raise
         return None
 

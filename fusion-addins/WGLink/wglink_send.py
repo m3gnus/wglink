@@ -555,7 +555,7 @@ def _instance_id(body: object) -> str | None:
     return value if value else None
 
 
-def _face_role(face: object) -> str | None:
+def _face_role(face: object, *, strict: bool = False) -> str | None:
     """The role a painted face carries, as its literal appearance name.
 
     Accepts every recognised role, current or retired, but never rewrites the
@@ -564,7 +564,11 @@ def _face_role(face: object) -> str | None:
     rename.
     """
 
-    value = wglink_core._appearance_name(face, strict=True)
+    # Fail-soft by default: Send, the preview and the fingerprint read every
+    # face, and Fusion throws assetInst for an unpainted face or after a role
+    # colour repair -- that is "no role", not a refusal. A dialog planning an
+    # edit of this face passes ``strict`` (see ``_appearance_name``).
+    value = wglink_core._appearance_name(face, strict=strict)
     if not isinstance(value, str):
         return None
     canonical = value.strip().upper()
@@ -2612,6 +2616,15 @@ def read_source_stamp(face: object) -> dict[str, Any] | None:
     return None if value is None else _parse_source_stamp(value)
 
 
+def _carries_source_stamp(face: object) -> bool:
+    try:
+        return wglink_core._attribute(face, SOURCE_IDENTITY_ATTRIBUTE, strict=True) is not None
+    except Exception as exc:
+        raise SourceIdentityReadError(
+            "Could not read a saved WG source identity. Close and reopen Sources & Mesh… to retry before saving."
+        ) from exc
+
+
 def _canonical_source_role(value: object) -> str | None:
     """A painted or stamped role with the retired ``PORT_EXIT`` spelling resolved."""
 
@@ -2697,10 +2710,7 @@ def _painted_source_identity(
         # not parse is a corruption, and it establishes nothing about whether
         # the face is already claimed.
         refusal = _unresolved_paint(role, canonical, len(missing), len(natives))
-        pre_stamp = bool(natives) and all(
-            wglink_core._attribute(native, SOURCE_IDENTITY_ATTRIBUTE, strict=True) is None
-            for native in natives
-        )
+        pre_stamp = bool(natives) and not any(_carries_source_stamp(native) for native in natives)
         seed = _painted_source_identity_seed(design, canonical) if design is not None else None
         if pre_stamp and design is not None:
             if (seed is not None and adopt_seeded) or (
@@ -2784,8 +2794,14 @@ def _stamp_attributes(design: object) -> list[tuple[object, dict[str, Any]]]:
     result = []
     for attribute in found:
         try:
-            if str(attribute.name) != SOURCE_IDENTITY_ATTRIBUTE or attribute.parent is None:
-                raise ValueError("A source identity attribute has no readable face owner.")
+            if str(attribute.name) != SOURCE_IDENTITY_ATTRIBUTE:
+                continue
+            # findAttributes also returns attributes whose face does not exist
+            # at the current timeline position (a stamped face consumed by a
+            # later feature). Such an orphan is no source here, and no edit
+            # could restore it, so it is absent -- never a refusal.
+            if attribute.parent is None:
+                continue
             stamp = _parse_source_stamp(attribute.value)
         except Exception as exc:
             raise SourceIdentityReadError(
@@ -3362,6 +3378,8 @@ def paint_surface_group(
             seen.add(key)
             faces.append(native)
     source_keys = {_face_key(_native_face(face)) for face in source_faces}
+    # An unpainted face that throws assetInst has no override; only an
+    # unreadable override of a face this edit plans refuses.
     descriptors = [{"index": index, "appearance_name": wglink_core._appearance_name(face, strict=True),
                     "is_source": _face_key(face) in source_keys} for index, face in enumerate(faces)]
     try:
@@ -3630,7 +3648,7 @@ def _sources(
     face_bodies: dict[tuple[str, object], str] = {}
     for body in included_bodies:
         name = str(getattr(body, "name", "unnamed body") or "unnamed body")
-        for face in wglink_core._items(body.faces, strict=True):
+        for face in wglink_core._items(getattr(body, "faces", None)):
             face_bodies[_face_key(face)] = name
 
     fractions = retained_fractions or {}
@@ -3669,7 +3687,7 @@ def _sources(
 
     painted: dict[str, list[object]] = {role: [] for role in RECOGNISED_SOURCE_ROLES}
     for body in included_bodies:
-        for face in wglink_core._items(body.faces, strict=True):
+        for face in wglink_core._items(getattr(body, "faces", None)):
             role = _face_role(face)
             if role and _face_key(face) not in claimed:
                 painted[role].append(face)

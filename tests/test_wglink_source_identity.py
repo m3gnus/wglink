@@ -541,3 +541,79 @@ def test_a_source_face_outside_the_export_is_named_as_outside_not_removed(
     assert state["hash"] is None and "outside" in state["reason"]
     # The root scope sees both faces, so its heartbeat token is unaffected.
     assert send_module.return_state(_app(), {"source_identity": True})["hash"]
+
+
+# ------------------------------------------- fail-soft reads outside a dialog
+
+
+class _AssetInstFace(types.SimpleNamespace):
+    """An unpainted face: Fusion throws assetInst for its appearance."""
+
+    appearanceSourceType = 1  # inherited from the body: no override
+
+    @property
+    def appearance(self):
+        raise RuntimeError("3 : assetInst")
+
+
+def _unpainted_throwing_face():
+    native = stamped_face(None)
+    return _AssetInstFace(**vars(native))
+
+
+def test_send_and_fingerprint_read_an_assetinst_unpainted_face_as_no_role(
+    send_module, tmp_path, monkeypatch
+):
+    hf, plain = stamped_face("HF"), _unpainted_throwing_face()
+    design = _painted_document(send_module, monkeypatch, [hf, plain])
+    put_stamp([hf], "HF")
+
+    report = send_module.preflight_scope(_app(), {"source_identity": True})
+    assert report.get("source_error") is None
+    assert [source["role"] for source in report["sources"]] == ["HF"]
+
+    exported = _send(send_module, tmp_path)
+    assert [source["selectors"] for source in exported["sources"]] == [
+        {"appearance_labels": ["HF"]}
+    ]
+    body = design.rootComponent.bRepBodies.item(0)
+    assert {"unreadable": True} not in send_module._shape_fingerprint(body)["faces"]
+
+
+# ------------------------------------------------------ orphaned stamps
+
+
+class _OrphanDesign(FakeDesign):
+    """findAttributes also returns a stamp whose face is gone at this
+    timeline position (consumed by a later feature): its parent is None."""
+
+    def __init__(self, *args, orphan, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.orphan = orphan
+
+    def findAttributes(self, group, name):
+        found = list(super().findAttributes(group, name))
+        if name == STAMP:
+            orphan = _Found(self.orphan, (GROUP, STAMP))
+            orphan.parent = None
+            found.append(orphan)
+        return Collection(found)
+
+
+def test_an_orphaned_source_stamp_is_absent_and_never_locks_out_assignment(
+    send_module, tmp_path, monkeypatch
+):
+    consumed = stamped_face("HF")
+    put_stamp([consumed], "HF", identity="wgs-" + "C" * 20)
+    face_value = stamped_face("LF")
+    cabinet = solid("cabinet", [face_value])
+    design = _OrphanDesign(component("Identity", [cabinet]), [face_value], orphan=consumed)
+    monkeypatch.setattr(send_module.wglink_core, "_design", lambda _app: design)
+
+    assert send_module._stamp_attributes(design) == []
+    result = send_module.assign_source_identity(design, [face_value], "LF")
+    assert stamp_of(face_value)["id"] == result["identity"]
+    assert send_module.clear_source_identity(design, [face_value]) == 1
+    assert stamp_of(face_value) is None
+    # The orphan was neither journaled nor touched.
+    assert stamp_of(consumed)["id"] == "wgs-" + "C" * 20

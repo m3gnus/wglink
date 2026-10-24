@@ -993,7 +993,7 @@ def _face_descriptors(faces: list[object]) -> list[dict[str, object]]:
             area = None
         descriptors.append({
             "index": index,
-            "current_role": wglink_send._face_role(face),
+            "current_role": wglink_send._face_role(face, strict=True),
             "area_mm2": area,
         })
     return descriptors
@@ -2563,6 +2563,8 @@ def _build_mesh_dialog(inputs, state):
         definitions = list(saved["surface_groups"] if saved is not None else [])
         painted = {}
         for face in all_faces:
+            # An unpainted face that throws assetInst is "no override"; an
+            # unreadable WGMESH override must not silently leave its group.
             label = wglink_core._appearance_name(face, strict=True) or ""
             if label.startswith("WGMESH_"):
                 painted.setdefault(label[len("WGMESH_"):], []).append(face)
