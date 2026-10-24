@@ -105,6 +105,16 @@ class OccurrenceFace:
         return self.nativeObject.area
 
 
+def _asset(design, asset, name=None):
+    # A mocked Fusion resolver must also put its copy into the document library.
+    if name is not None:
+        asset.name = name
+    if asset not in design.appearances:
+        design.appearances.append(asset)
+    asset.deleteMe = lambda: design.appearances.remove(asset) is None
+    return asset
+
+
 def document(monkeypatch, send_module):
     source = face('HF')
     back = AppearanceFace(types.SimpleNamespace(name='body paint', id='grey'))
@@ -230,7 +240,7 @@ def test_send_stored_snapshot_refreshes_paint_and_fingerprint(monkeypatch, tmp_p
     assert baseline['hash']
     settings = fixture_mesh()
     settings.update(wall_size_mm=30, grading_distance_mm=75, symmetry='off', source_size_mm={'source-hf':8})
-    back.appearance = types.SimpleNamespace(name='WGMESH_back')
+    back.appearance = types.SimpleNamespace(name='WGMESH_back', id='WGMESH_back')
     send_module.save_mesh_settings(design, settings)
     first = send_module.return_state(app)
     assert first['hash'] != baseline['hash']
@@ -257,9 +267,9 @@ def test_send_stored_snapshot_refreshes_paint_and_fingerprint(monkeypatch, tmp_p
 
 def test_group_paint_reuses_library_writer_and_clear_restores_body(monkeypatch, send_module):
     app, design, exterior, source, back = document(monkeypatch, send_module)
-    appearance = types.SimpleNamespace(name='WGMESH_back')
+    appearance = types.SimpleNamespace(name='WGMESH_back', id='WGMESH_back')
     lookups = []
-    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda _a, _d, name: lookups.append(name) or appearance)
+    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda _a, _d, name: lookups.append(name) or _asset(design, appearance, name))
     selected_body = types.SimpleNamespace(faces=Collection([back]))
     send_module.paint_surface_group(app, design, [selected_body, back], 'back')
     assert back.appearance is appearance and lookups == ['WGMESH_back']
@@ -279,7 +289,7 @@ def test_proxy_group_paint_and_geometric_source_refusal(monkeypatch, send_module
     proxy = types.SimpleNamespace(nativeObject=back)
     with pytest.raises(send_module.wglink_core.WgLinkError, match='both a source'):
         send_module.paint_surface_group(app, design, [proxy], 'back', source_faces=[back])
-    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda *_a: types.SimpleNamespace(name='WGMESH_back'))
+    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda *_a: _asset(design, types.SimpleNamespace(name='WGMESH_back', id='WGMESH_back')))
     send_module.paint_surface_group(app, design, [proxy], 'back')
     assert back.appearance.name == 'WGMESH_back'
     assert not hasattr(proxy, 'appearance')
@@ -292,8 +302,8 @@ def test_group_clear_restores_exact_override_after_reopen(monkeypatch, send_modu
     design.appearances.append(red)
     if override:
         back.appearance = red
-    cyan = types.SimpleNamespace(name='WGMESH_back')
-    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda *_a: cyan)
+    cyan = types.SimpleNamespace(name='WGMESH_back', id='WGMESH_back')
+    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda _a, _d, name: _asset(design, cyan, name))
     send_module.paint_surface_group(app, design, [back], 'back')
     saved = dict(back.attributes.values)
     assert back.appearance is cyan
@@ -321,8 +331,8 @@ def test_group_clear_restores_exact_override_after_reopen(monkeypatch, send_modu
 
 def test_group_rejoin_after_manual_repaint_captures_the_new_override(monkeypatch, send_module):
     app, design, _, _, back = document(monkeypatch, send_module)
-    cyan = types.SimpleNamespace(name='WGMESH_back')
-    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda *_a: cyan)
+    cyan = types.SimpleNamespace(name='WGMESH_back', id='WGMESH_back')
+    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda _a, _d, name: _asset(design, cyan, name))
     send_module.paint_surface_group(app, design, [back], 'back')
     red = types.SimpleNamespace(name='red', id='red')
     design.appearances.append(red)
@@ -339,14 +349,14 @@ def test_group_original_failures_keep_current_paint(monkeypatch, send_module, fa
     red = types.SimpleNamespace(name='red', id='red')
     design.appearances.append(red)
     back.appearance = red
-    cyan = types.SimpleNamespace(name='WGMESH_back')
-    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda *_a: cyan)
+    cyan = types.SimpleNamespace(name='WGMESH_back', id='WGMESH_back')
+    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda _a, _d, name: _asset(design, cyan, name))
     if failure == 'unreadable-original':
         red.id = ''
     elif failure == 'attribute-write':
         back.attributes.add = lambda *_a: None  # Fusion may refuse without raising.
     if failure in ('unreadable-original', 'attribute-write'):
-        with pytest.raises(send_module.wglink_core.WgLinkError, match='original.*appearance'):
+        with pytest.raises(send_module.wglink_core.WgLinkError, match='original.*appearance|mesh_group_original_appearance'):
             send_module.paint_surface_group(app, design, [back], 'back')
         assert back.appearance is red
         return
@@ -402,8 +412,8 @@ def test_group_unique_or_explicit_all_instances_paints_measures_and_clears(monke
         # Make Independent leaves only one occurrence referencing this component.
         design.rootComponent.allOccurrences.pop()
         proxies = proxies[:1]
-    cyan = types.SimpleNamespace(name='WGMESH_back')
-    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda *_a: cyan)
+    cyan = types.SimpleNamespace(name='WGMESH_back', id='WGMESH_back')
+    monkeypatch.setattr(send_module.wglink_core, '_named_appearance', lambda _a, _d, name: _asset(design, cyan, name))
     selections = [types.SimpleNamespace(faces=Collection([p]), assemblyContext=p.assemblyContext)
                   for p in proxies]
     send_module.paint_surface_group(app, design, selections, 'back')
@@ -428,7 +438,7 @@ def test_group_errors_refuse_before_step_export(monkeypatch, tmp_path, send_modu
     app, design, exterior, _, back = document(monkeypatch, send_module)
     settings = fixture_mesh()
     if kind != 'empty':
-        back.appearance = types.SimpleNamespace(name='WGMESH_back')
+        back.appearance = types.SimpleNamespace(name='WGMESH_back', id='WGMESH_back')
     if kind == 'unknown':
         settings['surface_groups'] = []
     send_module.save_mesh_settings(design, settings)
@@ -493,7 +503,7 @@ def test_curvature_uses_chord_deviation_ceiling_and_rejects_bad_evidence():
 def test_group_appearance_fallback_has_visible_colour(monkeypatch, send_module):
     core = send_module.wglink_core
     colour = types.SimpleNamespace(value=None)
-    minted = types.SimpleNamespace(name='WGMESH_back')
+    minted = types.SimpleNamespace(name='WGMESH_back', id='WGMESH_back')
     appearances = Collection()
     appearances.addByCopy = lambda _source, name: appearances.append(minted) or minted
     library = types.SimpleNamespace(name='Materials', appearances=Collection([types.SimpleNamespace(name='Steel - Satin')]))
@@ -514,11 +524,14 @@ def test_mesh_writes_change_the_cheap_heartbeat_key(monkeypatch, tmp_path):
     module = fixture.module
     monkeypatch.setattr(module, '_manifest_feature_enabled', lambda *_a: False)
     monkeypatch.setattr(module, '_source_identity_enabled', lambda: False)
-    design = types.SimpleNamespace(rootComponent=types.SimpleNamespace(attributes=Attributes()))
+    design = types.SimpleNamespace(rootComponent=types.SimpleNamespace(attributes=Attributes(), allOccurrences=[]))
     first = module._geometry_change_key(design, {})
     module.wglink_send.save_mesh_settings(design, fixture_mesh())
     second = module._geometry_change_key(design, {})
     assert first != second
-    member = face('WGMESH_back')
+    member = AppearanceFace(types.SimpleNamespace(name='body paint', id='grey'))
+    member.appearance = types.SimpleNamespace(name='WGMESH_back', id='back')
+    monkeypatch.setattr(module.adsk.core, 'AppearanceSourceTypes', types.SimpleNamespace(
+        OverrideAppearanceSource=4, FaceAppearanceSource=3), raising=False)
     module.wglink_send.paint_surface_group(None, design, [member], None)
     assert second != module._geometry_change_key(design, {})

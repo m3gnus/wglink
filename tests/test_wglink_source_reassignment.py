@@ -209,7 +209,7 @@ def test_a_refused_write_leaves_every_stamp_as_it_was(send_module, monkeypatch):
     send_module.assign_source_identity(design, [a, b], "HF")
     before = {name: dict(face.attributes.values) for name, face in (("a", a), ("b", b))}
 
-    with pytest.raises(send_module.wglink_core.WgLinkError, match="Every source identity stamp was restored"):
+    with pytest.raises(send_module.wglink_core.WgLinkError, match="This dialog's changes were restored"):
         send_module.assign_source_identity(design, [a, locked], "HF")
 
     assert {name: dict(face.attributes.values) for name, face in (("a", a), ("b", b))} == before
@@ -257,5 +257,5 @@ def test_a_rollback_that_fusion_refuses_is_reported_not_called_restored(
         send_module.assign_source_identity(design, [fresh, locked], "HF")
 
     text = str(refusal.value)
-    assert "1 face(s) could not be restored" in text
+    assert "some changes could not be restored" in text
     assert "restored." not in text.replace("could not be restored", "")

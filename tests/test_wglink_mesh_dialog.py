@@ -38,7 +38,8 @@ def scene(monkeypatch, tmp_path):
         return Collection(found)
     appearances = {inherited.id: inherited, "hf": faces[0].appearance}
     design = types.SimpleNamespace(rootComponent=root, findAttributes=find,
-        appearances=types.SimpleNamespace(itemById=appearances.get))
+        appearances=types.SimpleNamespace(itemById=appearances.get,
+            itemByName=lambda name: next((a for a in appearances.values() if a.name == name), None)))
     monkeypatch.setattr(module.adsk.core, "AppearanceSourceTypes", types.SimpleNamespace(
         OverrideAppearanceSource=4, FaceAppearanceSource=3), raising=False)
     fixture.app.activeProduct = design
@@ -47,7 +48,11 @@ def scene(monkeypatch, tmp_path):
     fixture.cabinet = cabinet
     monkeypatch.setattr(module.wglink_core, "_design", lambda _app: design)
     def named(_app, _design, name):
-        return appearances.setdefault(name, types.SimpleNamespace(name=name, id=name))
+        if name not in appearances:
+            asset = types.SimpleNamespace(name=name, id=name)
+            asset.deleteMe = lambda: appearances.pop(name, None) is not None
+            appearances[name] = asset
+        return appearances[name]
     monkeypatch.setattr(module.wglink_core, "_named_appearance", named)
     return fixture
 
@@ -637,7 +642,7 @@ def test_failed_journal_read_aborts_before_mutation_or_settings_write_refusal(sc
     monkeypatch.setattr(module, "_save_mesh_dialog", record_save)
     monkeypatch.setattr(module.wglink_send, "save_mesh_settings", refuse)
 
-    with pytest.raises(module.wglink_author.AuthorError, match="Close and reopen Sources & Mesh") as caught:
+    with pytest.raises(module.wglink_author.AuthorError, match="Close and reopen") as caught:
         module._apply_mesh_dialog(inputs, state)
     assert "changes were restored" not in str(caught.value)
     assert attributes.failures == 0
@@ -790,7 +795,7 @@ def test_incomplete_rollback_does_not_claim_restoration(scene, monkeypatch):
 
 @pytest.mark.parametrize("stage", ["lookup", "value"])
 @pytest.mark.parametrize("check", ["before-restore", "after-restore"])
-def test_unreadable_rollback_check_after_write_refusal_never_claims_restoration(scene, monkeypatch, stage, check):
+def test_rollback_retries_unreadable_state_and_only_claims_verified_restoration(scene, monkeypatch, stage, check):
     module = scene.module
     inputs, _items, state = build(scene)
     assert not scene.design.rootComponent.attributes.values
@@ -818,13 +823,17 @@ def test_unreadable_rollback_check_after_write_refusal_never_claims_restoration(
         raise module.wglink_core.WgLinkError("settings write refused")
     monkeypatch.setattr(module.wglink_send, "save_mesh_settings", refuse)
 
-    with pytest.raises(module.wglink_author.AuthorError, match="some changes could not be restored") as caught:
+    outcome = "some changes could not be restored" if check == "after-restore" else "changes were restored"
+    with pytest.raises(module.wglink_author.AuthorError, match=outcome) as caught:
         module._apply_mesh_dialog(inputs, state)
     assert "settings write refused" in str(caught.value)
-    assert "Undo this command in Fusion" in str(caught.value)
-    assert "This dialog's changes were restored" not in str(caught.value)
     assert failed_attributes[0].failures == 0
-    assert scene.design.rootComponent.attributes.values  # Restoration really failed.
+    if check == "after-restore":
+        assert "Undo this command in Fusion" in str(caught.value)
+        assert "This dialog's changes were restored" not in str(caught.value)
+        assert scene.design.rootComponent.attributes.values  # Restoration really failed.
+    else:
+        assert not scene.design.rootComponent.attributes.values
 
 
 def test_failure_never_repaints_read_only_linked_sources(scene, monkeypatch):
@@ -837,11 +846,11 @@ def test_failure_never_repaints_read_only_linked_sources(scene, monkeypatch):
     monkeypatch.setattr(module.wglink_send, "preflight_scope", linked)
     inputs, _items, state = build(scene)
     journaled = []
-    remember = module.wglink_send._StampEdit.remember_appearance
+    remember = module.wglink_send._DocumentEdit.remember_appearance
     def record(edit, member):
         journaled.append(member)
         remember(edit, member)
-    monkeypatch.setattr(module.wglink_send._StampEdit, "remember_appearance", record)
+    monkeypatch.setattr(module.wglink_send._DocumentEdit, "remember_appearance", record)
     def refuse(*_args):
         raise RuntimeError("save refused")
     monkeypatch.setattr(module, "_save_mesh_dialog", refuse)

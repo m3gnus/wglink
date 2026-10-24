@@ -727,6 +727,13 @@ class _FailingAttributes(_Attributes):
                     raise RuntimeError("Injected attribute value failure")
                 return attribute.value
 
+            @value.setter
+            def value(self, value):
+                attribute.value = value
+
+            def deleteMe(self):
+                return attribute.deleteMe()
+
         return Attribute()
 
 

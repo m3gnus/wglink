@@ -244,6 +244,13 @@ def _items(collection: object, *, strict: bool = False) -> list[object]:
         if strict:
             raise WgLinkError("The Fusion collection is unavailable.")
         return []
+    if strict:
+        if isinstance(collection, (list, tuple)):
+            return list(collection)
+        count = getattr(collection, "count", None)
+        if isinstance(count, int):
+            return [collection.item(index) for index in range(count)]
+        return list(collection)
     try:
         return [collection.item(index) for index in range(collection.count)]
     except Exception:  # noqa: BLE001 - Fusion exposes both lists and collections
@@ -303,21 +310,15 @@ def _attribute_value(entity: object, name: str, *, strict: bool = False) -> str 
 
 
 def _set_attribute(entity: object, name: str, value: object) -> None:
-    attributes = _attributes(entity)
+    attributes = _attributes(entity, strict=True)
     if attributes is None:
         raise WgLinkError(f"Fusion {_kind(entity) or 'entity'} cannot carry attributes")
     text = str(value)
-    existing = _attribute(entity, name)
+    existing = _attribute(entity, name, strict=True)
     if existing is not None:
-        try:
-            existing.value = text
-            return
-        except Exception:  # noqa: BLE001 - replace a stale attribute instance
-            try:
-                existing.deleteMe()
-            except Exception:  # noqa: BLE001
-                pass
-    attributes.add(ATTRIBUTE_GROUP, name, text)
+        existing.value = text
+    else:
+        attributes.add(ATTRIBUTE_GROUP, name, text)
 
 
 # The WG operation a Fusion-bound mutation is applying. It is stamped on the
@@ -1975,10 +1976,7 @@ def _colour_property(appearance: object) -> object | None:
 
 def _named_appearance(app: object, design: object, name: str) -> object:
     source = _library_appearance(app, name)
-    try:
-        existing = design.appearances.itemByName(name)
-    except Exception:  # noqa: BLE001
-        existing = None
+    existing = design.appearances.itemByName(name)
     if existing:
         # Do not mutate a shared appearance already painted onto managed faces.
         # Fusion invalidates every existing face binding when its colour asset
@@ -2011,13 +2009,15 @@ def _named_appearance(app: object, design: object, name: str) -> object:
     )
 
 
-def _appearance_name(face: object) -> str | None:
+def _appearance_name(face: object, *, strict: bool = False) -> str | None:
     # Both fetching the appearance and reading its name can throw assetInst for
     # an unpainted face or after an applied appearance's colour was repaired.
     try:
         appearance = face.appearance
         return appearance.name if appearance else None
     except Exception:  # noqa: BLE001 - measured Fusion behavior
+        if strict:
+            raise
         return None
 
 

@@ -1014,7 +1014,7 @@ def _body_descriptors(bodies: list[object]) -> list[dict[str, object]]:
         descriptors.append({
             "index": index,
             "name": str(getattr(body, "name", "") or f"body {index + 1}"),
-            "current": wglink_send.read_declaration(_native(body)),
+            "current": wglink_send.read_declaration(_native(body), strict=True),
             "body_kind": "solid" if bool(getattr(body, "isSolid", False)) else "surface",
         })
     return descriptors
@@ -1024,37 +1024,48 @@ def _apply_source_faces(faces: list[object], role: str) -> dict[str, object]:
     app = _app()
     design = wglink_core._design(app)
     plan = wglink_author.plan_source_assignment(_face_descriptors(faces), role)
-    wglink_author.apply_face_appearance_plan(
-        faces, plan, lambda name: wglink_core._named_appearance(app, design, name)
-    )
-    # The source identity is authored here, and whatever WG advertises, so a
-    # document is ready when WG starts reading identities. The preflight and the
-    # heartbeat never author one. Send authors one in exactly one case: a role
-    # group painted before source identities existed, where no face carries the
-    # attribute at all, and only after ``_confirm_source_adoption`` has asked --
-    # see ``wglink_send._adopt_painted_source``. Every selected face is stamped,
-    # including one that already carried the role: re-running this command on a
-    # source WGLink refused is how that source is reassigned. Clear takes the
-    # identity off every selected face, including one whose paint was already
-    # removed by hand, which is the only way to take such a stale face out.
-    global _source_authoring_generation
-    _source_authoring_generation += 1
-    summary = plan.summary
-    # The dialog owns paint/attribute rollback and the final failure message.
-    if plan.role is not None:
-        wglink_send.assign_source_identity(
-            design, [faces[index] for index in (*plan.paint, *plan.unchanged)], plan.role
+    def prepare(edit):
+        wglink_send._prepare_source_edit(edit, design, faces)
+        for face in faces:
+            edit.remember_appearance(face)
+        if plan.paint:
+            edit.remember_asset(design, plan.appearance_name)
+
+    def mutate(edit):
+        wglink_author.apply_face_appearance_plan(
+            faces, plan, lambda name: edit.named_appearance(app, design, name),
+            write_appearance=edit.paint
         )
-        removed = 0
-    else:
-        removed = wglink_send.clear_source_identity(design, faces)
-    if plan.role is None:
-        if removed and not plan.clear:
-            summary = (
-                f"Removed a stale WG source identity from {removed} face(s) that no "
-                "longer carried a WG source role."
+        # The source identity is authored here, and whatever WG advertises, so a
+        # document is ready when WG starts reading identities. The preflight and the
+        # heartbeat never author one. Send authors one in exactly one case: a role
+        # group painted before source identities existed, where no face carries the
+        # attribute at all, and only after ``_confirm_source_adoption`` has asked --
+        # see ``wglink_send._adopt_painted_source``. Every selected face is stamped,
+        # including one that already carried the role: re-running this command on a
+        # source WGLink refused is how that source is reassigned. Clear takes the
+        # identity off every selected face, including one whose paint was already
+        # removed by hand, which is the only way to take such a stale face out.
+        global _source_authoring_generation
+        _source_authoring_generation += 1
+        summary = plan.summary
+        # The dialog owns paint/attribute rollback and the final failure message.
+        if plan.role is not None:
+            wglink_send.assign_source_identity(
+                design, [faces[index] for index in (*plan.paint, *plan.unchanged)], plan.role
             )
-    return {"summary": summary}
+            removed = 0
+        else:
+            removed = wglink_send.clear_source_identity(design, faces)
+        if plan.role is None:
+            if removed and not plan.clear:
+                summary = (
+                    f"Removed a stale WG source identity from {removed} face(s) that no "
+                    "longer carried a WG source role."
+                )
+        return {"summary": summary}
+
+    return wglink_send.document_edit("save WG source faces", prepare, mutate)
 
 
 def _apply_body_declaration(command_inputs: object) -> dict[str, object]:
@@ -1065,11 +1076,18 @@ def _apply_body_declaration(command_inputs: object) -> dict[str, object]:
         _body_descriptors(bodies),
         _selected_name(command_inputs, "declaration", ""),
     )
-    for index in plan.write:
-        wglink_send.declare_body(_native(bodies[index]), plan.declaration)
-    for index in plan.clear:
-        wglink_send.clear_declaration(_native(bodies[index]))
-    return {"summary": plan.summary}
+    def prepare(edit):
+        for body in bodies:
+            edit.remember_attribute(_native(body), wglink_send.DECLARATION_ATTRIBUTE)
+
+    def mutate(edit):
+        for index in plan.write:
+            wglink_send.declare_body(_native(bodies[index]), plan.declaration)
+        for index in plan.clear:
+            wglink_send.clear_declaration(_native(bodies[index]))
+        return {"summary": plan.summary}
+
+    return wglink_send.document_edit("save body declarations", prepare, mutate)
 
 
 def _tag_summary(tag: object) -> str:
@@ -1757,8 +1775,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 else PANEL_NAME,
             )
         except (wglink_core.WgLinkError, wglink_author.AuthorError) as exc:
-            if self.fem_state is not None and self.fem_state.restoration_error:
-                args.isValidResult = False
+            args.isValidResult = False
             # A Send or Solve refused after its export ran (WG outdated or not
             # collecting, a failed request write) may already have changed the
             # document -- an adopted source -- and has published a return.
@@ -2174,20 +2191,19 @@ def _other_region_ids(body: object) -> list[str]:
     target = _native(body)
     ids = []
     try:
-        found = wglink_core._design(_app()).findAttributes(
-            wglink_core.ATTRIBUTE_GROUP, wglink_fem.REGION_ATTRIBUTE
-        )
-    except Exception:  # noqa: BLE001 - uniqueness is re-checked at Send
-        return ids
-    for attribute in found or ():
-        try:
+        found = wglink_core._items(wglink_core._design(_app()).findAttributes(
+            wglink_core.ATTRIBUTE_GROUP, wglink_fem.REGION_ATTRIBUTE), strict=True)
+        for attribute in found:
             if attribute.parent == target:
                 continue
             region = wglink_fem.read_region_attribute(attribute.value)
-        except Exception:  # noqa: BLE001
-            continue
-        if region is not None:
+            if region is None:
+                raise ValueError("A saved FEM region is unreadable.")
             ids.append(str(region["region_id"]))
+    except Exception as exc:
+        raise wglink_fem.FemDeclarationError(
+            "Could not read the saved FEM regions. Reselect the air body to retry before saving."
+        ) from exc
     return ids
 
 
@@ -2395,7 +2411,7 @@ class MeshDialogState:
 def _mesh_faces(entities):
     faces = {}
     for entity in entities:
-        for face in wglink_core._items(entity.faces) if hasattr(entity, "faces") else [entity]:
+        for face in wglink_core._items(entity.faces, strict=True) if hasattr(entity, "faces") else [entity]:
             faces.setdefault(wglink_send._face_key(face), face)
     return list(faces.values())
 
@@ -2500,6 +2516,7 @@ def _build_mesh_dialog(inputs, state):
         # Resolve saved settings before the fail-soft source preview can read
         # them. A failed read leaves construction guarded until the next open.
         saved = wglink_send.read_mesh_settings(design)
+        wglink_send._stamp_attributes(design)
         report = wglink_send.preflight_scope(
             _app(), {"source_identity": _source_identity_enabled(), "display_automatic_domain": True},
             authoring_context=state.context,
@@ -2542,7 +2559,7 @@ def _build_mesh_dialog(inputs, state):
         definitions = list(saved["surface_groups"] if saved is not None else [])
         painted = {}
         for face in all_faces:
-            label = wglink_core._appearance_name(face) or ""
+            label = wglink_core._appearance_name(face, strict=True) or ""
             if label.startswith("WGMESH_"):
                 painted.setdefault(label[len("WGMESH_"):], []).append(face)
         for group_id in sorted(painted) if saved is None else ():
@@ -2696,31 +2713,24 @@ def _apply_mesh_dialog(inputs, state):
         *state.original_groups,
         *(face for row in [*sources, *groups] if not row.get("instance_id") for face in row["faces"]),
     ])
-    # Source reassignment can also repair stamps outside the selected faces.
-    # Reuse its transaction journal for a single atomic dialog Save.
-    stamps = wglink_send._StampEdit()
-    try:
-        for attribute in wglink_core._items(design.findAttributes(
-                wglink_core.ATTRIBUTE_GROUP, wglink_send.SOURCE_IDENTITY_ATTRIBUTE), strict=True):
-            stamps._remember(attribute.parent)
+    def prepare(edit):
+        wglink_send._prepare_source_edit(edit, design, faces)
         for face in faces:
             native = _native(face)
-            stamps.remember_appearance(native)
-            stamps._remember(native)
-            stamps.remember_attribute(native, wglink_send.GROUP_ORIGINAL_APPEARANCE_ATTRIBUTE)
-        stamps.remember_attribute(design.rootComponent, wglink_mesh.SETTINGS_ATTRIBUTE)
-    except Exception as exc:
-        raise wglink_author.AuthorError(
-            "Could not read the original sources and mesh settings from this document. "
-            "Close and reopen Sources & Mesh… to retry before saving."
-        ) from exc
+            edit.remember_appearance(native)
+            edit.remember_attribute(native, wglink_send.GROUP_ORIGINAL_APPEARANCE_ATTRIBUTE)
+        edit.remember_attribute(design.rootComponent, wglink_mesh.SETTINGS_ATTRIBUTE)
+        for source in sources:
+            if not source.get("instance_id"):
+                edit.remember_asset(design, source["role"])
+        for group in groups:
+            edit.remember_asset(design, "WGMESH_" + group["group_id"])
+
     try:
-        return _save_mesh_dialog(design, app, state, sources, groups, mesh)
-    except Exception as exc:
-        problems = stamps.rollback()
-        if problems:
-            raise wglink_author.AuthorError(f"Could not save sources and mesh: {exc} Undo this command in Fusion; some changes could not be restored.") from exc
-        raise wglink_author.AuthorError(f"Could not save sources and mesh: {exc} This dialog's changes were restored.") from exc
+        return wglink_send.document_edit("save sources and mesh", prepare,
+            lambda edit: _save_mesh_dialog(design, app, state, sources, groups, mesh))
+    except wglink_core.WgLinkError as exc:
+        raise wglink_author.AuthorError(str(exc)) from exc
 
 
 def _save_mesh_dialog(design, app, state, sources, groups, mesh):

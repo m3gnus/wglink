@@ -367,10 +367,12 @@ def test_with_coordination_on_the_same_scenario_reaches_them(
 
 def _source_command(fixture, monkeypatch) -> None:
     module = fixture.module
+    from test_wglink_addin_lifecycle import _SourceAssets
+    fixture.design.appearances = _SourceAssets()
     monkeypatch.setattr(
         module.wglink_core,
         "_named_appearance",
-        lambda _app, _design, name: types.SimpleNamespace(name=name),
+        lambda _app, _design, name: _design.appearances.named(name),
     )
     from test_wglink_fem_dialog import _building_inputs
     from test_wglink_send import Attributes, body
@@ -385,6 +387,15 @@ def _source_command(fixture, monkeypatch) -> None:
     member.body = loose_body
     loose_body.parentComponent = fixture.design.rootComponent
     fixture.design.rootComponent.bRepBodies.append(loose_body)
+    original_find = fixture.design.findAttributes
+    def find(group, name):
+        found = [attribute for attribute in original_find(group, name) if not name or attribute.name == name]
+        attribute = member.attributes.itemByName(group, name)
+        if attribute is not None:
+            attribute.name, attribute.parent = name, member
+            found.append(attribute)
+        return found
+    fixture.design.findAttributes = find
     inputs, items = _building_inputs(module)
     state = module.MeshDialogState()
     with module.wglink_activity.because(module.wglink_activity.command_cause("source")):

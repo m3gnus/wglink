@@ -104,7 +104,9 @@ def box(low=(0, 0, 0), high=(1, 1, 1)):
 def face(role, area=2.0, edges=()):
     return types.SimpleNamespace(
         area=area,
-        appearance=types.SimpleNamespace(name=role),
+        attributes=Attributes(),
+        appearanceSourceType=4,
+        appearance=types.SimpleNamespace(name=role, id=role),
         edges=Collection(edges),
         boundingBox=box((0, 0, 0), (1, 1, 0)),
     )

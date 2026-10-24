@@ -319,6 +319,7 @@ def _load_instance(monkeypatch, name: str, ui: _UI, app: _Application | None = N
     resolved = app if app is not None else _Application(ui)
     core.Application = types.SimpleNamespace(get=lambda: resolved)
     core.DocumentTypes = types.SimpleNamespace(FusionDesignDocumentType="fusion-design")
+    core.AppearanceSourceTypes = types.SimpleNamespace(OverrideAppearanceSource=4, FaceAppearanceSource=3)
     core.MessageBoxButtonTypes = types.SimpleNamespace(YesNoButtonType="yes-no")
     core.MessageBoxIconTypes = types.SimpleNamespace(QuestionIconType="question")
     core.DialogResults = types.SimpleNamespace(
@@ -729,12 +730,37 @@ class _Attributes:
         self.values[(group, name)] = value
 
 
+class _SourceFace(types.SimpleNamespace):
+    @property
+    def appearanceSourceType(self):
+        return 4 if self.appearance is not None else 1
+
+
 def _fake_face(role: str | None, area: float = 5.0) -> object:
-    return types.SimpleNamespace(
+    return _SourceFace(
         area=area,
-        appearance=None if role is None else types.SimpleNamespace(name=role),
+        appearance=None if role is None else types.SimpleNamespace(name=role, id=role),
         attributes=_Attributes(),
     )
+
+
+class _SourceAssets:
+    def __init__(self):
+        self.values = {}
+
+    def itemByName(self, name):
+        return self.values.get(name)
+
+    def named(self, name):
+        if name not in self.values:
+            asset = types.SimpleNamespace(name=name, id=name)
+            asset.deleteMe = lambda: self.values.pop(name, None) is not None
+            self.values[name] = asset
+        return self.values[name]
+
+
+def _source_asset(design, name):
+    return design.appearances.named(name)
 
 
 class _FoundAttribute:
@@ -762,7 +788,7 @@ def _face_design(faces: list[object]) -> object:
             if key == (group, name)
         ]
 
-    return types.SimpleNamespace(findAttributes=find)
+    return types.SimpleNamespace(findAttributes=find, appearances=_SourceAssets())
 
 
 def _identity_stamp(face: object) -> dict[str, object] | None:
@@ -997,7 +1023,7 @@ def test_setting_a_source_paints_the_role_appearance_and_leaves_matches_alone(
     monkeypatch.setattr(
         module.wglink_core,
         "_named_appearance",
-        lambda _app, _design, name: (minted.append(name), types.SimpleNamespace(name=name))[1],
+        lambda _app, _design, name: (minted.append(name), _source_asset(_design, name))[1],
     )
     blank, wrong, already = _fake_face(None), _fake_face("MF"), _fake_face("HF")
     design = _face_design([blank, wrong, already])
@@ -1036,7 +1062,7 @@ def test_setting_a_source_again_on_a_refused_source_reassigns_a_new_identity(
     monkeypatch.setattr(
         module.wglink_core,
         "_named_appearance",
-        lambda _app, _design, name: types.SimpleNamespace(name=name),
+        lambda _app, _design, name: _source_asset(_design, name),
     )
     first, second = _fake_face("HF"), _fake_face("HF")
     design = _face_design([first, second])
@@ -1094,14 +1120,14 @@ def test_clearing_a_source_returns_only_role_faces_to_their_body_appearance(
     assert _identity_stamp(kept)["faces"] == 1
 
 
-def test_failed_source_helper_leaves_dialog_responsible_for_paint_rollback(monkeypatch) -> None:
+def test_failed_source_helper_uses_the_shared_owner_to_restore_paint(monkeypatch) -> None:
     module = _load_instance(
         monkeypatch, "WGLink_stamp_failure", _UI(_Panels(), _Definitions(reserve_ids=False))
     )
     monkeypatch.setattr(
         module.wglink_core,
         "_named_appearance",
-        lambda _app, _design, name: types.SimpleNamespace(name=name),
+        lambda _app, _design, name: _source_asset(_design, name),
     )
     blank = _fake_face(None)
 
@@ -1117,9 +1143,10 @@ def test_failed_source_helper_leaves_dialog_responsible_for_paint_rollback(monke
         module._apply_source_faces([blank], "HF")
 
     text = str(refusal.value)
-    assert "Every source identity stamp was restored" in text
+    assert "This dialog's changes were restored" in text
     assert "was kept" not in text
-    assert blank.appearance.name == "HF"
+    assert blank.appearance is None
+    assert not design.appearances.values
 
 
 def test_clear_takes_the_identity_off_a_face_whose_paint_was_removed_by_hand(
