@@ -1775,7 +1775,11 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 else PANEL_NAME,
             )
         except (wglink_core.WgLinkError, wglink_author.AuthorError) as exc:
-            args.isValidResult = False
+            # Only a dialog save is a transaction that keeps its dialog open on
+            # failure. Send and Solve resume from a worker callback with no
+            # command arguments and are refused with a message, as before.
+            if args is not None and self.operation in {"source", "declare", "fem"}:
+                args.isValidResult = False
             # A Send or Solve refused after its export ran (WG outdated or not
             # collecting, a failed request write) may already have changed the
             # document -- an adopted source -- and has published a return.
