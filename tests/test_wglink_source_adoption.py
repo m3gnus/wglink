@@ -442,7 +442,7 @@ def test_a_read_only_face_leaves_every_adopted_stamp_as_it_was(
     with pytest.raises(send_module.wglink_core.WgLinkError) as refusal:
         _send_with(send_module, tmp_path, _Confirmer(True))
 
-    assert "This dialog's changes were restored" in str(refusal.value)
+    assert "The changes were restored" in str(refusal.value)
     assert a.attributes.values == b.attributes.values == {}
     assert locked.attributes.values == {}
     assert tuple(design.rootComponent.bRepBodies) == original_bodies

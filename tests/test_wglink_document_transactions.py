@@ -12,6 +12,38 @@ from test_wglink_mesh_settings import AppearanceFace
 from test_wglink_send import Attributes, body, component
 
 
+class Fresh:
+    """A new Python wrapper per lookup, as Fusion mints one for every read.
+
+    Two wrappers of one entity compare equal (Fusion's ``==``) but are distinct
+    objects with distinct ``id`` and hash, so a journal keyed on wrapper identity
+    misses the entity it already holds.
+    """
+
+    def __init__(self, target):
+        object.__setattr__(self, "_target", target)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_target"), name)
+
+    def __setattr__(self, name, value):
+        setattr(object.__getattribute__(self, "_target"), name, value)
+
+    def __eq__(self, other):
+        return unwrap(self) is unwrap(other)
+
+    def __ne__(self, other):
+        return not self == other
+
+    __hash__ = object.__hash__
+
+
+def unwrap(value):
+    while isinstance(value, Fresh):
+        value = object.__getattribute__(value, "_target")
+    return value
+
+
 class Faults:
     def __init__(self):
         self.trace = []
@@ -82,7 +114,7 @@ class Items:
         return self.faults.call("collection.count", False, lambda: len(self.values))
 
     def item(self, index):
-        return self.faults.call("collection.item", False, lambda: self.values[index])
+        return self.faults.call("collection.item", False, lambda: Fresh(self.values[index]))
 
     def __iter__(self):
         for index in range(self.count):
@@ -110,8 +142,9 @@ class Entity(types.SimpleNamespace):
     def __getattribute__(self, name):
         if name in ("faces", "attributes", "rootComponent", "appearances"):
             fields = object.__getattribute__(self, "__dict__")
-            return fields["faults"].call("entity." + name, False,
-                                        lambda: object.__getattribute__(self, name))
+            value = fields["faults"].call("entity." + name, False,
+                                          lambda: object.__getattribute__(self, name))
+            return value if name == "faces" else Fresh(value)
         return object.__getattribute__(self, name)
 
 
@@ -130,7 +163,10 @@ class Assets:
         self.values = {}
 
     def itemByName(self, name):
-        return self.faults.call("appearance.lookup:" + name, False, lambda: self.values.get(name))
+        def lookup():
+            found = self.values.get(name)
+            return Fresh(found) if found is not None else None
+        return self.faults.call("appearance.lookup:" + name, False, lookup)
 
     def itemById(self, key):
         return self.faults.call("appearance.id", False,
@@ -167,6 +203,9 @@ def document(scene, monkeypatch):
         faces.append(member)
     assets.values["HF"] = Asset(id="HF", name="HF", faults=faults)
     faces[0].override = assets.values["HF"]
+    # An explicit override equal to the inherited appearance must restore as
+    # an override, not collapse to "inherited".
+    faces[2].override = inherited
     air = Entity(**vars(body("Air", faces=[])), faults=faults)
     air.entityToken = "air"
     air.faces = Items(faults, faces)
@@ -207,7 +246,7 @@ def document(scene, monkeypatch):
             for entity in [root, air, *faces, fem_air, *fem_faces, second_air, *second_faces]:
                 attribute = entity.attributes.itemByName(group, name)
                 if attribute is not None:
-                    attribute.parent = entity
+                    attribute.parent = Fresh(entity)
                     found.append(attribute)
             return Items(faults, found)
         return faults.call("design.findAttributes:" + name, False, lookup)
@@ -216,7 +255,10 @@ def document(scene, monkeypatch):
     scene.fem_air, scene.fem_faces = fem_air, fem_faces
     scene.second_air = second_air
     scene.app.activeProduct = design
-    monkeypatch.setattr(module.wglink_core, "_design", lambda _app: design)
+    # Every lookup mints a new design wrapper, as Design.cast(app.activeProduct) does.
+    # Fusion wrappers are adsk.core.Base objects, compared by entity with ==.
+    monkeypatch.setattr(module.adsk.core, "Base", Fresh, raising=False)
+    monkeypatch.setattr(module.wglink_core, "_design", lambda _app: Fresh(design))
     monkeypatch.setattr(module.wglink_core, "_named_appearance", assets.named)
     counter = [0]
     def uuid():
@@ -240,7 +282,8 @@ def document(scene, monkeypatch):
     module.wglink_send.declare_body(fem_air, "exterior-shell")
     entities = [root, air, *faces, fem_air, *fem_faces, second_air, *second_faces]
     initial_attributes = [dict(entity.attributes.values) for entity in entities]
-    initial_overrides = [member.override for member in faces]
+    painted = [*faces, *fem_faces, *second_faces]
+    initial_overrides = [member.override for member in painted]
     initial_assets = dict(assets.values)
     def reset():
         faults.enabled = False
@@ -252,13 +295,13 @@ def document(scene, monkeypatch):
         for entity, original in zip(entities, initial_attributes):
             entity.attributes.values.clear()
             entity.attributes.values.update(original)
-        for member, original in zip(faces, initial_overrides):
+        for member, original in zip(painted, initial_overrides):
             member.override = original
         assets.values.clear()
         assets.values.update(initial_assets)
     def snapshot():
         return ([dict(entity.attributes.values) for entity in entities],
-                [member.override.id if member.override else None for member in faces],
+                [member.override.id if member.override else None for member in painted],
                 sorted((key, asset.id) for key, asset in assets.values.items()))
     return faults, reset, snapshot
 
@@ -325,6 +368,27 @@ def operation(scene, path):
     raise AssertionError(path)
 
 
+SEND_PATHS = {"fem-bulk-clear", "source-adopt"}
+
+
+def is_refusal(scene, error):
+    """A refusal is shown verbatim. Any other exception reaches the command's
+    unexpected-error boundary, which logs it (opening a dialog, restoring a
+    preset); only refusals are held to plain text here."""
+    module = scene.module
+    return isinstance(error, (module.wglink_core.WgLinkError, module.wglink_author.AuthorError))
+
+
+def assert_plain(message, path):
+    """A refusal names no Fusion internals and the remedy fits where it ran."""
+    for internal in ("Injected", "journaled", "assetInst", "wglink_", "mesh_group_", "_attribute",
+                     "restoration checks", "RuntimeError", ".."):
+        assert internal not in message, (path, message)
+    if path in SEND_PATHS:
+        assert "dialog" not in message and "Sources & Mesh" not in message, (path, message)
+    assert message.count("Close and reopen") <= 1, (path, message)
+
+
 PATHS = ["mesh-restore-save", "mesh-save-and-restore", "fem-save", "fem-restore-save", "fem-clear", "fem-bulk-clear",
          "source-assign", "source-adopt", "source-save", "source-clear",
          "group-clear-restore", "group-save", "body-save", "body-clear",
@@ -358,6 +422,8 @@ def test_every_document_read_and_write_is_atomic_and_honestly_reported(scene, mo
         assert faults.triggered, (path, index, label)
         actual = snapshot()
         assert actual == before or actual == expected, (path, mode, index, label, str(error))
+        if is_refusal(scene, error):
+            assert_plain(str(error), path)
         if error is None:
             assert actual == expected, (path, mode, index, label, "false success")
         elif "changes were restored" in str(error) or "Nothing was changed" in str(error):
@@ -400,7 +466,55 @@ def test_second_fault_during_rollback_never_claims_success(scene, monkeypatch, p
             assert faults.triggered, (path, index, label)
             actual = snapshot()
             message = str(caught.value)
+            if is_refusal(scene, caught.value):
+                assert_plain(message, path)
             if "changes were restored" in message:
                 assert actual == before, (path, index, label, "false restoration")
             else:
                 assert "Undo this command in Fusion" in message, (path, index, label, message)
+
+
+def _journal_entities(send, count, token=lambda index: f"face-{index}"):
+    entities = []
+    for index in range(count):
+        entity = types.SimpleNamespace(attributes=Attributes(), entityToken=token(index))
+        entities.append(entity)
+    return entities
+
+
+def test_journal_lookups_do_not_compare_every_entry(scene, monkeypatch):
+    """A large body journals and writes in linear time: no Fusion == per entry."""
+    send = scene.module.wglink_send
+    comparisons = []
+    same = send._same_live_entity
+    monkeypatch.setattr(send, "_same_live_entity",
+                        lambda left, right: comparisons.append(1) or same(left, right))
+    faces = _journal_entities(send, 400)
+    send.document_edit(
+        "save many faces",
+        lambda edit: [edit.remember_attribute(face, "role") for face in faces + faces],
+        lambda edit: [edit.set_attribute(Fresh(face), "role", "HF") for face in faces])
+    assert all(face.attributes.values == {("WGLink", "role"): "HF"} for face in faces)
+    assert comparisons == []
+
+
+def test_one_entity_seen_with_two_tokens_is_still_one_verified_change(scene, monkeypatch):
+    """Autodesk: two token reads of one entity may differ. Entity equality
+    settles a write through the second token and the final readback."""
+    send = scene.module.wglink_send
+    monkeypatch.setattr(scene.module.adsk.core, "Base", Fresh, raising=False)
+    (face,) = _journal_entities(send, 1)
+    first, second = Fresh(face), Fresh(face)
+
+    def prepare(edit):
+        edit.remember_attribute(first, "role")
+        face.entityToken = "face-0-reread"
+        edit.remember_attribute(second, "role")  # a second entry: token differs
+
+    def mutate(edit):
+        edit.set_attribute(Fresh(face), "role", "LF")  # by token: the second entry
+        face.entityToken = "face-0-third"
+        edit.set_attribute(Fresh(face), "role", "MF")  # no token match: by equality
+
+    send.document_edit("save one face", prepare, mutate)
+    assert face.attributes.values == {("WGLink", "role"): "MF"}

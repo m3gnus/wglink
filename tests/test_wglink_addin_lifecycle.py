@@ -1143,7 +1143,7 @@ def test_failed_source_helper_uses_the_shared_owner_to_restore_paint(monkeypatch
         module._apply_source_faces([blank], "HF")
 
     text = str(refusal.value)
-    assert "This dialog's changes were restored" in text
+    assert "The changes were restored" in text
     assert "was kept" not in text
     assert blank.appearance is None
     assert not design.appearances.values

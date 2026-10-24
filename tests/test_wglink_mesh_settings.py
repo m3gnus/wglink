@@ -63,7 +63,7 @@ def test_failed_mesh_settings_read_refuses_and_retries_without_writing(send_modu
 
 def test_unavailable_attribute_collection_is_not_absent_settings(send_module):
     design = types.SimpleNamespace(rootComponent=types.SimpleNamespace(attributes=None))
-    with pytest.raises(send_module.wglink_core.WgLinkError, match='Close and reopen Sources & Mesh'):
+    with pytest.raises(send_module.wglink_core.WgLinkError, match='Could not read the saved mesh settings'):
         send_module.read_mesh_settings(design)
     design.rootComponent.attributes = Attributes()
     assert send_module.read_mesh_settings(design) is None
@@ -356,8 +356,10 @@ def test_group_original_failures_keep_current_paint(monkeypatch, send_module, fa
     elif failure == 'attribute-write':
         back.attributes.add = lambda *_a: None  # Fusion may refuse without raising.
     if failure in ('unreadable-original', 'attribute-write'):
-        with pytest.raises(send_module.wglink_core.WgLinkError, match='original.*appearance|mesh_group_original_appearance'):
+        with pytest.raises(send_module.wglink_core.WgLinkError,
+                           match='original appearance of a selected face|Could not paint the managed appearance') as caught:
             send_module.paint_surface_group(app, design, [back], 'back')
+        assert 'mesh_group_original_appearance' not in str(caught.value)  # no internals
         assert back.appearance is red
         return
     send_module.paint_surface_group(app, design, [back], 'back')

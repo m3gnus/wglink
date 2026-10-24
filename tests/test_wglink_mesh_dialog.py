@@ -471,7 +471,7 @@ def test_failure_after_paint_restores_all_sources_groups_stamps_and_settings(sce
     def refuse(*_args):
         raise module.wglink_core.WgLinkError("Document refused the settings.")
     monkeypatch.setattr(module.wglink_send, "save_mesh_settings", refuse)
-    with pytest.raises(module.wglink_author.AuthorError, match="This dialog's changes were restored"):
+    with pytest.raises(module.wglink_author.AuthorError, match="The changes were restored"):
         module._apply_mesh_dialog(inputs, state)
     assert scene.design.rootComponent.attributes.values == original_settings
     assert [member.attributes.values for member in scene.faces] == original_stamps
@@ -761,7 +761,7 @@ def test_save_failure_restores_original_group_journal_and_exact_inheritance(scen
         reused = types.SimpleNamespace()
         scene.faces[2].body = types.SimpleNamespace(parentComponent=reused)
         scene.design.rootComponent.allOccurrences = [types.SimpleNamespace(component=reused) for _ in range(2)]
-    with pytest.raises(module.wglink_author.AuthorError, match="This dialog's changes were restored") as caught:
+    with pytest.raises(module.wglink_author.AuthorError, match="The changes were restored") as caught:
         module._apply_mesh_dialog(inputs, state)
     if failure == "instances":
         assert "Make Independent" in str(caught.value)
@@ -779,18 +779,18 @@ def test_incomplete_rollback_does_not_claim_restoration(scene, monkeypatch):
     module = scene.module
     inputs, _items, state = build(scene)
     original_set = module.wglink_core._set_attribute
-    def refuse_root(entity, name, value):
+    def refuse_root(entity, name, value, **options):
         if entity is scene.design.rootComponent:
-            original_set(entity, name, "partial settings write")
+            original_set(entity, name, "partial settings write", **options)
             raise RuntimeError("settings write refused")
-        return original_set(entity, name, value)
+        return original_set(entity, name, value, **options)
     # Seed saved settings so rollback must restore an attribute too.
     module._apply_mesh_dialog(inputs, state)
     inputs, _items, state = build(scene)
     monkeypatch.setattr(module.wglink_core, "_set_attribute", refuse_root)
     with pytest.raises(module.wglink_author.AuthorError, match="some changes could not be restored") as caught:
         module._apply_mesh_dialog(inputs, state)
-    assert "This dialog's changes were restored" not in str(caught.value)
+    assert "The changes were restored" not in str(caught.value)
 
 
 @pytest.mark.parametrize("stage", ["lookup", "value"])
@@ -830,7 +830,7 @@ def test_rollback_retries_unreadable_state_and_only_claims_verified_restoration(
     assert failed_attributes[0].failures == 0
     if check == "after-restore":
         assert "Undo this command in Fusion" in str(caught.value)
-        assert "This dialog's changes were restored" not in str(caught.value)
+        assert "The changes were restored" not in str(caught.value)
         assert scene.design.rootComponent.attributes.values  # Restoration really failed.
     else:
         assert not scene.design.rootComponent.attributes.values

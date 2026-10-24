@@ -617,3 +617,24 @@ def test_an_orphaned_source_stamp_is_absent_and_never_locks_out_assignment(
     assert stamp_of(face_value) is None
     # The orphan was neither journaled nor touched.
     assert stamp_of(consumed)["id"] == "wgs-" + "C" * 20
+
+
+def test_an_unreadable_live_stamp_still_refuses_with_plain_text(send_module, monkeypatch):
+    face_value = stamped_face("LF")
+    put_stamp([face_value], "LF")
+    design = _painted_document(send_module, monkeypatch, [face_value])
+
+    class Broken:
+        """A stamp on a live face whose value cannot be read."""
+
+        name, parent = STAMP, face_value
+
+        @property
+        def value(self):
+            raise RuntimeError("3 : assetInst")
+
+    design.findAttributes = lambda group, name: Collection([Broken()])
+    with pytest.raises(send_module.SourceIdentityReadError) as refusal:
+        send_module._stamp_attributes(design)
+    assert "assetInst" not in str(refusal.value)
+    assert "Sources & Mesh" not in str(refusal.value)

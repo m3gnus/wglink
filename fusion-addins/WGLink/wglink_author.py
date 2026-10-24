@@ -295,7 +295,9 @@ def apply_face_appearance_plan(
                 else:
                     write_appearance(faces[index], value)
             except Exception as exc:
-                raise AuthorError(f"Could not {action} the managed appearance on a selected face: {exc}.") from exc
+                # Fusion's own text (assetInst, journal checks) goes to the log
+                # through the exception chain, not into the message box.
+                raise AuthorError(f"Could not {action} the managed appearance on a selected face.") from exc
 
 
 # ------------------------------------------------------------- body declaration

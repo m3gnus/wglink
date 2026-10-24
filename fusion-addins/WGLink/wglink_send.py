@@ -245,7 +245,8 @@ def clear_fem_regions(bodies: list[object]) -> list[bool]:
     """Clear the complete confirmed selection under one transaction owner."""
     return document_edit("clear FEM declarations",
                          lambda edit: [_prepare_fem_edit(edit, _native_face(body)) for body in bodies],
-                         lambda edit: [clear_fem_region(body) for body in bodies])
+                         lambda edit: [clear_fem_region(body) for body in bodies],
+                         retry="Send again.")
 
 
 def face_identity(face: object) -> object:
@@ -2604,15 +2605,16 @@ class SourceIdentityReadError(wglink_core.WgLinkError):
     """An API read failure, distinct from an absent or malformed stamp."""
 
 
+SOURCE_IDENTITY_UNREADABLE = "Fusion could not read a saved WG source identity in this design."
+
+
 def read_source_stamp(face: object) -> dict[str, Any] | None:
     """Return an absent/malformed stamp as None; API failures always refuse."""
 
     try:
         value = wglink_core._attribute_value(_native_face(face), SOURCE_IDENTITY_ATTRIBUTE, strict=True)
     except Exception as exc:
-        raise SourceIdentityReadError(
-            "Could not read a saved WG source identity. Close and reopen Sources & Mesh… to retry before saving."
-        ) from exc
+        raise SourceIdentityReadError(SOURCE_IDENTITY_UNREADABLE) from exc
     return None if value is None else _parse_source_stamp(value)
 
 
@@ -2620,9 +2622,7 @@ def _carries_source_stamp(face: object) -> bool:
     try:
         return wglink_core._attribute(face, SOURCE_IDENTITY_ATTRIBUTE, strict=True) is not None
     except Exception as exc:
-        raise SourceIdentityReadError(
-            "Could not read a saved WG source identity. Close and reopen Sources & Mesh… to retry before saving."
-        ) from exc
+        raise SourceIdentityReadError(SOURCE_IDENTITY_UNREADABLE) from exc
 
 
 def _canonical_source_role(value: object) -> str | None:
@@ -2787,10 +2787,7 @@ def _stamp_attributes(design: object) -> list[tuple[object, dict[str, Any]]]:
             design.findAttributes(wglink_core.ATTRIBUTE_GROUP, SOURCE_IDENTITY_ATTRIBUTE), strict=True
         )
     except Exception as exc:  # noqa: BLE001
-        raise SourceIdentityReadError(
-            f"Could not read the WG source identities in this design: {exc}. "
-            "Close and reopen Sources & Mesh… to retry before saving."
-        ) from exc
+        raise SourceIdentityReadError(SOURCE_IDENTITY_UNREADABLE) from exc
     result = []
     for attribute in found:
         try:
@@ -2804,13 +2801,23 @@ def _stamp_attributes(design: object) -> list[tuple[object, dict[str, Any]]]:
                 continue
             stamp = _parse_source_stamp(attribute.value)
         except Exception as exc:
-            raise SourceIdentityReadError(
-                "Could not read a saved WG source identity. "
-                "Close and reopen Sources & Mesh… to retry before saving."
-            ) from exc
+            raise SourceIdentityReadError(SOURCE_IDENTITY_UNREADABLE) from exc
         if stamp is not None:
             result.append((attribute, stamp))
     return result
+
+
+class _InternalEditError(wglink_core.WgLinkError):
+    """A journal invariant or readback failure: logged, never shown verbatim."""
+
+
+def _same_design(left: object, right: object) -> bool:
+    if left is right:
+        return True
+    try:
+        return bool(left == right)  # Fusion compares wrappers by entity
+    except Exception:  # noqa: BLE001
+        return False
 
 
 class _DocumentEdit:
@@ -2819,35 +2826,58 @@ class _DocumentEdit:
     Prepare the complete write set before entering mutation. Nested operations
     join this owner; they cannot extend its journal once mutation has started.
     Strict readback is required for both commit and rollback.
+
+    Fusion mints a new Python wrapper for every lookup, so neither ``id`` nor
+    ``is`` identifies an entity, and Autodesk documents that two token reads of
+    one entity may differ. Entries are indexed by the token string they were
+    seen with -- equal strings are the same entity -- and Fusion entity
+    equality (``_same_live_entity``) is consulted only where a miss would
+    matter: a write or a nested journal request during mutation, and a final
+    readback that disagrees. Large bodies therefore journal in linear time.
     """
 
     def __init__(self) -> None:
         self._originals = {}
         self._expected = {}
+        self._written = {}
+        self._index = {}
+        self._buckets = {}
         self._assets = {}
         self._asset_expected = {}
+        self._design = None
+        self._sequence = 0
         self.mutating = False
 
-    def _resource_key(self, kind, entity, name=None):
-        # Fusion may return fresh wrappers and different token strings for the
-        # same native entity. Use Fusion entity equality, as source edits do.
-        for key, (seen, args, _value) in self._originals.items():
-            if key[0] == kind and (not args or args[0] == name) and _same_live_entity(entity, seen):
+    def _find(self, kind, entity, name, *, scan):
+        token = wglink_core._entity_token(entity)
+        if token:
+            key = self._index.get((kind, name, token))
+            if key is not None:
                 return key
-        return (kind, len(self._originals), name)
+        if scan or not token:
+            for key in self._buckets.get((kind, name), ()):
+                if _same_live_entity(entity, self._originals[key][0]):
+                    if token:
+                        self._index[(kind, name, token)] = key
+                    return key
+        return None
 
-    def remember_attribute(self, entity: object, name: str) -> None:
-        key = self._resource_key("attribute", entity, name)
-        self._remember(key, entity, wglink_core._attribute_value, name)
-
-    def _remember(self, key, entity, read, *args):
-        if key in self._originals:
+    def _remember(self, kind, entity, name, read, *args):
+        if self._find(kind, entity, name, scan=self.mutating) is not None:
             return
         if self.mutating:
-            raise wglink_core.WgLinkError("The edit attempted an unjournaled document change.")
+            raise _InternalEditError(f"The edit attempted an unjournaled {kind} change.")
         value = read(entity, *args, strict=True)
+        key = (kind, len(self._originals), name)
         self._originals[key] = (entity, args, value)
         self._expected[key] = value
+        token = wglink_core._entity_token(entity)
+        if token:
+            self._index[(kind, name, token)] = key
+        self._buckets.setdefault((kind, name), []).append(key)
+
+    def remember_attribute(self, entity: object, name: str) -> None:
+        self._remember("attribute", entity, name, wglink_core._attribute_value, name)
 
     @staticmethod
     def _appearance(face, *, strict=True):
@@ -2855,49 +2885,57 @@ class _DocumentEdit:
         source = face.appearanceSourceType
         if source in (types.OverrideAppearanceSource, types.FaceAppearanceSource):
             appearance = face.appearance
-            if appearance is None:
-                raise wglink_core.WgLinkError("The face's appearance override is unavailable.")
             # Force access now; an invalid Fusion wrapper is not an override.
-            if not isinstance(appearance.name, str):
-                raise wglink_core.WgLinkError("The face's appearance is unreadable.")
-            identity = appearance.id
+            identity = appearance.id if appearance is not None and isinstance(appearance.name, str) else None
             if not isinstance(identity, str) or not identity:
-                raise wglink_core.WgLinkError("The face appearance has no readable identity.")
+                raise wglink_core.WgLinkError(
+                    "Fusion could not read the original appearance of a selected face.")
             return (appearance, identity)
         return None
 
     def remember_appearance(self, face):
-        face = _native_face(face)
-        self._remember(self._resource_key("appearance", face), face, self._appearance)
+        self._remember("appearance", _native_face(face), None, self._appearance)
+
+    def _asset_design(self, design):
+        # One transaction edits the one active design, whichever wrapper of it
+        # a nested operation looked up.
+        if self._design is None:
+            self._design = design
+        elif not _same_design(design, self._design):
+            raise _InternalEditError("The edit reached a second Fusion design.")
+        return self._design
 
     def remember_asset(self, design, name):
-        key = (id(design), name)
-        if key in self._assets:
+        design = self._asset_design(design)
+        if name in self._assets:
             return
         if self.mutating:
-            raise wglink_core.WgLinkError("The edit attempted an unjournaled appearance change.")
-        original = design.appearances.itemByName(name)
+            raise _InternalEditError("The edit attempted an unjournaled appearance change.")
+        original = wglink_core._design_appearance(design, name, strict=True)
         original_id = original.id if original is not None else None
-        self._assets[key] = (design, name, original, original_id)
-        self._asset_expected[key] = original_id
+        self._assets[name] = (original, original_id)
+        self._asset_expected[name] = original_id
 
     def named_appearance(self, app, design, name):
-        if (id(design), name) not in self._assets:
-            raise wglink_core.WgLinkError("The appearance was not journaled before editing.")
+        design = self._asset_design(design)
+        if name not in self._assets:
+            raise _InternalEditError("The appearance was not journaled before editing.")
         appearance = wglink_core._named_appearance(app, design, name)
         if not appearance or not appearance.id or appearance.name != name:
-            raise wglink_core.WgLinkError("Fusion refused to create the requested appearance.")
-        self._asset_expected[(id(design), name)] = appearance.id
+            raise _InternalEditError("Fusion refused to create the requested appearance.")
+        self._asset_expected[name] = appearance.id
         return appearance
 
-    def _key(self, entity, name):
-        key = self._resource_key("attribute", entity, name)
-        if key not in self._originals:
-            raise wglink_core.WgLinkError("The attribute was not journaled before editing.")
+    def _key(self, kind, entity, name):
+        key = self._find(kind, entity, name, scan=True)
+        if key is None:
+            raise _InternalEditError(f"The {kind} was not journaled before editing.")
+        self._sequence += 1
+        self._written[key] = self._sequence
         return key
 
     def set_attribute(self, entity, name, value):
-        key = self._key(entity, name)
+        key = self._key("attribute", entity, name)
         self._expected[key] = str(value) if value is not None else None
         self._write_attribute(entity, name, value)
         self._verify(key, self._expected[key])
@@ -2905,17 +2943,15 @@ class _DocumentEdit:
     @staticmethod
     def _write_attribute(entity, name, value):
         if value is not None:
-            wglink_core._set_attribute(entity, name, value)
+            wglink_core._set_attribute(entity, name, value, strict=True)
         else:
             attribute = wglink_core._attribute(entity, name, strict=True)
             if attribute is not None and attribute.deleteMe() is False:
-                raise wglink_core.WgLinkError("Fusion refused to remove the saved attribute.")
+                raise _InternalEditError("Fusion refused to remove the saved attribute.")
 
     def paint(self, face, appearance):
         face = _native_face(face)
-        key = self._resource_key("appearance", face)
-        if key not in self._originals:
-            raise wglink_core.WgLinkError("The face appearance was not journaled before editing.")
+        key = self._key("appearance", face, None)
         expected = (appearance, appearance.id) if appearance is not None else None
         self._expected[key] = expected
         face.appearance = appearance
@@ -2938,18 +2974,36 @@ class _DocumentEdit:
             actual = wglink_core._attribute_value(entity, *args, strict=True)
             equal = actual == expected
         if not equal:
-            raise wglink_core.WgLinkError("Fusion did not preserve the requested " + key[0] +
+            raise _InternalEditError("Fusion did not keep the requested " + key[0] +
                 (" (" + args[0] + ")" if args else "") + ".")
+
+    def _superseded(self, key):
+        """Whether a later write through another entry of this entity owns it.
+
+        Two token strings for one entity can give it two entries. Only a
+        disagreeing readback pays for the entity comparison that finds them.
+        """
+
+        entity = self._originals[key][0]
+        mine = self._written.get(key, 0)
+        return any(
+            other != key and self._written.get(other, 0) > mine
+            and _same_live_entity(entity, self._originals[other][0])
+            for other in self._buckets.get((key[0], key[2]), ())
+        )
 
     def verify(self):
         for key, expected in self._expected.items():
-            self._verify(key, expected)
-        for key, (design, name, _original, _original_id) in self._assets.items():
-            expected = self._asset_expected[key]
-            actual = design.appearances.itemByName(name)
+            try:
+                self._verify(key, expected)
+            except Exception:
+                if not self._superseded(key):
+                    raise
+        for name, expected in self._asset_expected.items():
+            actual = wglink_core._design_appearance(self._design, name, strict=True)
             if ((expected is None and actual is not None) or
                     (expected is not None and (actual is None or actual.id != expected))):
-                raise wglink_core.WgLinkError("Fusion did not preserve the requested appearance asset.")
+                raise _InternalEditError("Fusion did not keep the requested appearance asset.")
 
     def rollback(self):
         for key, (entity, args, original) in reversed(list(self._originals.items())):
@@ -2969,9 +3023,9 @@ class _DocumentEdit:
                 # Fusion can throw after persisting a restore. The final strict
                 # readback below decides the outcome, for every journal entry.
                 pass
-        for design, name, original, _original_id in reversed(list(self._assets.values())):
+        for name, (original, _original_id) in reversed(list(self._assets.items())):
             try:
-                actual = design.appearances.itemByName(name)
+                actual = wglink_core._design_appearance(self._design, name, strict=True)
                 if original is None and actual is not None:
                     actual.deleteMe()
             except Exception:
@@ -2982,13 +3036,13 @@ class _DocumentEdit:
                 self._verify(key, original)
             except Exception as exc:
                 problems.append(str(exc))
-        for design, name, original, original_id in self._assets.values():
+        for name, (original, original_id) in self._assets.items():
             try:
-                actual = design.appearances.itemByName(name)
+                actual = wglink_core._design_appearance(self._design, name, strict=True)
                 if (original is None and actual is not None) or (
                     original is not None and (actual is None or actual.id != original_id)
                 ):
-                    raise wglink_core.WgLinkError("The appearance library could not be restored.")
+                    raise _InternalEditError("The appearance library could not be restored.")
             except Exception as exc:
                 problems.append(str(exc))
         return problems
@@ -2996,9 +3050,57 @@ class _DocumentEdit:
 
 _active_document_edit = None  # Fusion command handlers run on the main thread.
 
+DIALOG_RETRY = "Close and reopen the dialog, then save again."
 
-def document_edit(action, prepare, mutate):
-    """Strict preflight -> journal -> mutate -> verify, with one outer owner."""
+
+class _EditDetail(Exception):
+    """The internal cause of a refused edit, kept in the chain for the log."""
+
+
+def _is_refusal(exc: BaseException) -> bool:
+    """A refusal written for the user, as opposed to a Fusion or journal failure."""
+
+    return isinstance(exc, (wglink_core.WgLinkError, wglink_author.AuthorError,
+                            wglink_fem.FemDeclarationError)) and not isinstance(exc, _InternalEditError)
+
+
+def _user_text(exc: BaseException, fallback: str) -> str:
+    """A refusal's own sentence, or plain text in place of Fusion internals."""
+
+    if _is_refusal(exc):
+        text = str(exc).strip()
+        if text:
+            return text if text.endswith((".", "?", "!", "…")) else text + "."
+    return fallback
+
+
+def _unread(action: str, exc: BaseException, retry: str) -> wglink_core.WgLinkError:
+    reason = _user_text(exc, "Fusion could not read part of this document.")
+    return wglink_core.WgLinkError(f"Could not {action}: {reason} Nothing was changed. {retry}")
+
+
+def read_for_edit(action, read, *, retry=DIALOG_RETRY):
+    """Run the reads that plan an edit; a Fusion failure refuses in plain text.
+
+    Inside an outer edit the failure propagates, so the outer owner reports it
+    once, with its own rollback outcome.
+    """
+
+    try:
+        return read()
+    except Exception as exc:
+        if _active_document_edit is not None or _is_refusal(exc):
+            raise
+        raise _unread(action, exc, retry) from exc
+
+
+def document_edit(action, prepare, mutate, *, retry=DIALOG_RETRY):
+    """Strict preflight -> journal -> mutate -> verify, with one outer owner.
+
+    ``retry`` is the remedy for the context the user is in: a dialog save by
+    default, ``"Send again."`` for an edit Send makes. The text shown names
+    no Fusion internals; those stay in the exception chain for the log.
+    """
     global _active_document_edit
     if _active_document_edit is not None:
         prepare(_active_document_edit)
@@ -3007,10 +3109,7 @@ def document_edit(action, prepare, mutate):
     try:
         prepare(edit)
     except Exception as exc:
-        raise wglink_core.WgLinkError(
-            f"Could not read the original document state to {action}: {exc}. "
-            "Nothing was changed. Close and reopen the dialog to retry before saving."
-        ) from exc
+        raise _unread(action, exc, retry) from exc
     _active_document_edit = edit
     edit.mutating = True
     try:
@@ -3019,10 +3118,16 @@ def document_edit(action, prepare, mutate):
         return result
     except Exception as exc:
         problems = edit.rollback()
-        outcome = ("Undo this command in Fusion; some changes could not be restored or verified "
-                   f"({len(problems)} restoration checks failed)." if problems else
-                   "This dialog's changes were restored.")
-        raise wglink_core.WgLinkError(f"Could not {action}: {exc} {outcome}") from exc
+        reason = _user_text(exc, "Fusion refused or did not keep a change.")
+        if problems:
+            outcome = ("Undo this command in Fusion (Edit > Undo): some changes could not "
+                       "be restored.")
+            detail = _EditDetail(f"{exc!r}; restoration failed: " + "; ".join(problems))
+        else:
+            outcome = f"The changes were restored. {retry}"
+            detail = _EditDetail(repr(exc))
+        detail.__cause__ = exc
+        raise wglink_core.WgLinkError(f"Could not {action}: {reason} {outcome}") from detail
     finally:
         _active_document_edit = None
 
@@ -3100,11 +3205,12 @@ def assign_source_identity(design: object, faces: list[object], role: str) -> di
     """
 
     canonical = _canonical_source_role(role) or role
-    selected = [
+    action = f"stamp the {canonical} source identity"
+    selected = read_for_edit(action, lambda: [
         native
         for native in _distinct_entities([_native_face(face) for face in faces])
         if not _is_managed_throat(native)
-    ]
+    ])
     if not selected:
         return {"identity": None, "stamped": 0, "kept": False}
 
@@ -3144,8 +3250,7 @@ def assign_source_identity(design: object, faces: list[object], role: str) -> di
             edit.write(native, _new_stamp(identity, canonical, len(selected)))
         return {"identity": identity, "stamped": len(selected), "kept": False}
 
-    return document_edit(f"stamp the {canonical} source identity",
-                         lambda edit: _prepare_source_edit(edit, design, selected), body)
+    return document_edit(action, lambda edit: _prepare_source_edit(edit, design, selected), body)
 
 
 def _new_stamp(identity: str, role: str, faces: int) -> dict[str, Any]:
@@ -3186,7 +3291,8 @@ def _adopt_painted_source(
         return identity
 
     return document_edit(f"adopt the {canonical} source identity",
-                         lambda edit: _prepare_source_edit(edit, design, natives), body)
+                         lambda edit: _prepare_source_edit(edit, design, natives), body,
+                         retry="Send again.")
 
 
 @wglink_activity.counted(wglink_activity.MUTATION_SOURCE_IDENTITY)
@@ -3197,11 +3303,11 @@ def clear_source_identity(design: object, faces: list[object]) -> int:
     Clear is how that stale member is taken out of its source.
     """
 
-    targets = [
+    targets = read_for_edit("clear the WG source identity", lambda: [
         native
         for native in _distinct_entities([_native_face(face) for face in faces])
-        if wglink_core._attribute(native, SOURCE_IDENTITY_ATTRIBUTE, strict=True) is not None
-    ]
+        if _carries_source_stamp(native)
+    ])
     if not targets:
         return 0
 
@@ -3235,9 +3341,9 @@ def read_mesh_settings(design: object) -> dict[str, Any] | None:
             design.rootComponent, wglink_mesh.SETTINGS_ATTRIBUTE, strict=True
         )
     except Exception as exc:  # noqa: BLE001 - failed access must never become defaults
+        # Send reads these too: the remedy belongs to whoever is reading.
         raise wglink_core.WgLinkError(
-            "Could not read the saved mesh settings from this document. "
-            "Close and reopen Sources & Mesh… to retry before saving."
+            "Could not read the saved mesh settings from this document."
         ) from exc
     if text is None:
         return None
@@ -3287,8 +3393,8 @@ def _group_appearance_writer(
                     raise ValueError("the original face appearance is not in this design")
             originals[id(face)] = wglink_core._json({"schema": 1, "id": appearance_id})
         except Exception as exc:
-            raise wglink_core.WgLinkError(
-                f"Could not preserve the selected face's original appearance: {exc}."
+            raise wglink_core.WgLinkError(  # the cause goes to the log
+                "Could not preserve the selected face's original appearance."
             ) from exc
     for index in plan.clear:
         face = faces[index]
@@ -3309,7 +3415,7 @@ def _group_appearance_writer(
                         raise ValueError("the saved face appearance is missing from this design")
             except Exception as exc:
                 raise wglink_core.WgLinkError(
-                    f"Could not restore the selected face's original appearance: {exc}."
+                    "Could not restore the selected face's original appearance."
                 ) from exc
         restores[id(face)] = appearance
 
@@ -3320,9 +3426,8 @@ def _group_appearance_writer(
         else:
             if id(face) in originals:
                 text = originals[id(face)]
+                # set_attribute reads the value back strictly before returning.
                 _active_document_edit.set_attribute(face, GROUP_ORIGINAL_APPEARANCE_ATTRIBUTE, text)
-                if wglink_core._attribute_value(face, GROUP_ORIGINAL_APPEARANCE_ATTRIBUTE, strict=True) != text:
-                    raise wglink_core.WgLinkError("Fusion refused to save the original face appearance.")
             _active_document_edit.paint(face, appearance)
 
     return write
@@ -3363,25 +3468,9 @@ def paint_surface_group(
     The dialog supplies geometric linked-throat memberships as source_faces;
     Send independently checks those memberships before exporting.
     """
-    selections = []
-    for entity in entities:
-        members = wglink_core._items(entity.faces, strict=True) if hasattr(entity, "faces") else [entity]
-        for face in members:
-            context = getattr(face, "assemblyContext", None) or getattr(entity, "assemblyContext", None)
-            selections.append((face, context))
-    _check_group_instance_selection(design, selections)
-    faces, seen = [], set()
-    for face, _context in selections:
-        native = _native_face(face)
-        key = _face_key(native)
-        if key not in seen:
-            seen.add(key)
-            faces.append(native)
-    source_keys = {_face_key(_native_face(face)) for face in source_faces}
-    # An unpainted face that throws assetInst has no override; only an
-    # unreadable override of a face this edit plans refuses.
-    descriptors = [{"index": index, "appearance_name": wglink_core._appearance_name(face, strict=True),
-                    "is_source": _face_key(face) in source_keys} for index, face in enumerate(faces)]
+    action = "paint mesh surface group"
+    faces, descriptors = read_for_edit(
+        action, lambda: _surface_group_faces(design, entities, source_faces))
     try:
         plan = wglink_author.plan_surface_group_assignment(descriptors, group_id)
     except wglink_author.AuthorError as exc:
@@ -3403,7 +3492,30 @@ def paint_surface_group(
         global _mesh_authoring_generation
         _mesh_authoring_generation += 1
 
-    document_edit("paint mesh surface group", prepare, mutate)
+    document_edit(action, prepare, mutate)
+
+
+def _surface_group_faces(design, entities, source_faces):
+    selections = []
+    for entity in entities:
+        members = wglink_core._items(entity.faces, strict=True) if hasattr(entity, "faces") else [entity]
+        for face in members:
+            context = getattr(face, "assemblyContext", None) or getattr(entity, "assemblyContext", None)
+            selections.append((face, context))
+    _check_group_instance_selection(design, selections)
+    faces, seen = [], set()
+    for face, _context in selections:
+        native = _native_face(face)
+        key = _face_key(native)
+        if key not in seen:
+            seen.add(key)
+            faces.append(native)
+    source_keys = {_face_key(_native_face(face)) for face in source_faces}
+    # An unpainted face that throws assetInst has no override; only an
+    # unreadable override of a face this edit plans refuses.
+    descriptors = [{"index": index, "appearance_name": wglink_core._appearance_name(face, strict=True),
+                    "is_source": _face_key(face) in source_keys} for index, face in enumerate(faces)]
+    return faces, descriptors
 
 
 def _mesh_snapshot(

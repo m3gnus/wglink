@@ -3437,3 +3437,58 @@ def test_manual_update_prefers_the_current_workspace_locator(core, monkeypatch, 
     record = {"payload": {"bundle_path": str(old_a), "design_id": "wgd_swap"}}
     path, bundle = core._bundle_for_update(object(), record, None)
     assert path == new_b and bundle.identity.export_id == "wge_b"
+
+
+def test_ordinary_attribute_writes_replace_a_stale_instance(core):
+    """Insert/Update/rename keep replacing an attribute whose setter throws;
+    only a journaled dialog transaction (strict) sees the failure itself."""
+
+    store = {}
+
+    class Stale:
+        @property
+        def value(self):
+            return store[("WGLink", "role")]
+
+        @value.setter
+        def value(self, _value):
+            raise RuntimeError("stale attribute instance")
+
+        def deleteMe(self):
+            store.pop(("WGLink", "role"), None)
+            return True
+
+    class Collection:
+        def itemByName(self, group, name):
+            return Stale() if (group, name) in store else None
+
+        def add(self, group, name, value):
+            store[(group, name)] = value
+
+    entity = types.SimpleNamespace(attributes=Collection())
+    store[("WGLink", "role")] = "old"
+    core._set_attribute(entity, "role", "new")
+    assert store == {("WGLink", "role"): "new"}
+    with pytest.raises(RuntimeError, match="stale"):
+        core._set_attribute(entity, "role", "newer", strict=True)
+    assert store == {("WGLink", "role"): "new"}
+
+
+def test_design_appearance_lookup_treats_a_raising_miss_as_absent(core):
+    found = types.SimpleNamespace(name="HF", id="hf")
+
+    class Appearances:
+        count = 1
+
+        def item(self, _index):
+            return found
+
+        def itemByName(self, name):
+            raise RuntimeError("invalid name")  # how Fusion reports some misses
+
+    design = types.SimpleNamespace(appearances=Appearances())
+    assert core._design_appearance(design, "LF") is None
+    assert core._design_appearance(design, "HF") is None  # tolerant: unknown reads as a miss
+    # A journal must not record "absent" for an appearance that exists.
+    assert core._design_appearance(design, "HF", strict=True) is found
+    assert core._design_appearance(design, "LF", strict=True) is None

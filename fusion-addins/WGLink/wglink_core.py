@@ -309,16 +309,32 @@ def _attribute_value(entity: object, name: str, *, strict: bool = False) -> str 
         return None
 
 
-def _set_attribute(entity: object, name: str, value: object) -> None:
-    attributes = _attributes(entity, strict=True)
+def _set_attribute(entity: object, name: str, value: object, *, strict: bool = False) -> None:
+    """Write one WG attribute.
+
+    Ordinary writes (Insert, Update, rename) replace a stale attribute
+    instance whose value setter throws. ``strict`` is for a journaled dialog
+    transaction, which must see every read and write failure itself.
+    """
+
+    attributes = _attributes(entity, strict=strict)
     if attributes is None:
         raise WgLinkError(f"Fusion {_kind(entity) or 'entity'} cannot carry attributes")
     text = str(value)
-    existing = _attribute(entity, name, strict=True)
+    existing = _attribute(entity, name, strict=strict)
     if existing is not None:
-        existing.value = text
-    else:
-        attributes.add(ATTRIBUTE_GROUP, name, text)
+        if strict:
+            existing.value = text
+            return
+        try:
+            existing.value = text
+            return
+        except Exception:  # noqa: BLE001 - replace a stale attribute instance
+            try:
+                existing.deleteMe()
+            except Exception:  # noqa: BLE001
+                pass
+    attributes.add(ATTRIBUTE_GROUP, name, text)
 
 
 # The WG operation a Fusion-bound mutation is applying. It is stamped on the
@@ -731,7 +747,7 @@ def _all_link_attributes(design: adsk.fusion.Design) -> list[object]:
     try:
         return _items(design.findAttributes(ATTRIBUTE_GROUP, ""))
     except Exception as exc:  # noqa: BLE001
-        raise WgLinkError(f"Could not inspect Waveguide Generator attributes: {exc}") from exc
+        raise WgLinkError("Could not inspect the Waveguide Generator attributes in this design.") from exc
 
 
 def _parent(attribute: object) -> object | None:
@@ -1974,9 +1990,30 @@ def _colour_property(appearance: object) -> object | None:
     return None
 
 
+def _design_appearance(design: object, name: str, *, strict: bool = False) -> object | None:
+    """The design's own appearance called ``name``, or None.
+
+    Fusion can raise for an ordinary miss. Non-strict, any failure reads as a
+    miss, as it always has. Strict (a transaction journal, where "absent" means
+    rollback may delete it), a raising lookup is settled by scanning the
+    collection; only a failed scan refuses.
+    """
+
+    appearances = design.appearances
+    try:
+        return appearances.itemByName(name) or None
+    except Exception:  # noqa: BLE001 - measured Fusion behavior for a miss
+        if not strict:
+            return None
+    for appearance in _items(appearances, strict=True):
+        if appearance.name == name:
+            return appearance
+    return None
+
+
 def _named_appearance(app: object, design: object, name: str) -> object:
     source = _library_appearance(app, name)
-    existing = design.appearances.itemByName(name)
+    existing = _design_appearance(design, name)
     if existing:
         # Do not mutate a shared appearance already painted onto managed faces.
         # Fusion invalidates every existing face binding when its colour asset

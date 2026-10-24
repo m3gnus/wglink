@@ -1020,10 +1020,15 @@ def _body_descriptors(bodies: list[object]) -> list[dict[str, object]]:
     return descriptors
 
 
-def _apply_source_faces(faces: list[object], role: str) -> dict[str, object]:
-    app = _app()
-    design = wglink_core._design(app)
-    plan = wglink_author.plan_source_assignment(_face_descriptors(faces), role)
+def _apply_source_faces(faces: list[object], role: str, *, app: object = None,
+                        design: object = None) -> dict[str, object]:
+    # A nested save passes its own design: every _design() lookup mints a new
+    # Fusion wrapper, and the outer transaction journals one design.
+    app = app if app is not None else _app()
+    design = design if design is not None else wglink_core._design(app)
+    action = "save WG source faces"
+    plan = wglink_author.plan_source_assignment(
+        wglink_send.read_for_edit(action, lambda: _face_descriptors(faces)), role)
     def prepare(edit):
         wglink_send._prepare_source_edit(edit, design, faces)
         for face in faces:
@@ -1065,7 +1070,7 @@ def _apply_source_faces(faces: list[object], role: str) -> dict[str, object]:
                 )
         return {"summary": summary}
 
-    return wglink_send.document_edit("save WG source faces", prepare, mutate)
+    return wglink_send.document_edit(action, prepare, mutate)
 
 
 def _apply_body_declaration(command_inputs: object) -> dict[str, object]:
@@ -1073,7 +1078,7 @@ def _apply_body_declaration(command_inputs: object) -> dict[str, object]:
 
     bodies = _selected_entities(command_inputs, "declare_bodies")
     plan = wglink_author.plan_body_declaration(
-        _body_descriptors(bodies),
+        wglink_send.read_for_edit("save body declarations", lambda: _body_descriptors(bodies)),
         _selected_name(command_inputs, "declaration", ""),
     )
     def prepare(edit):
@@ -1786,6 +1791,9 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             # It is owed a refresh and a status like any command that ran.
             if exported:
                 ran = True
+            if exc.__cause__ is not None:
+                # The refusal is plain text; its Fusion cause belongs in the log.
+                _log(f"[{PANEL_NAME}] {self.operation} refused\n{traceback.format_exc()}")
             _message(str(exc), f"{PANEL_NAME} refused")
         except Exception as exc:  # noqa: BLE001 - UI boundary; core remains head-less
             _report_error(COMMANDS[self.operation][1], f"{PANEL_NAME} error", exc)
@@ -2513,18 +2521,27 @@ def _restore_mesh_selections(selection, record):
     record["unselected_saved_faces"] = set(missing)
 
 
+MESH_DIALOG_RETRY = "Close and reopen Sources & Mesh… to retry before saving."
+
+
 def _build_mesh_dialog(inputs, state):
     state.restoring = True
     try:
         design = wglink_core._design(_app())
         # Resolve saved settings before the fail-soft source preview can read
         # them. A failed read leaves construction guarded until the next open.
-        saved = wglink_send.read_mesh_settings(design)
-        wglink_send._stamp_attributes(design)
-        report = wglink_send.preflight_scope(
-            _app(), {"source_identity": _source_identity_enabled(), "display_automatic_domain": True},
-            authoring_context=state.context,
-        )
+        try:
+            saved = wglink_send.read_mesh_settings(design)
+        except wglink_core.WgLinkError as exc:
+            raise wglink_core.WgLinkError(f"{exc} {MESH_DIALOG_RETRY}") from exc
+        try:
+            wglink_send._stamp_attributes(design)
+            report = wglink_send.preflight_scope(
+                _app(), {"source_identity": _source_identity_enabled(), "display_automatic_domain": True},
+                authoring_context=state.context,
+            )
+        except wglink_send.SourceIdentityReadError as exc:
+            raise wglink_core.WgLinkError(f"{exc} {MESH_DIALOG_RETRY}") from exc
         state.preview_error = report.get("source_error")
         sources = state.context.get("sources", [])
         mesh = wglink_mesh.snapshot(sources, saved)
@@ -2746,7 +2763,7 @@ def _save_mesh_dialog(design, app, state, sources, groups, mesh):
     removed = [face for source in state.original_sources if not source.get("instance_id")
                for face in source["original_faces"] if wglink_send._face_key(face) not in final_keys]
     if removed:
-        _apply_source_faces(removed, wglink_author.CLEAR_SOURCE_LABEL)
+        _apply_source_faces(removed, wglink_author.CLEAR_SOURCE_LABEL, app=app, design=design)
     for source in sources:
         if source.get("instance_id"):
             continue
@@ -2757,7 +2774,7 @@ def _save_mesh_dialog(design, app, state, sources, groups, mesh):
             # Keep legacy PORT_EXIT paint; explicitly Save repairs its stamps.
             wglink_send.assign_source_identity(design, source["faces"], source["role"])
         else:
-            _apply_source_faces(source["faces"], source["role"])
+            _apply_source_faces(source["faces"], source["role"], app=app, design=design)
     all_source_faces = [face for source in sources for face in source["faces"]]
     for group in groups:
         wglink_send.paint_surface_group(app, design, group["faces"], group["group_id"], source_faces=all_source_faces)
