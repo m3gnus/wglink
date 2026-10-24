@@ -236,6 +236,29 @@ requirements:
 In WG the return arrives marked `unlinked`; acknowledge that one finding, set
 mesh sizing and drive channels in the CAD Link panel, and solve.
 
+### Pre-flight checks
+
+Send, Solve, Sources & Mesh… and Waveguide Generator itself use one set of
+pre-flight rules (`preflight_findings` in `wglink_protocol.py`, which WG
+vendors byte for byte). Each finding is one of three kinds:
+
+- **Fix first.** Send and Solve stay disabled, and the pre-flight box says what
+  to change: no source and no FEM driver, a source or surface group without
+  faces, two painted sources with the same role, a surface group without a name
+  or with a repeated name, unreadable mesh settings, a scope that cannot be
+  exported, an inconsistent declared domain or FEM region. WG refuses such a
+  return in the same words when another writer sends one. A model whose only
+  driver is a FEM region's moving surface needs no source, in Sources & Mesh…
+  and in Send alike.
+- **Asked on OK.** One pop-up lists them. A body that is not a closed solid
+  offers **Send anyway**. A Solve whose approximate count is over the solved
+  triangle limit even for the smallest domain WG could use offers **Solve
+  anyway** or **Change mesh resolution**, which opens Sources & Mesh…. Solve
+  anyway travels with the request, so WG does not ask again; a WG that does
+  not read it asks as before.
+- **Noted.** A saved surface group with no faces in the selected subtree is
+  left out of that export.
+
 ### Source identity
 
 A Waveguide Generator that reads source identities keeps a painted source's

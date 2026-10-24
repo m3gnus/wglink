@@ -611,7 +611,11 @@ def test_preflight_reports_a_missing_source_instead_of_raising_it(
     report = send_module.preflight_scope(app)
 
     assert report["sources"] == []
-    assert "no drivable source" in report["source_error"]
+    # No source is the shared rule's verdict, not a failed survey.
+    assert report["source_error"] is None
+    findings = send_module.wglink_protocol.preflight_findings(report)
+    assert [finding["code"] for finding in findings] == ["no_drive"]
+    assert findings[0]["severity"] == "block"
     assert report["source_bounds_mm"] is None
 
 

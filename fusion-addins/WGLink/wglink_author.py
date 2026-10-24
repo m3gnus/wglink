@@ -458,9 +458,9 @@ def plan_body_declaration(
 
 # ----------------------------------------------------------------- pre-flight
 
-NO_SOURCE_WARNING = (
-    "No drivable source: use Sources & Mesh… to mark a face LF, MF, HF, or "
-    "PASSIVE_CARDIOID. The export refuses without one."
+#: What the preview says about a model with nothing to drive it (the shared rule's words).
+NO_SOURCE_WARNING = wglink_protocol.finding_text(
+    wglink_protocol.preflight_finding("no_drive", wglink_protocol.NO_DRIVE_MESSAGE)
 )
 LOG_HINT = (
     "The full traceback is in Fusion's Text Commands palette "
@@ -515,16 +515,25 @@ def _body_count_phrase(included: list[Mapping[str, Any]]) -> str:
     return ", ".join(phrases) if phrases else "none"
 
 
-def preflight_summary(scope: Mapping[str, Any]) -> Preflight:
+def preflight_summary(
+    scope: Mapping[str, Any], findings: Sequence[Mapping[str, Any]] | None = None
+) -> Preflight:
     """Compose the read-only Send/Solve summary from plain gathered numbers.
 
     ``scope`` is what ``wglink_send.preflight_scope`` gathers on Fusion's main
     thread: counts, ids, source roles and areas, and two bounding boxes. No
-    Fusion object ever reaches this function.
+    Fusion object ever reaches this function. ``findings`` are the shared
+    preflight rules' verdict on it (``wglink_protocol.preflight_findings``);
+    each is shown as a warning, blockers first.
     """
 
     if not isinstance(scope, Mapping):
         raise AuthorError("Pre-flight needs the gathered scope report.")
+    if findings is None:
+        findings = wglink_protocol.preflight_findings(scope)
+    warnings = tuple(wglink_protocol.finding_text(finding) for finding in findings)
+    if any(finding.get("code") in {"scope_unclassified_surface", "scope_invalid"} for finding in findings):
+        return Preflight(lines=(), warnings=warnings)
     selection = str(scope.get("selection") or "root")
     included = [
         item for item in (scope.get("included") or []) if isinstance(item, Mapping)
@@ -533,13 +542,6 @@ def preflight_summary(scope: Mapping[str, Any]) -> Preflight:
     sources = [
         item for item in (scope.get("sources") or []) if isinstance(item, Mapping)
     ]
-    scope_error = str(scope.get("scope_error") or "").strip()
-    has_unclassified_surface_refusal = (
-        scope.get("has_unclassified_visible_surface_refusal") is True
-    )
-    manage_dropdown_name = str(scope.get("manage_dropdown_name") or "").strip()
-    source_error = str(scope.get("source_error") or "").strip()
-    domain_error = str(scope.get("domain_error") or "").strip()
     domain = scope.get("domain")
     automatic_domain = (
         isinstance(domain, Mapping) and domain.get("kind") == "automatic"
@@ -549,16 +551,6 @@ def preflight_summary(scope: Mapping[str, Any]) -> Preflight:
         if isinstance(domain, Mapping)
         else ()
     )
-
-    if scope_error:
-        warning = f"Export is blocked: {scope_error}"
-        if (
-            has_unclassified_surface_refusal
-            and manage_dropdown_name
-            and manage_dropdown_name not in scope_error
-        ):
-            warning += f" Declare Body… is under {manage_dropdown_name}."
-        return Preflight(lines=(), warnings=(warning,))
 
     lines = [
         "Scope: root assembly" if selection == "root" else f"Scope: {selection}",
@@ -605,21 +597,8 @@ def preflight_summary(scope: Mapping[str, Any]) -> Preflight:
         )
         if name and plane:
             lines.append(f"Cut: {name} at {plane}")
-
-    fem_lines = [str(line) for line in (scope.get("fem_regions") or ())]
-    lines.extend(fem_lines)
-    fem_region_error = str(scope.get("fem_region_error") or "").strip()
-    fem_driven = scope.get("fem_driven") is True
-
-    warnings: list[str] = []
-    if domain_error:
-        warnings.append(f"Model domain: {domain_error}")
-    if fem_region_error:
-        warnings.append(f"FEM regions: {fem_region_error}")
-    if not sources and not fem_driven:
-        warnings.append(source_error or NO_SOURCE_WARNING)
-
-    return Preflight(lines=tuple(lines), warnings=tuple(warnings))
+    lines.extend(str(line) for line in (scope.get("fem_regions") or ()))
+    return Preflight(lines=tuple(lines), warnings=warnings)
 
 
 # ------------------------------------------------------- user-facing failures
@@ -645,7 +624,14 @@ def failure_message(action: str, exc: BaseException | None) -> str:
     return f"{action} hit an unexpected error: {_detail(exc)}\n\n{LOG_HINT}"
 
 
-def preflight_unavailable(exc: BaseException | None) -> str:
-    """Text for the pre-flight box when the model could not be surveyed."""
+def preflight_unavailable(exc: BaseException | None, *, refusal: bool = False) -> str:
+    """Text for the pre-flight box when the model could not be surveyed.
 
-    return f"Pre-flight unavailable: {_detail(exc)}"
+    ``refusal``: ``exc`` is one the add-in words for the user (WG not running
+    or too old, no design), which says what to do. Any other failure is the
+    add-in's own: the caller logs it, and the user reads one calm line.
+    """
+
+    if refusal and exc is not None:
+        return _detail(exc)
+    return wglink_protocol.PREFLIGHT_UNAVAILABLE_MESSAGE

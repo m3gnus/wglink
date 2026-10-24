@@ -603,9 +603,11 @@ def test_the_send_dialog_asks_only_for_scope(monkeypatch) -> None:
             text_boxes.append(args), types.SimpleNamespace(formattedText="")
         )[1],
     )
+    validators: list[object] = []
     command = types.SimpleNamespace(
         commandInputs=inputs,
         inputChanged=types.SimpleNamespace(add=lambda _handler: None),
+        validateInputs=types.SimpleNamespace(add=validators.append),
         execute=types.SimpleNamespace(add=lambda _handler: None),
     )
     module.adsk.core.DropDownStyles = types.SimpleNamespace(
@@ -647,9 +649,11 @@ def test_solve_in_wg_shares_the_send_dialog(monkeypatch) -> None:
             added.append(args[0]), types.SimpleNamespace(formattedText="")
         )[1],
     )
+    validators: list[object] = []
     command = types.SimpleNamespace(
         commandInputs=inputs,
         inputChanged=types.SimpleNamespace(add=lambda _handler: None),
+        validateInputs=types.SimpleNamespace(add=validators.append),
         execute=types.SimpleNamespace(add=lambda _handler: None),
     )
     module.adsk.core.DropDownStyles = types.SimpleNamespace(
@@ -665,6 +669,8 @@ def test_solve_in_wg_shares_the_send_dialog(monkeypatch) -> None:
         "preflight",
         "refresh_preflight",
     ]
+    # OK follows the shared preflight verdict.
+    assert [type(handler).__name__ for handler in validators] == ["SendValidateInputsHandler"]
 
 
 def test_removed_model_domain_code_is_not_kept_as_dead_state(monkeypatch) -> None:
@@ -941,7 +947,7 @@ def test_send_shows_and_closes_progress_around_the_slow_export(
         }
 
     monkeypatch.setattr(module.wglink_send, "send", send)
-    monkeypatch.setattr(module, "_submit_to_wg", lambda _report, _kind: "req-progress")
+    monkeypatch.setattr(module, "_submit_to_wg", lambda _report, _kind, **_kw: "req-progress")
 
     module.CommandExecuteHandler("send").notify(
         types.SimpleNamespace(
@@ -993,7 +999,7 @@ def test_solve_confirms_the_handoff_and_shows_only_one_progress_dialog(
         }
 
     monkeypatch.setattr(module.wglink_send, "send", send)
-    monkeypatch.setattr(module, "_submit_to_wg", lambda _report, _kind: "req-solve-progress")
+    monkeypatch.setattr(module, "_submit_to_wg", lambda _report, _kind, **_kw: "req-solve-progress")
 
     module.CommandExecuteHandler("solve").notify(
         types.SimpleNamespace(
@@ -1319,7 +1325,11 @@ def test_a_model_that_cannot_be_surveyed_leaves_the_dialog_usable(monkeypatch) -
 
     module._sync_preflight(_dialog_inputs(preflight=box))
 
-    assert box.formattedText == "Pre-flight unavailable: No active Fusion design"
+    # The add-in's own failure: one calm line; the detail goes to the log.
+    assert box.formattedText == (
+        "Waveguide Generator could not check this model. Try again; if it keeps "
+        "happening, it has been recorded."
+    )
 
 
 def test_an_unexpected_failure_shows_one_line_and_logs_the_traceback(
@@ -1430,7 +1440,7 @@ def test_the_send_command_offers_adoption_and_the_preview_never_does(
     seen: dict[str, object] = {}
     monkeypatch.setattr(module, "_command_options", lambda _inputs: {})
     monkeypatch.setattr(module, "_send_options", lambda _inputs: {})
-    monkeypatch.setattr(module, "_submit_to_wg", lambda _report, _kind: "req-adoption")
+    monkeypatch.setattr(module, "_submit_to_wg", lambda _report, _kind, **_kw: "req-adoption")
     monkeypatch.setattr(
         module.wglink_send,
         "send",

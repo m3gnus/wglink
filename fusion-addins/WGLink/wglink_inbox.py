@@ -15,7 +15,7 @@ from pathlib import Path
 import re
 import tempfile
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 if __package__:
     from . import wglink_protocol
@@ -423,11 +423,15 @@ def wg_request_payload(
     bundle_relative: str,
     manifest_sha256: str,
     requested_at: str,
+    acknowledged: Sequence[str] = (),
 ) -> dict[str, Any]:
     """One schema-4 WG request (C2). ``kind`` is the only Send/Solve difference.
 
     ``returnId`` is present, as a string that may be empty, on a Solve, and
-    absent on a Send.
+    absent on a Send. ``acknowledged`` names the WG holds the user already
+    answered before this Solve (``wglink_protocol.ACKNOWLEDGES``, such as
+    Solve anyway over the triangle ceiling); present only on a Solve that has
+    any. A WG that does not read it asks again, as before.
     """
 
     if kind not in WG_REQUEST_KINDS:
@@ -448,6 +452,11 @@ def wg_request_payload(
     }
     if kind == KIND_PREPARE_AND_SOLVE:
         payload["returnId"] = str(return_id or "")
+        holds = wglink_protocol.request_acknowledged(list(acknowledged))
+        if holds:
+            payload[wglink_protocol.ACKNOWLEDGED_FIELD] = list(holds)
+    elif acknowledged:
+        raise ValueError("Only a Solve request answers WG's questions.")
     return payload
 
 
@@ -464,6 +473,7 @@ def plan_wg_request(
     bundle_relative: str,
     manifest_sha256: str,
     requested_at: str,
+    acknowledged: Sequence[str] = (),
 ) -> tuple[Path, dict[str, Any]]:
     """Decide, once, the exact request file this command writes: where, and what.
 
@@ -479,7 +489,7 @@ def plan_wg_request(
         "manifest_sha256": manifest_sha256,
         "requested_at": requested_at,
     }
-    payload = wg_request_payload(kind=kind, return_id=return_id, **fields)
+    payload = wg_request_payload(kind=kind, return_id=return_id, acknowledged=acknowledged, **fields)
     return solve_request_path(ipc_folder, payload["commandId"]), payload
 
 

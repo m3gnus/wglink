@@ -906,16 +906,31 @@ def _sync_anchor_choices(command_inputs: object) -> None:
         pass
 
 
-def _sync_preflight(command_inputs: object) -> None:
+class SendDialogState:
+    """The Send or Solve dialog's last preflight verdict.
+
+    Computed when the dialog opens and whenever its scope changes, then read by
+    the cheap ``validateInputs`` handler and by OK's question pop-up, so neither
+    surveys the document again.
+    """
+
+    def __init__(self, operation: str) -> None:
+        self.kind = "solve" if operation == "solve" else "send"
+        self.findings: list[dict[str, object]] = []
+
+
+def _sync_preflight(command_inputs: object, state: SendDialogState | None = None) -> None:
     """Refresh the read-only summary the Send and Solve dialogs show.
 
-    Everything Fusion-specific happens here, on the main thread; the wording is
-    composed by wglink_author from plain numbers.
+    Everything Fusion-specific happens here, on the main thread; the verdict
+    is the shared preflight rules' (``wglink_protocol.preflight_findings``)
+    and the wording is composed by wglink_author from plain numbers.
     """
 
     box = _input(command_inputs, "preflight")
     if box is None:
         return
+    findings: list[dict[str, object]] = []
     try:
         options: dict[str, object] = {
             "selection": _send_selection(command_inputs),
@@ -928,17 +943,109 @@ def _sync_preflight(command_inputs: object) -> None:
                 options["anchor_instance_id"] = str(anchor.selectedItem.name)
         except Exception:  # noqa: BLE001 - an untouched dropdown has no choice yet
             pass
-        text = wglink_author.preflight_summary(
-            wglink_send.preflight_scope(_app(), options)
-        ).html()
+        report = wglink_send.preflight_scope(_app(), options)
+        findings = wglink_protocol.preflight_findings(
+            {**report, "kind": state.kind if state is not None else None}
+        )
+        text = wglink_author.preflight_summary(report, findings).html()
+    except (wglink_core.WgLinkError, wglink_author.AuthorError) as exc:
+        # Worded for the user (WG not running or too old, no design). OK
+        # stays the boundary: it can start WG, or refuses in these words.
+        text = wglink_author.preflight_unavailable(exc, refusal=True)
     except Exception as exc:  # noqa: BLE001 - a preview never blocks the dialog
+        _log(f"[{PANEL_NAME}] pre-flight survey failed\n{traceback.format_exc()}")
         text = wglink_author.preflight_unavailable(exc)
+    if state is not None:
+        state.findings = findings
     for attribute in ("formattedText", "text"):
         try:
             setattr(box, attribute, text)
             return
         except Exception:  # noqa: BLE001 - older text boxes expose only one
             continue
+
+
+class SendValidateInputsHandler(adsk.core.ValidateInputsEventHandler):
+    """OK stays disabled while the model has a blocking preflight finding.
+
+    Fusion fires this on every input change, so it only reads the verdict
+    ``_sync_preflight`` cached; the preflight box already shows the remedy.
+    """
+
+    def __init__(self, state: SendDialogState):
+        super().__init__()
+        self.state = state
+
+    def notify(self, args: object) -> None:
+        try:
+            args.areInputsValid = not wglink_protocol.blocking(self.state.findings)
+        except Exception:  # noqa: BLE001 - execute remains the validation boundary
+            pass
+
+
+#: OK's answers to the preflight questions (``_ask_before_sending``).
+ASK_CANCELLED = "cancelled"
+ASK_CHANGE_MESH = "change_mesh"
+
+
+def _ask_before_sending(state: SendDialogState | None) -> object:
+    """Ask every ``ask`` finding in one pop-up; the holds answered, or a choice.
+
+    Returns the acknowledged WG holds (a tuple, possibly empty) to send on,
+    ``ASK_CANCELLED`` to go back to the dialog, or ``ASK_CHANGE_MESH`` to open
+    Sources & Mesh…. Without Fusion's modal API nothing is asked and nothing
+    is acknowledged: WG asks itself.
+    """
+
+    asks = [finding for finding in (state.findings if state is not None else ())
+            if finding.get("severity") == wglink_protocol.PREFLIGHT_ASK]
+    if not asks:
+        return ()
+    ui = _ui()
+    message_box = getattr(ui, "messageBox", None) if ui is not None else None
+    try:
+        question = adsk.core.MessageBoxIconTypes.QuestionIconType
+        results = adsk.core.DialogResults
+        yes, no = results.DialogYes, results.DialogNo
+        yes_no = adsk.core.MessageBoxButtonTypes.YesNoButtonType
+        yes_no_cancel = adsk.core.MessageBoxButtonTypes.YesNoCancelButtonType
+    except AttributeError:
+        return ()
+    if not callable(message_box):
+        return ()
+    ceiling = any(finding.get("code") == "mesh_ceiling" for finding in asks)
+    listed = "\n".join(f"• {wglink_protocol.finding_text(finding)}" for finding in asks)
+    if ceiling:
+        answer = message_box(
+            f"{listed}\n\nYes: Solve anyway.\nNo: Change mesh resolution (opens Sources & Mesh…).\n"
+            "Cancel: go back.",
+            f"{PANEL_NAME} — before solving",
+            yes_no_cancel,
+            question,
+        )
+        if answer == yes:
+            return tuple(sorted({wglink_protocol.ACKNOWLEDGES[finding["code"]] for finding in asks
+                                 if finding.get("code") in wglink_protocol.ACKNOWLEDGES}))
+        return ASK_CHANGE_MESH if answer == no else ASK_CANCELLED
+    verb = "Solve" if state is not None and state.kind == "solve" else "Send"
+    answer = message_box(
+        f"{listed}\n\n{verb} anyway?",
+        f"{PANEL_NAME} — before sending",
+        yes_no,
+        question,
+    )
+    return () if answer == yes else ASK_CANCELLED
+
+
+def _open_sources_and_mesh() -> None:
+    """Open Sources & Mesh… once the current command has finished."""
+
+    try:
+        definition = _ui().commandDefinitions.itemById(COMMANDS["source"][0])
+        if definition is not None:
+            definition.execute()
+    except Exception:  # noqa: BLE001 - the user can still open it from the panel
+        _log(f"[{PANEL_NAME}] could not open Sources & Mesh…\n{traceback.format_exc()}")
 
 
 def _sync_help(command_inputs: object, box_id: str, choice_id: str, text_of) -> None:
@@ -1274,7 +1381,7 @@ def _unconfirmed_text(request_id: str) -> str:
     )
 
 
-def _submit_to_wg(report: dict[str, object], kind: str) -> str:
+def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[str, ...] = ()) -> str:
     """Hand the return this command just published to WG: one file, one id.
 
     Send and Solve both come here and differ only in ``kind`` (M1 transfer
@@ -1307,6 +1414,7 @@ def _submit_to_wg(report: dict[str, object], kind: str) -> str:
             bundle_relative=relative,
             manifest_sha256=manifest,
             requested_at=wglink_inbox.utc_timestamp(),
+            acknowledged=acknowledged,
         )
     except (wglink_inbox.WgOutdatedError, wglink_inbox.WgNotCollectingError) as exc:
         _begin_request(channel, request_id, DELIVERY)["outcome"] = "refused"
@@ -1676,6 +1784,10 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         # The Declare FEM Region dialog's group bookkeeping, set when it is built.
         self.fem_state: FemDialogState | None = None
         self.mesh_state: MeshDialogState | None = None
+        # The Send or Solve dialog's preflight verdict, and the WG holds the
+        # user answered in OK's pop-up (sent with the request).
+        self.send_state: SendDialogState | None = None
+        self.acknowledged: tuple[str, ...] = ()
 
     def notify(self, args: object) -> None:
         # Everything this command inspects or changes, including the follow-up
@@ -1703,6 +1815,15 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             if admission is not None and admission.cancelled:
                 return
             if self.operation in {"send", "solve"} and send_options is None:
+                answer = _ask_before_sending(self.send_state)
+                if answer == ASK_CANCELLED:
+                    if args is not None:
+                        args.isValidResult = False  # Back to the dialog.
+                    return
+                if answer == ASK_CHANGE_MESH:
+                    _schedule_followup(_open_sources_and_mesh)
+                    return
+                self.acknowledged = tuple(answer)
                 if self._admit_backend(args):
                     return
             if self.operation in {"send", "solve", "insert", "update"}:
@@ -1728,9 +1849,11 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 )
                 if admission is not None and admission.cancelled:
                     return
+                options = send_options if send_options is not None else _send_options(inputs)
+                acknowledged = tuple(options.pop("acknowledged", self.acknowledged))
                 report = wglink_send.send(
                     _app(),
-                    send_options if send_options is not None else _send_options(inputs),
+                    options,
                     confirm_adoption=_confirm_source_adoption,
                     confirm_clear_fem=_confirm_clear_fem,
                 )
@@ -1756,6 +1879,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                     wglink_inbox.KIND_PREPARE_AND_SOLVE
                     if solve
                     else wglink_inbox.KIND_RECEIVE_SNAPSHOT,
+                    acknowledged=acknowledged if solve else (),
                 )
                 report["solve_requested"] = solve
                 _update_export_progress(progress, 3, "Return ready in Waveguide Generator.")
@@ -1855,6 +1979,8 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         document_id = _active_document_id()
         document = app.activeDocument
         options = _send_options(args.command.commandInputs, backend_ready=False)
+        # The pop-up's answers outlive the dialog's inputs, like its choices.
+        options["acknowledged"] = self.acknowledged
         # IPC comes exclusively from workspace.data_dir(), not the CAD workspace.
         override = wglink_workspace.launcher_data_dir()
         admission = _backend_admission
@@ -2360,9 +2486,10 @@ class FemValidateInputsHandler(adsk.core.ValidateInputsEventHandler):
 
 
 class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
-    def __init__(self, operation: str = "dialog"):
+    def __init__(self, operation: str = "dialog", send_state: SendDialogState | None = None):
         super().__init__()
         self.operation = operation
+        self.send_state = send_state
 
     def notify(self, args: object) -> None:
         # A dialog's refresh is part of the command whose dialog it is.
@@ -2376,16 +2503,16 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
             inputs = args.inputs
             if input_id == "send_selection":
                 _sync_anchor_choices(inputs)
-                _sync_preflight(inputs)
+                _sync_preflight(inputs, self.send_state)
             elif input_id == "anchor_instance_id":
-                _sync_preflight(inputs)
+                _sync_preflight(inputs, self.send_state)
             elif input_id == "refresh_preflight":
                 # Fusion body/occurrence visibility can change while this modal
                 # is open without producing a command-input event. Re-survey on
                 # an explicit read-only action so the displayed body inventory
                 # and anchor choices cannot remain stale.
                 _sync_anchor_choices(inputs)
-                _sync_preflight(inputs)
+                _sync_preflight(inputs, self.send_state)
                 try:
                     changed.value = False
                 except Exception:  # noqa: BLE001 - old Fusion buttons may be write-only
@@ -2417,6 +2544,8 @@ class MeshDialogState:
         self.original_sources = []
         self.original_groups = []
         self.preview_error = None
+        # A FEM region with a moving surface drives the model without a source.
+        self.fem_driven = False
         self.activated = False
 
 
@@ -2543,6 +2672,7 @@ def _build_mesh_dialog(inputs, state):
         except wglink_send.SourceIdentityReadError as exc:
             raise wglink_core.WgLinkError(f"{exc} {MESH_DIALOG_RETRY}") from exc
         state.preview_error = report.get("source_error")
+        state.fem_driven = report.get("fem_driven") is True
         sources = state.context.get("sources", [])
         mesh = wglink_mesh.snapshot(sources, saved)
         for input_id, title, expanded in (
@@ -2623,48 +2753,23 @@ def _mesh_dialog_values(inputs, state):
 
 
 def _mesh_dialog_errors(sources, groups, mesh, state):
-    errors = [state.preview_error] if state.preview_error else []
-    if not sources:
-        errors.append("There must be at least one source.")
-    def size_error(label, value):
-        if value is None or not math.isfinite(value) or value <= 0:
-            errors.append(f"{label}: size must be greater than 0.")
-    size_error("Walls", mesh["wall_size_mm"])
-    size_error("Grading distance", mesh["grading_distance_mm"])
-    source_keys, group_keys, roles, names = {}, {}, {}, {}
-    for kind, rows in (("Source", sources), ("Group", groups)):
-        for row in rows:
-            label = (f"Source {row['row_id']} ({row['role']})" if kind == "Source"
-                     else f"Group {row['row_id']} ({row['name'] or 'unnamed'})")
-            size_error(label, row["size_mm"])
-            if not row["faces"]:
-                errors.append(f"{label}: select at least one face.")
+    """Save's blockers: the shared authoring rules over this dialog's rows."""
+    rows = []
+    for kind, records in (("source", sources), ("group", groups)):
+        for row in records:
             selected = {wglink_send._face_key(face) for face in row["faces"]}
             missing = row.get("unselected_saved_faces", set()) - selected
-            missing_count = min(len(missing), max(0, len(row["original_faces"]) - len(selected)))
-            if missing_count:
-                errors.append(f"{label}: {missing_count} saved faces could not be selected (hidden or changed). Reselect them.")
-            if kind == "Source":
-                if not row.get("instance_id"):
-                    if row["role"] in roles:
-                        errors.append(f"{label}: same role as {roles[row['role']]}. Use one source per role.")
-                    roles[row["role"]] = label
-                other = source_keys
-            else:
-                if not row["name"]:
-                    errors.append(f"{label}: give this surface group a name.")
-                name = row["name"].casefold()
-                if name in names:
-                    errors.append(f"{label}: duplicate group name with {names[name]}. Use unique group names.")
-                names[name] = label
-                for key in selected & source_keys.keys():
-                    errors.append(f"{label}: a face is also in {source_keys[key]}. A face cannot be in both a source and a surface group.")
-                other = group_keys
-            for key in selected & other.keys():
-                plural = "sources" if kind == "Source" else "surface groups"
-                errors.append(f"{label}: a face is also in {other[key]}. A face cannot be in two {plural}.")
-            other.update({key: label for key in selected})
-    return list(dict.fromkeys(errors))
+            rows.append({
+                "kind": kind,
+                "label": (f"Source {row['row_id']} ({row['role']})" if kind == "source"
+                          else f"Group {row['row_id']} ({row['name'] or 'unnamed'})"),
+                "role": row.get("role"), "name": row.get("name"), "linked": bool(row.get("instance_id")),
+                "size_mm": row["size_mm"], "face_keys": selected,
+                "missing_saved_faces": min(len(missing), max(0, len(row["original_faces"]) - len(selected))),
+            })
+    findings = wglink_protocol.mesh_authoring_findings(
+        rows, mesh, fem_driven=state.fem_driven, source_error=state.preview_error)
+    return [finding["message"] for finding in findings]
 
 
 def _mesh_snapshot_values(sources, groups, mesh):
@@ -2951,7 +3056,8 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             if self.operation == "fem":
                 _require_fem_regions()
             inputs = args.command.commandInputs
-            if self.operation in {"send", "solve"}:
+            send_state = SendDialogState(self.operation) if self.operation in {"send", "solve"} else None
+            if send_state is not None:
                 selection = inputs.addSelectionInput(
                     "send_selection",
                     "Assembly scope",
@@ -2976,7 +3082,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 # model sits from that frame. A missing source used to be a
                 # dead-end modal raised after the user pressed OK.
                 inputs.addTextBoxCommandInput("preflight", "Pre-flight", "", 8, True)
-                _sync_preflight(inputs)
+                _sync_preflight(inputs, send_state)
                 inputs.addBoolValueInput(
                     "refresh_preflight",
                     "Refresh body inventory",
@@ -2984,9 +3090,12 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                     "",
                     False,
                 )
-                changed = CommandInputChangedHandler(self.operation)
+                changed = CommandInputChangedHandler(self.operation, send_state)
                 args.command.inputChanged.add(changed)
                 _handlers.append(changed)
+                validate = SendValidateInputsHandler(send_state)
+                args.command.validateInputs.add(validate)
+                _handlers.append(validate)
             if self.operation == "source":
                 _initialize_authoring_dialog(args.command, self.operation)
                 return
@@ -3067,6 +3176,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             # names the recovery path, and the root fallback already warns in
             # its report.
             handler = CommandExecuteHandler(self.operation)
+            handler.send_state = send_state
             args.command.execute.add(handler)
             _handlers.append(handler)
         except Exception as exc:  # noqa: BLE001

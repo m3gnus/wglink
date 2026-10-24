@@ -402,8 +402,14 @@ def test_a_long_or_empty_failure_detail_stays_readable(author):
 
 
 def test_an_unsurveyable_model_says_so_in_the_pre_flight_box(author):
+    # The add-in's own failure: one calm line, the detail stays in the log.
     assert author.preflight_unavailable(RuntimeError("no active design")) == (
-        "Pre-flight unavailable: no active design"
+        "Waveguide Generator could not check this model. Try again; if it keeps "
+        "happening, it has been recorded."
+    )
+    # A refusal worded for the user says what to do.
+    assert author.preflight_unavailable(RuntimeError("Start WG, then try again."), refusal=True) == (
+        "Start WG, then try again."
     )
 
 

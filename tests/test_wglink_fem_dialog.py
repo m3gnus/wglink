@@ -296,7 +296,7 @@ def test_send_and_solve_wire_the_clear_prompt_on_the_command_thread(fixture, mon
     monkeypatch.setattr(module, "_send_options", lambda _inputs: {})
     monkeypatch.setattr(module, "_require_compatible_wg", lambda **_kwargs: None)
     monkeypatch.setattr(module.CommandExecuteHandler, "_admit_backend", lambda *_args: False)
-    monkeypatch.setattr(module, "_submit_to_wg", lambda *_args: "request")
+    monkeypatch.setattr(module, "_submit_to_wg", lambda *_args, **_kw: "request")
     command_thread = threading.get_ident()
     calls = []
     def send(_app, _options, **kwargs):

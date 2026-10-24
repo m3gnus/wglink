@@ -1364,6 +1364,12 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
         "source_bounds_mm": None,
         "fem_regions": [],
         "fem_region_error": None,
+        # The rest of the preflight draft (wglink_protocol.preflight_findings).
+        "mesh_error": None,
+        "surface_groups": [],
+        "groups_out_of_scope": [],
+        "open_bodies": [],
+        "triangles_least": None,
     }
     fem_driven = False
     try:
@@ -1425,6 +1431,11 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
         }
         for item, _body in included_pairs
     ]
+    # Fusion's own verdict, read once per survey: a body that is not a closed
+    # solid exports as a surface body.
+    report["open_bodies"] = [
+        item["name"] for item in report["included"] if item["body_kind"] == "surface"
+    ]
     for record in records:
         instance_body = next(
             (
@@ -1436,6 +1447,7 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
         )
         if instance_body is not None:
             record["source_body"] = instance_body
+    source_face_keys: set[tuple[str, object]] = set()
     try:
         # The preview predicts the export, so it resolves the export-frame
         # placements the same way and only once -- the second derivation below
@@ -1455,8 +1467,10 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
             fractions,
             source_identity=bool(opts.get("source_identity")),
             design=design,
-            allow_empty=fem_driven or authoring_context is not None,
+            # No source is the shared rule's finding (no_drive), not a failed survey.
+            allow_empty=True,
             authoring_context=authoring_context,
+            source_face_keys=source_face_keys,
         )
         if authoring_context is not None:
             authoring_context["sources"] = sources
@@ -1466,6 +1480,8 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
         report["source_error"] = str(exc)
         sources = []
         fractions = {}
+    if authoring_context is None and report["source_error"] is None:
+        _preview_mesh(report, design, sources, included_bodies, source_face_keys)
     for source in sources:
         observed = source.get("observed", {})
         report["sources"].append({
@@ -1501,6 +1517,42 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
         source_bounds = _merge_bounds(source_bounds, face)
     report["source_bounds_mm"] = source_bounds
     return report
+
+
+def _preview_mesh(
+    report: dict[str, Any], design: object, sources: list[dict[str, Any]],
+    bodies: list[object], source_face_keys: set[tuple[str, object]],
+) -> None:
+    """The mesh part of the preflight draft: the export's own snapshot, measured now.
+
+    ``triangles_least`` is the advisory estimate for the most reduced domain
+    WG could plausibly solve -- a quarter unless symmetry is off -- so the
+    ceiling is asked about only when even that is over (the ``mesh_ceiling``
+    rule). Sources keep the suggested sizes the snapshot gives them.
+    """
+
+    left_out: list[str] = []
+    try:
+        mesh = _mesh_snapshot(design, sources, bodies, source_face_keys, left_out=left_out)
+    except wglink_core.WgLinkError as exc:
+        report["mesh_error"] = str(exc)
+        return
+    report["surface_groups"] = [{"name": group.get("name")} for group in mesh["surface_groups"]]
+    report["groups_out_of_scope"] = left_out
+    if not sources:
+        return
+    try:
+        area = sum(
+            _face_area(face)
+            for body in bodies
+            for face in wglink_core._items(getattr(body, "faces", None))
+        )
+        estimate = wglink_mesh.estimate_triangles(
+            area, sources, mesh, solved_fraction=1.0 if mesh["symmetry"] == "off" else 0.25
+        )
+    except (wglink_mesh.MeshSettingsError, wglink_core.WgLinkError):
+        return  # Advisory: WG's own count still decides, and asks.
+    report["triangles_least"] = int(estimate["triangles"])
 
 
 @wglink_activity.counted(wglink_activity.DOCUMENT_SIGNATURE)
@@ -3520,9 +3572,14 @@ def _surface_group_faces(design, entities, source_faces):
 
 def _mesh_snapshot(
     design: object, sources: list[dict[str, Any]], bodies: list[object],
-    source_face_keys: set[tuple[str, object]],
+    source_face_keys: set[tuple[str, object]], *, left_out: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Measure group paint in this scope; never reuse stale saved observations."""
+    """Measure group paint in this scope; never reuse stale saved observations.
+
+    A saved surface group with no faces in this scope -- one painted outside
+    the selected subtree -- is left out of this export (the preflight rule
+    ``group_out_of_scope`` says so); ``left_out`` receives its name.
+    """
     settings = read_mesh_settings(design)
     definitions = settings["surface_groups"] if settings else []
     groups = {group["group_id"]: {**group} for group in definitions}
@@ -3540,10 +3597,13 @@ def _mesh_snapshot(
             if _face_key(face) in source_face_keys:
                 raise wglink_core.WgLinkError("A face cannot be in both a source and a surface group.")
             faces_by_group[group_id].append(face)
-    for group_id, group in groups.items():
+    for group_id, group in list(groups.items()):
         faces = faces_by_group[group_id]
         if not faces:
-            raise wglink_core.WgLinkError(f"Surface group {group['name']!r} has no faces in this export. Open Sources & Mesh… and select its faces again.")
+            del groups[group_id]
+            if left_out is not None:
+                left_out.append(str(group.get("name") or group_id))
+            continue
         group["observed"] = _observed(faces, body_names)
     try:
         mesh = wglink_mesh.snapshot(sources, settings, surface_groups=list(groups.values()))
@@ -3849,9 +3909,7 @@ def _sources(
             }
         )
     if not sources and not allow_empty:
-        raise wglink_core.WgLinkError(
-            "Return export has no drivable source. Paint an included face LF, MF, HF, or PASSIVE_CARDIOID and try again."
-        )
+        raise wglink_core.WgLinkError(wglink_author.NO_SOURCE_WARNING)
     if source_identity:
         _check_source_identities(sources)
     if (getattr(design, "rootComponent", None) is not None
@@ -5038,6 +5096,15 @@ def send(
                 *([wglink_fem.FEM_REGIONS_FEATURE] if fem_region_records else []),
             ],
         )
+        # The rules WG applies when it receives this return, applied first:
+        # a return WG would refuse at admission is never written.
+        blockers = wglink_protocol.blocking(
+            wglink_protocol.preflight_findings(wglink_protocol.manifest_draft(manifest))
+        )
+        if blockers:
+            raise wglink_core.WgLinkError(
+                " ".join(wglink_protocol.finding_text(finding) for finding in blockers)
+            )
         (temp / "wgreturn.json").write_text(
             dumps_return_manifest(manifest), encoding="utf-8"
         )

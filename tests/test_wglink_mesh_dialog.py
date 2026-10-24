@@ -325,7 +325,7 @@ def test_source_group_and_group_group_overlap_and_empty_validation(scene):
     change(scene, inputs, items, state, f"mesh_remove_group_{next(reversed(state.groups))}")
     change(scene, inputs, items, state, f"mesh_remove_source_{next(reversed(state.sources))}")
     assert not module._sync_mesh_dialog(inputs, state)
-    assert "There must be at least one source." in items["mesh_validation"].formattedText
+    assert "This model has no source to drive it." in items["mesh_validation"].formattedText
 
 
 def test_warnings_are_advisory_and_estimate_is_live_approximate_and_amber(scene, monkeypatch):
@@ -877,3 +877,15 @@ def test_source_stamp_failure_after_paint_uses_single_dialog_rollback_message(sc
     assert scene.faces[0].appearance.name == "HF"
     assert all(not member.attributes.values for member in scene.faces)
     assert not scene.design.rootComponent.attributes.values
+
+
+def test_a_fem_driven_model_saves_sources_and_mesh_without_a_source(scene):
+    """A moving FEM surface drives the model: Save and Send share the no_drive rule."""
+    module = scene.module
+    inputs, items, state = build(scene)
+    change(scene, inputs, items, state, f"mesh_remove_source_{next(reversed(state.sources))}")
+    assert not module._sync_mesh_dialog(inputs, state)
+    assert "This model has no source to drive it." in items["mesh_validation"].formattedText
+    state.fem_driven = True
+    assert module._sync_mesh_dialog(inputs, state)
+    assert "no source" not in items["mesh_validation"].formattedText
