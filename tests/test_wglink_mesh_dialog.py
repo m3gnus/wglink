@@ -7,7 +7,7 @@ import pytest
 
 from test_wglink_activation_boundary import _boundary
 from test_wglink_fem_dialog import _building_inputs
-from test_wglink_mesh_settings import AppearanceFace
+from test_wglink_mesh_settings import AppearanceFace, FailingMeshAttributes
 from test_wglink_send import Attributes, Collection, body, component, face
 
 
@@ -532,11 +532,13 @@ def test_first_activate_clears_preselection_and_reports_failed_saved_faces(scene
 @pytest.mark.parametrize("paint_id", ["lost", "", " untrimmed "])
 def test_orphan_paint_recovers_as_editable_group_and_save_can_clear_or_keep_it(scene, keep, paint_id):
     module = scene.module
+    assert module.wglink_send.read_mesh_settings(scene.design) is None
     scene.faces[1].appearance = module.wglink_core._named_appearance(scene.app, scene.design, f"WGMESH_{paint_id}")
     with pytest.raises(module.wglink_core.WgLinkError, match="no settings"):
         module.wglink_send._mesh_snapshot(scene.design, [], [scene.cabinet], set())
     inputs, items, state = build(scene)
     assert items["mesh_group_name_2"].value == f"Recovered {paint_id.strip() or 'surface group'}"
+    assert items["mesh_group_size_2"].value == 1.5
     assert items["mesh_group_faces_2"]._entities == [scene.faces[1]]
     if not keep:
         change(scene, inputs, items, state, "mesh_remove_group_2")
@@ -552,6 +554,64 @@ def test_orphan_paint_recovers_as_editable_group_and_save_can_clear_or_keep_it(s
     else:
         assert scene.faces[1].override is None
     module.wglink_send._mesh_snapshot(scene.design, [], [scene.cabinet], set())
+
+
+@pytest.mark.parametrize("stage", ["lookup", "value"])
+def test_failed_settings_read_blocks_save_preserves_metadata_and_reopen_retries(scene, stage):
+    module = scene.module
+    inputs, items, state = build(scene)
+    change(scene, inputs, items, state, "mesh_add_group")
+    items["mesh_group_name_2"].value = "Saved back panel"
+    items["mesh_group_size_2"].value = 4  # Fusion stores centimetres.
+    for member in scene.faces[1:]:
+        items["mesh_group_faces_2"].addSelection(member)
+    module._apply_mesh_dialog(inputs, state)
+    entities = [scene.design.rootComponent, *scene.faces]
+    before = [dict(entity.attributes.values) for entity in entities]
+    paint = [member.appearance for member in scene.faces]
+    saved = module.wglink_send.read_mesh_settings(scene.design)
+    scene.design.rootComponent.attributes = FailingMeshAttributes(entities[0].attributes, stage)
+
+    inputs, items = _building_inputs(module, phase="commandCreated")
+    command, _, _ = _dialog_command(inputs)
+    module.CommandCreatedHandler("source").notify(types.SimpleNamespace(command=command))
+    assert len(scene.ui.messages) == 1
+    message = scene.ui.messages[0][1]
+    assert "Could not read the saved mesh settings from this document" in message
+    assert "Close and reopen Sources & Mesh… to retry before saving" in message
+    failed = command.execute.handlers[0].mesh_state
+    assert failed.construction_failed and not failed.restoring
+    assert not failed.groups  # No reconstructed names or sizes after a failed read.
+    for _ in range(2):
+        command.inputChanged.handlers[0].notify(types.SimpleNamespace())
+        validation = types.SimpleNamespace(inputs=inputs, areInputsValid=True)
+        command.validateInputs.handlers[0].notify(validation)
+        assert not validation.areInputsValid
+        execute = types.SimpleNamespace(command=command, isValidResult=True)
+        command.execute.handlers[0].notify(execute)
+        assert not execute.isValidResult
+    with pytest.raises(module.wglink_author.AuthorError, match="reopen Sources & Mesh"):
+        module._apply_mesh_dialog(inputs, failed)
+    assert [entity.attributes.values for entity in entities] == before
+    assert [member.appearance for member in scene.faces] == paint
+
+    scene.ui.messages.clear()
+    inputs, items, state = build(scene)
+    assert items["mesh_group_name_2"].value == "Saved back panel"
+    assert items["mesh_group_size_2"].value == 4
+    assert items["mesh_group_faces_2"]._entities == scene.faces[1:]
+    assert module._sync_mesh_dialog(inputs, state)
+    module._apply_mesh_dialog(inputs, state)
+    assert module.wglink_send.read_mesh_settings(scene.design) == saved
+
+
+def test_existing_settings_do_not_reconstruct_extra_groups_from_paint(scene):
+    module = scene.module
+    inputs, _, state = build(scene)
+    module._apply_mesh_dialog(inputs, state)
+    scene.faces[1].appearance = module.wglink_core._named_appearance(scene.app, scene.design, "WGMESH_orphan")
+    _, _, reopened = build(scene)
+    assert reopened.groups == {}
 
 
 def test_any_row_can_be_removed_and_reset_preserves_membership_names_and_symmetry(scene):

@@ -20,6 +20,55 @@ def fixture_mesh():
     return json.loads((FIXTURES / 'f1-single-source.wgreturn/wgreturn.json').read_text())['mesh']
 
 
+class FailingMeshAttributes(Attributes):
+    """Fail one mesh-settings read while retaining all document attributes."""
+
+    def __init__(self, original, stage):
+        self.values = original.values
+        self.stage = stage
+        self.failures = 1
+
+    def itemByName(self, group, name):
+        if name != mesh_model.SETTINGS_ATTRIBUTE:
+            return super().itemByName(group, name)
+        if self.stage == 'lookup' and self.failures:
+            self.failures -= 1
+            raise RuntimeError('Injected mesh-settings lookup failure')
+        attribute = super().itemByName(group, name)
+        if self.stage != 'value' or attribute is None or not self.failures:
+            return attribute
+        owner = self
+
+        class Attribute:
+            @property
+            def value(self):
+                owner.failures -= 1
+                raise RuntimeError('Injected mesh-settings value failure')
+
+        return Attribute()
+
+
+@pytest.mark.parametrize('stage', ['lookup', 'value'])
+def test_failed_mesh_settings_read_refuses_and_retries_without_writing(send_module, stage):
+    attributes = Attributes()
+    design = types.SimpleNamespace(rootComponent=types.SimpleNamespace(attributes=attributes))
+    send_module.save_mesh_settings(design, fixture_mesh())
+    before = dict(attributes.values)
+    design.rootComponent.attributes = FailingMeshAttributes(attributes, stage)
+    with pytest.raises(send_module.wglink_core.WgLinkError, match='Could not read the saved mesh settings'):
+        send_module.read_mesh_settings(design)
+    assert attributes.values == before
+    assert send_module.read_mesh_settings(design)['surface_groups'][0]['size_mm'] == 40
+
+
+def test_unavailable_attribute_collection_is_not_absent_settings(send_module):
+    design = types.SimpleNamespace(rootComponent=types.SimpleNamespace(attributes=None))
+    with pytest.raises(send_module.wglink_core.WgLinkError, match='Close and reopen Sources & Mesh'):
+        send_module.read_mesh_settings(design)
+    design.rootComponent.attributes = Attributes()
+    assert send_module.read_mesh_settings(design) is None
+
+
 class AppearanceFace:
     """Fusion returns the effective appearance, including inherited body paint."""
     def __init__(self, inherited):

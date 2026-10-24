@@ -155,6 +155,7 @@ def component(name, bodies=()):
     value = types.SimpleNamespace(
         name=name,
         objectType="adsk::fusion::Component",
+        attributes=Attributes(),
         bRepBodies=Collection(bodies),
         meshBodies=Collection(),
         constructionPlanes=Collection(),

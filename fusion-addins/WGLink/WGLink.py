@@ -2497,12 +2497,14 @@ def _build_mesh_dialog(inputs, state):
     state.restoring = True
     try:
         design = wglink_core._design(_app())
+        # Resolve saved settings before the fail-soft source preview can read
+        # them. A failed read leaves construction guarded until the next open.
+        saved = wglink_send.read_mesh_settings(design)
         report = wglink_send.preflight_scope(
             _app(), {"source_identity": _source_identity_enabled(), "display_automatic_domain": True},
             authoring_context=state.context,
         )
         state.preview_error = report.get("source_error")
-        saved = wglink_send.read_mesh_settings(design)
         sources = state.context.get("sources", [])
         mesh = wglink_mesh.snapshot(sources, saved)
         for input_id, title, expanded in (
@@ -2537,14 +2539,13 @@ def _build_mesh_dialog(inputs, state):
             _add_mesh_row(inputs, state, "source", record, faces)
             state.original_sources.append({**record, "original_faces": list(faces)})
         all_faces = _mesh_faces(state.context.get("bodies", []))
-        definitions = list(saved["surface_groups"] if saved else [])
-        known = {group["group_id"] for group in definitions}
+        definitions = list(saved["surface_groups"] if saved is not None else [])
         painted = {}
         for face in all_faces:
             label = wglink_core._appearance_name(face) or ""
             if label.startswith("WGMESH_"):
                 painted.setdefault(label[len("WGMESH_"):], []).append(face)
-        for group_id in sorted(painted.keys() - known):
+        for group_id in sorted(painted) if saved is None else ():
             # Hand-painted labels may lack a usable id. Preserve their face
             # membership, but mint a valid id so Save can recover or clear them.
             recovered_id = group_id if group_id.strip() and group_id == group_id.strip() else uuid.uuid4().hex
@@ -2679,6 +2680,8 @@ def _sync_mesh_dialog(inputs, state):
 def _apply_mesh_dialog(inputs, state):
     if state is None:
         raise wglink_author.AuthorError("Open Sources & Mesh… and save again.")
+    if state.construction_failed:
+        raise wglink_author.AuthorError("Close and reopen Sources & Mesh… to retry before saving.")
     sources, groups, mesh = _mesh_dialog_values(inputs, state)
     errors = _mesh_dialog_errors(sources, groups, mesh, state)
     if errors:

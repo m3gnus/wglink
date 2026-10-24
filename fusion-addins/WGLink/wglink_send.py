@@ -3049,8 +3049,16 @@ def _observed(faces: list[object], face_bodies: dict[tuple[str, object], str]) -
 
 
 def read_mesh_settings(design: object) -> dict[str, Any] | None:
-    """Root-component storage travels with the document, including linked designs."""
-    text = wglink_core._attribute_value(design.rootComponent, wglink_mesh.SETTINGS_ATTRIBUTE)
+    """Read document settings; only a missing attribute means no saved settings."""
+    try:
+        text = wglink_core._attribute_value(
+            design.rootComponent, wglink_mesh.SETTINGS_ATTRIBUTE, strict=True
+        )
+    except Exception as exc:  # noqa: BLE001 - failed access must never become defaults
+        raise wglink_core.WgLinkError(
+            "Could not read the saved mesh settings from this document. "
+            "Close and reopen Sources & Mesh… to retry before saving."
+        ) from exc
     if text is None:
         return None
     try:
