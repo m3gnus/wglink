@@ -190,3 +190,15 @@ def test_unknown_states_are_known_as_unknown():
     assert protocol.request_status_known({"state": "solving"})
     assert not protocol.request_status_known({"state": "somethingNewer"})
     assert not protocol.request_status_known({"state": ["solving"]})
+
+
+@pytest.mark.parametrize("name", ["Gate horn", "Error test", "Operation 7", "Bundle B"])
+def test_a_document_name_is_never_mistaken_for_internal_detail(name):
+    record = protocol.validate_request_status(_record(
+        "couldNotFinish", documentName=name,
+        failure={"recorded": False, "message": f"{name} changed after Fusion asked WG to solve it.",
+                 "nextStep": "Send it again from Fusion."}))
+    assert record["failure"]["message"] == f"{name} changed after Fusion asked WG to solve it."
+    assert protocol.request_status_text(record)["headline"].startswith(name)
+    assert protocol.user_text_violations(f"{name} is ready", names=[name]) == []
+    assert protocol.user_text_violations(f"{name}: the gate refused it", names=[name]) == ["gate", "refused"]

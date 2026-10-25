@@ -44,7 +44,10 @@ following.
 - `requestId` = `operationId` = the request's `commandId`. Records are per request, so a
   late write for one request never changes another. `seq` rises with every write
   (WG uses the wall clock in milliseconds as its floor, so it keeps rising even when a
-  previous file could not be read); a reader ignores a write with a lower `seq`.
+  previous file could not be read); a reader ignores a write with a lower `seq`. A `seq`
+  that would reach `REQUEST_STATUS_SEQ_LIMIT` stays just below it, so a reader never
+  ignores a write (an equal `seq` is not older). The guard
+  against internal words (`user_text_violations`) leaves the document's own name out.
 - `accepted` is the end of a Send ("open in WG"). A Solve goes `preparing` → `queued`
   → `solving` → `solved`, or stops at `needsYou`, `couldNotFinish` or `cancelled`.
   `refused` mirrors a refused receipt.
@@ -55,10 +58,13 @@ following.
 - `couldNotFinish` with `failure.recorded` is WG's own failure: WG has a developer
   record of it, and the user reads only the calm sentence from `request_status_text`
   (`could_not_prepare_text` is the one wording of the preparation case, in WG's own
-  UI too). `recorded` is never set without such a record. Without `recorded`,
+  UI too). WG sets `recorded` only for failures it records for the developers: where
+  they were diagnosed, or when it sees the request change into one. A failure that
+  happened before WG watched the request (a WG older than this file, or a status file
+  that was lost) still reads `recorded` but may have no record of its own. Without `recorded`,
   `failure.message` and `failure.nextStep` are WG's own words for what the user can do
   (for example "Send it again from Fusion.", or, when WG closed while preparing,
-  "Press Solve to prepare it again."); only failures the user can act on carry them.
+  "Solve it again."); only failures the user can act on carry them.
   Try again lives in WG; a request tried again there moves back to `preparing`.
 - `accepted`, `solved`, `couldNotFinish`, `cancelled` and `refused` are terminal
   (`request_status_terminal`): nothing more happens unless someone acts.
