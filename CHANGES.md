@@ -1,5 +1,20 @@
 # Changes
 
+## Unreleased
+
+- Send and Solve no longer end in a message box. A **request palette** docked
+  on the right follows the latest request: exporting, picked up, preparing,
+  waiting for the solver, solving with the frequency count, solved (with
+  **Show results in Waveguide Generator**), or what WG needs from you. It
+  opens by itself only when WG needs you; **Requests…** in the panel reopens
+  it. Technical details sit under its collapsed Diagnostics.
+- Pressing Send or Solve again for an unchanged model while its request is
+  under way shows that request instead of sending it twice; the palette's
+  **Send again** sends a new one. A restarted add-in resumes following the
+  request without sending it again.
+- The OK buttons read **Send** and **Solve**, and the commands say what each
+  does: Send opens the model in WG and does not solve.
+
 ## 0.3.2 — 2026-10-24
 
 - The Fusion toolbar, commands, dialogs and messages now call the add-in

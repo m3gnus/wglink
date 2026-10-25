@@ -394,6 +394,9 @@ _FILE_COMMAND_WORKER = textwrap.dedent(
                 (folder / 'ready').write_text('ready')
                 ids = []
                 for index in range(2):
+                    # Deliberate: the palette's "Send again", not a repeat
+                    # press of a request still being followed.
+                    module._force_new_request = True
                     _run(module, operation)
                     rid = module._request_trace['correlationId']
                     ids.append(rid)

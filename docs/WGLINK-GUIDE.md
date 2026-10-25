@@ -129,10 +129,15 @@ that advertise no supported launcher still need WG started manually.
 Insert, Update and WG-initiated handoffs do not start the backend.
 
 The add-in exchanges requests, acknowledgements, Insert/Update handoffs and
-status with WG through files. With acknowledgement support, WG's durable
-acceptance is shown after it takes the request; until then, the message says
-it was written to the inbox. If WG leaves it waiting for a minute, Waveguide Generator says
-so once. A refused acknowledgement includes WG's reason; fix it and send again.
+status with WG through files. After Send or Solve, the **request palette**
+(docked right; **Requests…** reopens it) follows the request: picked up by WG,
+preparing, waiting for the solver, solving with the frequency count, solved,
+or what WG needs from you, in WG's own words (`docs/REQUEST-STATUS.md`). It
+opens by itself only when WG needs you; answer in WG, or use **Open Sources &
+Mesh…** when the model meshes too large. If WG leaves the request waiting for
+a minute, the palette says WG has not picked it up. A WG that could not take
+the model says why, when its reason reads as words for a user. Routine
+outcomes are never a message box.
 
 Earlier queued returns are migrated to request files once at startup. If an
 older WG cannot accept a queued Send, Waveguide Generator reports it as not delivered and

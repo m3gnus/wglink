@@ -24,6 +24,8 @@ import types
 
 import pytest
 
+from fusion_fakes import FakePalettes
+
 
 ADDIN = Path(__file__).resolve().parents[1] / "fusion-addins" / "WGLink" / "WGLink.py"
 
@@ -36,6 +38,8 @@ _HANDLER_TYPES = (
     "SelectionEventHandler",
     "CommandEventArgs",
     "InputChangedEventArgs",
+    "HTMLEventHandler",
+    "UserInterfaceGeneralEventHandler",
 )
 
 
@@ -270,11 +274,8 @@ class _UI:
         self.messages: list[tuple[str, str]] = []
         self.dialog_result = dialog_result
         self.text_palette = _Palette()
-        self.palettes = types.SimpleNamespace(
-            itemById=lambda palette_id: (
-                self.text_palette if palette_id == "TextCommands" else None
-            )
-        )
+        # Text Commands, plus the request palette the add-in adds (fusion_fakes).
+        self.palettes = FakePalettes(self.text_palette)
         self.workspaces = types.SimpleNamespace(
             itemById=lambda _id: types.SimpleNamespace(toolbarPanels=panels)
         )
@@ -972,7 +973,7 @@ def test_send_shows_and_closes_progress_around_the_slow_export(
     assert dialog.events[-1] == (
         "hide",
         3,
-        "Return ready in Waveguide Generator.",
+        "Sent to Waveguide Generator.",
     )
 
 
@@ -1014,9 +1015,10 @@ def test_solve_confirms_the_handoff_and_shows_only_one_progress_dialog(
     assert dialog.events[0][:2] == ("show", "Solve in WG")
     assert dialog.events[-1][0] == "hide"
 
-    title, text = ui.messages[-1]
-    assert title == "Waveguide Generator"
-    assert "Progress and results appear in Waveguide Generator." in text
+    # What happens next is the request palette's to say, never a message box.
+    assert ui.messages == []
+    [palette] = ui.palettes.added
+    assert palette.isVisible is True
 
 
 def test_setting_a_source_paints_the_role_appearance_and_leaves_matches_alone(
@@ -1390,13 +1392,20 @@ def test_send_solve_summary_states_adoption_and_save_only_for_unsaved(monkeypatc
         "adopted_sources": ["LF", "HF"],
     }
 
-    saved = module._summary("send", report)
-    unsaved = module._summary("solve", {**report, "save_source_identities": True})
+    saved = module._export_notes(report)
+    unsaved = module._export_notes({**report, "save_source_identities": True})
+    skipped = module._export_notes({
+        "scope": {"status": "degraded", "skipped": [
+            {"name": "Grille", "kind": "body"}, {"name": "Axis", "kind": "construction"}]},
+        "document_capture_error": "archive export raised",
+    })
 
-    assert "LF, HF: painted sources identified for this document." in saved
-    assert "Save the document to keep source identities" not in saved
-    assert "LF, HF: painted sources identified for this document." in unsaved
-    assert "Save the document to keep source identities." in unsaved
+    assert saved == ["Painted source faces were identified for this document."]
+    assert unsaved == saved + ["Save the document to keep them identified."]
+    assert skipped[0] == "Some bodies were left out: Grille."
+    assert "editable copy of this Fusion document" in skipped[1]
+    for note in saved + unsaved + skipped:
+        assert module.wglink_protocol.user_text_violations(note) == []
 
 
 def test_declining_the_adoption_question_changes_nothing(monkeypatch) -> None:
@@ -1571,12 +1580,13 @@ def test_a_second_registration_adopts_the_panel_instead_of_rebuilding_it(
         "update",
         "send",
         "detach",
+        "requests",
     ]
-    assert first.PROMOTED_COMMANDS == ("source", "solve", "send")
+    assert first.PROMOTED_COMMANDS == ("source", "solve", "send", "requests")
     assert {"audit", "relink"} <= set(first.wglink_core.__all__)
-    # Three promoted commands plus Manage, whose four entries are the complete
+    # Four promoted commands plus Manage, whose four entries are the complete
     # maintenance UI. Audit and Relink remain head-less APIs only.
-    assert panel.controls.count == 4
+    assert panel.controls.count == 5
     manage = panel.controls.itemById(first.MANAGE_DROPDOWN_ID)
     assert manage is not None
     assert [control.definition.id for control in manage.controls._items] == [
@@ -1593,11 +1603,12 @@ def test_a_second_registration_adopts_the_panel_instead_of_rebuilding_it(
         "hornlab_wglink_set_source",
         "hornlab_wglink_solve",
         "hornlab_wglink_send",
+        "hornlab_wglink_requests",
     ]
     assert first._owned is True
     # Every command ships an icon folder holding the 16 px art Fusion draws in
     # the panel dropdown; a missing folder would silently give a blank button.
-    assert len(definitions.resource_folders) == 7
+    assert len(definitions.resource_folders) == 8
     for folder in definitions.resource_folders:
         assert folder and (Path(folder) / "16x16.png").is_file()
 
@@ -1609,7 +1620,7 @@ def test_a_second_registration_adopts_the_panel_instead_of_rebuilding_it(
     # command id reserved.
     assert ui.messages == []
     assert panels.itemById(first.PANEL_ID) is panel
-    assert panel.controls.count == 4
+    assert panel.controls.count == 5
     assert second._owned is False
     assert second._definitions == []
 
@@ -1617,7 +1628,7 @@ def test_a_second_registration_adopts_the_panel_instead_of_rebuilding_it(
     second.stop(None)
     assert ui.messages == []
     assert panel.isValid
-    assert panel.controls.count == 4
+    assert panel.controls.count == 5
     assert [d.id for d in definitions.items.values() if d.isValid] == [
         command_id for operation, (command_id, _name, _description) in first.COMMANDS.items()
         if operation != "fem"

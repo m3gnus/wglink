@@ -38,10 +38,10 @@ ACK_DIRECTORY = ".wg-solve-acks"
 ACK_SCHEMA_VERSION = 1
 ACK_ACCEPTED = "accepted"
 ACK_REFUSED = "refused"
-# How often the acknowledgement is looked for, and how long after the request
-# is written the add-in waits for one once WG has taken the file. An
-# acknowledgement can lag the file's disappearance by about 30 delivery passes.
-ACK_POLL_SECONDS = 5.0
+# How long after the request is written the add-in waits for the receipt once
+# WG has taken the file, before it says "not confirmed" (it keeps looking). A
+# receipt can lag the file's disappearance by about 30 delivery passes. How
+# often it looks is ``wglink_requests``'s.
 ACK_WAIT_SECONDS = 120.0
 FUSION_REQUEST_DELIVERY = "fusionRequestDelivery"
 # WG reads returns that require ``source-identity-v1`` when it advertises this
@@ -73,13 +73,6 @@ _PLAIN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 # on its next pass while it runs, so a minute is far past normal. The request
 # is never dropped or rerouted.
 SOLVE_PICKUP_NOTICE_SECONDS = 60.0
-REQUEST_NOT_TAKEN_MESSAGE = (
-    "Waveguide Generator has not picked up the request from Fusion for a minute. "
-    "Either WG is closed, or it is older than this Waveguide Generator add-in, or it is not "
-    "collecting requests from Fusion. Open Waveguide Generator (update it if an "
-    "older version is running). The request waits in the WGLink folder and is "
-    "handled once WG takes it."
-)
 WG_NOT_COLLECTING_MESSAGE = (
     "Waveguide Generator is not collecting requests from Fusion: it has not said "
     "that it reads them. Either WG is not running with this WGLink folder, or "
@@ -111,22 +104,6 @@ def requests_not_taken_at_startup_message(count: int) -> str:
     )
 
 
-def written_to_inbox_text(request_id: str) -> str:
-    return (
-        f"Written to WG's inbox (request {str(request_id)[:8]}) -- waiting for WG to "
-        "accept it. WG says here when it has."
-    )
-
-
-ACK_ACCEPTED_TEXT = (
-    "WG accepted the request. Progress and results appear in Waveguide Generator."
-)
-ACK_UNCONFIRMED_TEXT = (
-    "WG took the request but has not confirmed it. Check WG's CAD Link panel "
-    "before sending this model again."
-)
-
-
 def wg_acknowledges(ipc_folder: Path) -> bool:
     """Whether WG advertises that it writes an acknowledgement for each request."""
 
@@ -140,6 +117,69 @@ def wg_acknowledges(ipc_folder: Path) -> bool:
         return False
     value = payload.get(SOLVE_ACKNOWLEDGEMENT)
     return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def wg_reports_request_status(ipc_folder: Path) -> bool:
+    """Whether WG advertises that it writes a status file for each request.
+
+    ``requestStatus`` at least ``REQUEST_STATUS_SCHEMA_VERSION`` under capability
+    schema 1 (docs/REQUEST-STATUS.md). Read once, when a request is submitted:
+    the request keeps what it saw, so a capability file that is briefly missing
+    never downgrades a request already being followed.
+    """
+
+    payload = _read_json(Path(ipc_folder) / CAPABILITIES_FILENAME)
+    if not isinstance(payload, Mapping):
+        return False
+    schema = payload.get("schemaVersion")
+    if isinstance(schema, bool) or schema != CAPABILITIES_SCHEMA_VERSION:
+        return False
+    value = payload.get(wglink_protocol.REQUEST_STATUS_CAPABILITY)
+    return (isinstance(value, int) and not isinstance(value, bool)
+            and value >= wglink_protocol.REQUEST_STATUS_SCHEMA_VERSION)
+
+
+#: A status file WG is replacing can be briefly unreadable on Windows: one
+#: more look after this pause, then "not yet".
+STATUS_READ_RETRY_SECONDS = 0.05
+
+
+def read_request_status(
+    ipc_folder: Path,
+    request_id: str,
+    *,
+    kind: str | None = None,
+    manifest_sha256: str | None = None,
+) -> dict[str, Any] | None:
+    """WG's status record for one request, as ``validate_request_status`` returns it.
+
+    ``<ipc>/.wg-solve-acks/<requestId>.status.json``. None for "not yet": no
+    file, a file that cannot be read twice in a row, or one that is not this
+    request's status (another contract, id, ``kind`` or manifest). Opens, reads
+    and closes the file at once, like the receipt. Reads nothing else.
+    """
+
+    if not _PLAIN_ID.fullmatch(str(request_id)):
+        return None
+    path = Path(ipc_folder) / ACK_DIRECTORY / f"{request_id}{wglink_protocol.REQUEST_STATUS_SUFFIX}"
+    payload = None
+    for attempt in range(2):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            break
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, TypeError):
+            if attempt == 0:
+                time.sleep(STATUS_READ_RETRY_SECONDS)
+    record = wglink_protocol.validate_request_status(payload, request_id=str(request_id))
+    if record is None:
+        return None
+    if kind is not None and record.get("kind") not in (None, kind):
+        return None
+    if manifest_sha256 is not None and record.get("manifestSha256") not in (None, manifest_sha256):
+        return None
+    return record
 
 
 def read_acknowledgement(

@@ -316,15 +316,13 @@ Commands and requests cross through WG's machine-local IPC folder,
   `.wg-solve-requests/<operationId>.json` and nothing else, whatever the activation gate says — and differ only in `kind`
   (`receive_snapshot` or `prepare_and_solve`). Both write schema 4; a WG
   advertising only inbox 3 is refused for both commands. A WG that advertises
-  nothing is "not collecting requests", and both refuse. The outcome is said at
-  command time: "Written to WG's inbox (request …)" when WG advertises
-  `solveAcknowledgement` (then Waveguide Generator looks for WG's
-  `.wg-solve-acks/<requestId>.json` every few seconds and says "WG accepted the
-  request", WG's own refusal reason, or after two minutes with the file gone and
-  no acknowledgement "taken but not confirmed" -- never "solving"), "Sent to
-  Waveguide Generator (request …)" for an older WG, or why WG was not
-  asked. Pressing Send again is a new request. A second request never
-  replaces one WG has not read yet. The file is staged under a hidden name,
+  nothing is "not collecting requests", and both refuse. A refusal before the
+  request is written is a message box, as before; everything after it is the
+  **request palette** (below). Pressing Send or Solve again for the same model
+  while its request is still under way shows that request instead of sending
+  it twice; the palette's **Send again** / **Solve again**, or any change to
+  the document, its scope or its model, makes a new request. A second request
+  never replaces one WG has not read yet. The file is staged under a hidden name,
   synced and renamed into place, so WG never sees part of one. The request is
   planned once: WG's capability decides its schema and exact contents before
   the first attempt, and every attempt writes that same request -- a retry
@@ -341,11 +339,32 @@ Commands and requests cross through WG's machine-local IPC folder,
   check like a sent request (contract Amendment A1). "Never replaces" rests on
   each request id being a fresh `uuid4`: a rename replaces whatever holds its
   name.
-- **The pickup check.** A minute after a Send or Solve, a one-shot timer asks
-  on the main thread whether the request file is still there, and only that;
-  if it is, Waveguide Generator says once that WG is closed, older than the add-in, or not
-  collecting requests. It is counted under the command that wrote the file.
-  The timer does not survive a restart, so at start-up Waveguide Generator looks once at
+- **The request palette** (`wglink_requests.py`, `requests.html`). One modeless
+  palette, titled Waveguide Generator and docked right, follows the latest Send
+  or Solve: headline, one more line, WG's question and its options when WG
+  needs the user, and buttons (**Open Waveguide Generator**, **Open Sources &
+  Mesh…** when the model meshes too large, **Show results in Waveguide
+  Generator**, **Send again**). Technical correlation stays under its
+  collapsed Diagnostics. It opens on Send or Solve and, by itself, only when WG
+  needs the user; **Requests…** in the panel reopens it. Routine outcomes are
+  never a message box. WG's states and their words come from WG's request
+  status (`docs/REQUEST-STATUS.md`, `wglink_protocol.request_status_text`);
+  the add-in words only what WG cannot know: exporting, waiting to be picked
+  up, picked up but not confirmed, and a WG that writes no status ("Accepted.
+  Follow progress in Waveguide Generator."). What WG advertised
+  (`solveAcknowledgement`, `requestStatus`) is recorded on the request when it
+  is submitted. A one-shot timer looks at the request every 2 s while the
+  palette shows and every 5 s while it is closed, reading only WG's inbox,
+  receipt and status files off Fusion's main thread, and stops when the
+  request is finished; each change reaches the main thread through the
+  follow-up event, which only renders (a modal holds it until it closes). A
+  request WG leaves in the inbox for a minute reads "has not picked up", and
+  one taken without a receipt for two minutes "picked up but has not
+  confirmed"; neither is ever "solving". The request is recorded in
+  `.fusion-request-status.json`, so a restarted add-in resumes following it
+  and never submits it again.
+- **The start-up pickup check.** Following a request does not survive the
+  loss of its record, so at start-up Waveguide Generator looks once at
   the inbox for its own request files WG has not taken -- reading nothing in
   Fusion, counted under `startup` -- and says once, with the same three causes,
   how many are waiting. Files already older than a minute are checked at once;
@@ -509,6 +528,7 @@ service. The former `wglink_watch.py` is split by responsibility:
 | `wglink_inbox.py` | WG capabilities, Send/Solve inbox writer, acknowledgement reader, atomic request helpers | 133–706, with the relevant constants/helpers from the header |
 | `wglink_handoff.py` | Insert/Update handoffs, return-request readers, ordering, claims and recovery | 708–1135 |
 | `wglink_status.py` | `.fusion-status.json` payload and durable writer/removal | 1152–1385 |
+| `wglink_requests.py` | The followed Send/Solve request: poll, record, palette words (new) | — |
 
 The planned status start at line 1137 was the export `Announcement` record;
 status actually starts at line 1152 in `7ec3c90`. At this slice's starting HEAD,

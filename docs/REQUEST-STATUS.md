@@ -89,6 +89,11 @@ a user reads, the option labels of a question, and `{id, label}` buttons (`openW
 `user_text_violations` (`USER_TEXT_FORBIDDEN_TERMS`), which both repositories' tests
 apply to user-visible text.
 
+WGLink reads the file with `wglink_inbox.read_request_status` off Fusion's main
+thread and shows it in its request palette (`wglink_requests.py`, which words
+only the states WG cannot know: exporting, waiting to be picked up, and a WG
+that writes no status).
+
 ## Retention
 
 WG keeps a receipt and its status together, aged by the newer of the two. While the

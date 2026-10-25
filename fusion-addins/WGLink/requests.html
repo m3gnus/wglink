@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Waveguide Generator</title>
+<style>
+:root{--fg:#1f1f1f;--muted:#5c5c5c;--bg:#f7f7f7;--line:#d6d6d6;--accent:#2f7d32;--button:#ffffff}
+@media (prefers-color-scheme: dark){:root{--fg:#e8e8e8;--muted:#a8a8a8;--bg:#2b2b2b;--line:#4a4a4a;--accent:#6fbf73;--button:#3a3a3a}}
+body{font:14px system-ui,-apple-system,"Segoe UI",sans-serif;margin:14px 16px;color:var(--fg);background:var(--bg)}
+#headline{font-weight:600;line-height:1.4;margin:0 0 6px}
+#detail{line-height:1.45;margin:0 0 8px}
+ul{margin:4px 0 8px 18px;padding:0;line-height:1.45}
+#notes{color:var(--muted)}
+.bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin:8px 0 12px}
+.bar>div{height:100%;background:var(--accent);width:0}
+.bar.busy>div{width:30%;animation:slide 1.4s ease-in-out infinite}
+@keyframes slide{0%{margin-left:-30%}100%{margin-left:100%}}
+#actions{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 4px}
+button{font:inherit;padding:5px 12px;border:1px solid var(--line);border-radius:4px;background:var(--button);color:var(--fg);cursor:pointer}
+details{margin-top:18px;color:var(--muted)}
+summary{cursor:pointer}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<p id="headline" role="status" aria-live="polite">Waiting for the latest request…</p>
+<p id="detail" hidden></p>
+<ul id="options" hidden></ul>
+<div id="bar" class="bar" hidden><div></div></div>
+<ul id="notes" hidden></ul>
+<div id="actions"></div>
+<details><summary>Diagnostics</summary><pre id="diagnostics"></pre></details>
+<script>
+(function () {
+  "use strict";
+  function byId(id) { return document.getElementById(id); }
+  function list(element, items) {
+    element.textContent = "";
+    (items || []).forEach(function (item) {
+      var li = document.createElement("li");
+      li.textContent = String(item);
+      element.appendChild(li);
+    });
+    element.hidden = !(items && items.length);
+  }
+  function send(action, data) {
+    try {
+      if (window.adsk && typeof window.adsk.fusionSendData === "function") {
+        return window.adsk.fusionSendData(action, data || "");
+      }
+    } catch (ignored) {}
+    return null;
+  }
+  function render(view) {
+    if (!view || typeof view !== "object") { return; }
+    byId("headline").textContent = String(view.headline || "");
+    var detail = byId("detail");
+    detail.textContent = view.detail ? String(view.detail) : "";
+    detail.hidden = !view.detail;
+    list(byId("options"), view.options);
+    list(byId("notes"), view.notes);
+    var bar = byId("bar");
+    var fill = bar.firstElementChild;
+    var fraction = typeof view.progress === "number" ? Math.max(0, Math.min(1, view.progress)) : null;
+    bar.hidden = !(view.busy || fraction !== null);
+    bar.classList.toggle("busy", !!view.busy && fraction === null);
+    fill.style.width = fraction !== null ? (fraction * 100).toFixed(1) + "%" : "";
+    var actions = byId("actions");
+    actions.textContent = "";
+    (view.actions || []).forEach(function (action) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.textContent = String(action.label || "");
+      button.addEventListener("click", function () {
+        send("action", JSON.stringify({ id: String(action.id || "") }));
+      });
+      actions.appendChild(button);
+    });
+    byId("diagnostics").textContent = JSON.stringify(view.diagnostics || {}, null, 2);
+  }
+  function received(reply) {
+    if (typeof reply === "string" && reply) {
+      try { render(JSON.parse(reply)); } catch (ignored) {}
+    }
+  }
+  // Python's updates; anything sent before "ready" below is lost by Fusion,
+  // so the add-in answers "ready" with the whole state.
+  window.fusionJavaScriptHandler = {
+    handle: function (action, data) {
+      try { if (action === "status") { render(JSON.parse(data)); } } catch (ignored) {}
+      return "OK";
+    }
+  };
+  try {
+    if (location.hash.length > 1) { render(JSON.parse(decodeURIComponent(location.hash.slice(1)))); }
+  } catch (ignored) {}
+  function ready(attempt) {
+    var reply = send("ready", "");
+    if (reply === null) {
+      if (attempt < 50) { setTimeout(function () { ready(attempt + 1); }, 200); }
+      return;
+    }
+    if (reply && typeof reply.then === "function") { reply.then(received, function () {}); }
+    else { received(reply); }
+  }
+  window.addEventListener("load", function () { ready(0); });
+})();
+</script>
+</body>
+</html>

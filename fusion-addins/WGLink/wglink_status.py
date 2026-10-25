@@ -223,12 +223,24 @@ def fusion_status_payload(
 def write_fusion_status_payload(bundle_root: Path, payload: Mapping[str, Any]) -> Path:
     """Atomically write a :func:`fusion_status_payload` object as the heartbeat file."""
 
+    return write_status_record(bundle_root, FUSION_STATUS_FILENAME, payload)
+
+
+def write_status_record(bundle_root: Path, filename: str, payload: Mapping[str, Any]) -> Path:
+    """The one atomic writer for this add-in's own records in the WGLink folder.
+
+    The heartbeat and the request the add-in is following (``wglink_requests``).
+    ``filename`` is a plain name directly in ``bundle_root``.
+    """
+
+    if Path(filename).name != filename or not filename:
+        raise ValueError("A status record's file name must be a plain name")
     root = bundle_root.expanduser().resolve()
     if not root.is_dir():
         raise OSError(f"WGLink folder is unavailable: {root}")
-    marker = root / FUSION_STATUS_FILENAME
+    marker = root / filename
     descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f"{FUSION_STATUS_FILENAME}.", dir=root
+        prefix=f"{filename}.", dir=root
     )
     temporary = Path(temporary_name)
     try:

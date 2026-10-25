@@ -973,23 +973,32 @@ def test_a_gate_on_watch_tick_defers_a_recent_expensive_measurement(
     assert module._geometry_refresh_pending is None
 
 
-def _queue_pickup_behind_busy(module, app, tmp_path: Path) -> tuple[list[str], Path]:
-    """A pickup check that came due while a busy holder had the main thread."""
+def _queue_pickup_behind_busy(monkeypatch, module, app, tmp_path: Path) -> tuple[list[str], Path]:
+    """A look at a followed request that came due while a busy holder had the main thread."""
 
-    request = tmp_path / "request.json"
+    ipc = tmp_path / "ipc-held"
+    (ipc / ".wg-solve-requests").mkdir(parents=True)
+    request = ipc / ".wg-solve-requests" / "req-held.json"
     request.write_text("{}")
+    monkeypatch.setattr(module.wglink_workspace, "ipc_folder", lambda **_kwargs: ipc)
+    monkeypatch.setattr(module.wglink_inbox, "SOLVE_PICKUP_NOTICE_SECONDS", 0.0)
+    followed = module.wglink_requests.new_request("req-held", "receive_snapshot", "Horn A")
+    module._requests.begin(module.wglink_requests.submitted(
+        followed, manifest_sha256="sha256:" + "a" * 64, acknowledgement=False,
+        request_status=False, confirmed=True))
     due: list[object] = []
     module._followup_event = object()  # registered; delivery is what we check
+    module._followup_app = app
     real_timer = module._start_timer
     module._start_timer = lambda _delay, function: due.append(function)
     try:
         with module.wglink_activity.because("command:send"):
-            module._schedule_pickup_check(request, "snapshot", "req-held")
+            module._arm_request_poll()
+        module._command_busy = True
+        [function] = due
+        function()  # the poll: it found the request still waiting
     finally:
         module._start_timer = real_timer
-    module._command_busy = True
-    [function] = due
-    function()
     module._run_followups()  # delivered while busy: stays queued
     assert len(module._followups) == 1
     module._command_busy = False
@@ -1034,7 +1043,7 @@ def test_a_pickup_check_held_behind_any_busy_holder_is_re_driven_when_it_ends(
     fixture.ui.dialog_result = "no"
     for name in ("_fusion_snapshot", "_settle_claims", "_notice_outdated_wg", "_publish_fusion_status"):
         monkeypatch.setattr(module, name, getattr(module, name))
-    fired, _request = _queue_pickup_behind_busy(module, fixture.app, tmp_path)
+    fired, _request = _queue_pickup_behind_busy(monkeypatch, module, fixture.app, tmp_path)
 
     holder(module)
 
@@ -1042,7 +1051,9 @@ def test_a_pickup_check_held_behind_any_busy_holder_is_re_driven_when_it_ends(
     assert module.FOLLOWUP_EVENT_ID in fired
     before = len(fixture.ui.messages)
     module._run_followups()
-    assert [title for title, _text in fixture.ui.messages[before:]] == ["Waveguide Generator request waiting"]
+    # The palette's update ran once the holder let go; routine news is never a box.
+    assert fixture.ui.messages[before:] == []
+    assert module._recent_outcomes[-1] == {"channel": "snapshot", "requestId": "req-held", "outcome": "notTaken"}
     assert module._followups == []
 
 

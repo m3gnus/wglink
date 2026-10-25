@@ -262,7 +262,8 @@ def _solve(monkeypatch, module, state):
         "bundle_path": "/workspace/wgreturn/test.wgreturn", "return_id": "wgr_test",
         "scope": {"status": "clean"}, "sources": [],
     })[1])
-    monkeypatch.setattr(module, "_submit_to_wg", lambda _report, kind, **kw: (submitted.append((kind, kw)), "req")[1])
+    monkeypatch.setattr(module, "_submit_to_wg", lambda _report, kind, **kw: (
+        submitted.append((kind, {key: value for key, value in kw.items() if key != "request_id"})), "req")[1])
     handler = module.CommandExecuteHandler("solve")
     handler.send_state = state
     args = types.SimpleNamespace(command=types.SimpleNamespace(commandInputs=_dialog_inputs()), isValidResult=True)

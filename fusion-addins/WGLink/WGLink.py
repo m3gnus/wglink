@@ -14,6 +14,7 @@ import threading
 import time
 import traceback
 import types
+from urllib.parse import quote
 import uuid
 
 import adsk.core
@@ -56,6 +57,7 @@ def _load_registration_package() -> dict[str, types.ModuleType]:
         "wglink_status",
         "wglink_launcher",
         "wglink_legacy_queue",
+        "wglink_requests",
     ):
         loaded[name] = importlib.import_module(f"{_registration_package_name}.{name}")
     return loaded
@@ -75,6 +77,7 @@ wglink_handoff = _registration_modules["wglink_handoff"]
 wglink_status = _registration_modules["wglink_status"]
 wglink_launcher = _registration_modules["wglink_launcher"]
 wglink_legacy_queue = _registration_modules["wglink_legacy_queue"]
+wglink_requests = _registration_modules["wglink_requests"]
 format_measurement_mm = _registration_modules["wglink_bundle"].format_measurement_mm
 
 
@@ -103,7 +106,7 @@ COMMANDS = {
     "solve": (
         "hornlab_wglink_solve",
         "Solve in WG",
-        "Export the assembly and ask Waveguide Generator to prepare and solve it.",
+        "Send this model to Waveguide Generator and solve it now.",
     ),
     "insert": (
         "hornlab_wglink_insert",
@@ -118,12 +121,17 @@ COMMANDS = {
     "send": (
         "hornlab_wglink_send",
         "Send to WG",
-        "Export the displayed acoustic assembly as a validated .wgreturn bundle.",
+        "Open this model in Waveguide Generator to inspect or set up. Does not solve.",
     ),
     "detach": (
         "hornlab_wglink_detach",
         "Detach",
         "Remove Waveguide Generator link data without changing bodies or features.",
+    ),
+    "requests": (
+        "hornlab_wglink_requests",
+        "Requests…",
+        "Show the progress of your latest Send or Solve.",
     ),
 }
 # The commands a user starts. Everything else is maintenance or recovery and
@@ -137,7 +145,10 @@ COMMANDS = {
 # for an existing link, which is exactly what a from-scratch model does not
 # have. Declare Body stays in the dropdown: it is the remedy for one refusal,
 # and that refusal names it.
-PROMOTED_COMMANDS = ("source", "solve", "send")
+#
+# Requests… reopens the progress palette a user closed; it has to be where
+# Send and Solve are, or a closed palette is a lost one.
+PROMOTED_COMMANDS = ("source", "solve", "send", "requests")
 
 _handlers: list[object] = []
 _definitions: list[object] = []
@@ -266,6 +277,8 @@ _activation: dict[str, object] = {
 FOLLOWUP_EVENT_ID = f"hornlab_wglink_followup_{_watch_session_id}"
 _followup_event = None
 _followup_handler = None
+# The application the follow-up event was registered on: what a worker fires.
+_followup_app = None
 _followups: list[object] = []
 # The pickup check's one-shot timer adds its job from its own thread.
 _followups_lock = threading.Lock()
@@ -1254,60 +1267,6 @@ def _summary(operation: str, report: dict[str, object]) -> str:
             f"Deviation max: {format_measurement_mm(deviation.get('max_mm'))}"
             f"{_warnings(report)}"
         )
-    if operation in {"send", "solve"}:
-        scope = report.get("scope", {})
-        status = scope.get("status", "?") if isinstance(scope, dict) else "?"
-        request_id = str(report.get("request_id") or "")
-        if report.get("solve_requested"):
-            # Handed off: WG owns progress and results from here, so this is
-            # the one confirmation Fusion shows -- not a second progress bar
-            # racing WG's own.
-            if report.get("acknowledgement_expected"):
-                closing = wglink_inbox.written_to_inbox_text(request_id)
-            else:
-                closing = (
-                    f"Sent to WG (request {request_id[:8]}). Progress and results "
-                    "appear in Waveguide Generator."
-                    if request_id
-                    else "Sent to WG. Progress and results appear in Waveguide Generator."
-                )
-        elif report.get("acknowledgement_expected"):
-            closing = wglink_inbox.written_to_inbox_text(request_id)
-        else:
-            sent = (
-                f"Sent to Waveguide Generator (request {request_id[:8]}). "
-                if request_id
-                else ""
-            )
-            closing = sent + "Waveguide Generator will open this return."
-        if report.get("delivery_unconfirmed"):
-            closing = _unconfirmed_text(request_id)
-        message = (
-            f"Return bundle written: {report.get('bundle_path', '?')}\n"
-            f"Return ID: {report.get('return_id', '?')}\n"
-            f"Scope: {status}\n"
-            f"Sources: {len(report.get('sources', []))}\n\n"
-            f"{closing}"
-        )
-        adopted = report.get("adopted_sources")
-        if isinstance(adopted, list) and adopted:
-            message += f"\n\n{', '.join(str(role) for role in adopted)}: painted sources identified for this document."
-            if report.get("save_source_identities"):
-                message += " Save the document to keep source identities."
-        if status == "degraded" and isinstance(scope, dict):
-            skipped = scope.get("skipped", [])
-            names = []
-            if isinstance(skipped, list):
-                for record in skipped:
-                    if not isinstance(record, dict) or record.get("kind") == "construction":
-                        continue
-                    names.append(
-                        str(record.get("path") or record.get("name") or record.get("object_id") or "unnamed body")
-                    )
-            message += "\n\nDEGRADED EXPORT — skipped bodies:\n- " + "\n- ".join(names or ["none reported"])
-        if report.get("delivery_note"):
-            message += f"\n\n{report['delivery_note']}"
-        return message
     return (
         f"Detached Waveguide Generator instance {report.get('instance_id', '?')}.\n"
         f"Attributes removed: {report.get('attributes_removed', 0)}\n"
@@ -1370,26 +1329,16 @@ def _write_wg_request(ipc: Path, **fields: object) -> tuple[Path, bool]:
     raise last
 
 
-def _unconfirmed_text(request_id: str) -> str:
-    return (
-        f"The request to Waveguide Generator (request {request_id[:8]}) is "
-        "unconfirmed. Writing it into WG's request folder reported an error, and "
-        "the Waveguide Generator add-in could not read it back there -- but WG may already have it: WG "
-        "takes a request the moment it lands. Check WG's CAD Link panel before "
-        "sending this model again. If the request is there, it is being handled; "
-        "sending again would make a second request."
-    )
-
-
-def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[str, ...] = ()) -> str:
+def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[str, ...] = (),
+                  request_id: str | None = None) -> str:
     """Hand the return this command just published to WG: one file, one id.
 
     Send and Solve both come here and differ only in ``kind`` (M1 transfer
     contract C1/C2). There is one path in every configuration: no outbox
     item is created for new work, whatever the activation gate says. The
     outcome is synchronous -- the returned request id, or a ``WgLinkError``
-    naming why WG was not asked -- and one follow-up, the pickup check, says
-    so later if WG never takes the file.
+    naming why WG was not asked. From then on the request palette follows it
+    (:func:`_poll_requests_due`): picked up, WG's receipt, WG's status.
     """
 
     channel = "solveCommand" if kind == wglink_inbox.KIND_PREPARE_AND_SOLVE else "snapshot"
@@ -1403,10 +1352,10 @@ def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[s
         "The return bundle is in the WGLink folder, but Waveguide Generator was "
         "not asked to take it. "
     )
-    request_id = str(uuid.uuid4())
+    request_id = request_id or str(uuid.uuid4())
     try:
         relative, manifest = wglink_inbox.return_reference(bundle, workspace)
-        path, confirmed = _write_wg_request(
+        _path, confirmed = _write_wg_request(
             ipc,
             kind=kind,
             command_id=request_id,
@@ -1430,101 +1379,26 @@ def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[s
     else:
         _begin_request(channel, request_id, DELIVERY)["outcome"] = "unconfirmed"
         report["delivery_unconfirmed"] = True
-    # Unconfirmed included: if the file is there after a minute, WG never took it.
-    if wglink_inbox.wg_acknowledges(ipc):
-        # WG will say whether it accepted or refused: say only "written" until it does.
-        report["acknowledgement_expected"] = True
-        _schedule_pickup_check(
-            path, channel, request_id, ack=(ipc, kind, manifest)
-        )
-    else:
-        _schedule_pickup_check(path, channel, request_id)
+    # Unconfirmed included: it is followed like any request, and says so.
+    acknowledges = wglink_inbox.wg_acknowledges(ipc)
+    current = _requests.current()
+    if current is None or current.get("requestId") != request_id:
+        current = wglink_requests.new_request(request_id, kind, _active_document_name())
+    followed = wglink_requests.submitted(
+        current,
+        manifest_sha256=manifest,
+        acknowledgement=acknowledges,
+        request_status=acknowledges and wglink_inbox.wg_reports_request_status(ipc),
+        confirmed=confirmed,
+        notes=_export_notes(report),
+    )
+    _requests.begin(followed)
+    try:
+        wglink_requests.save(ipc, followed)
+    except (OSError, ValueError, TypeError):
+        _log(f"[{PANEL_NAME}] could not record the request being followed\n{traceback.format_exc()}")
+    _arm_request_poll()
     return request_id
-
-
-def _schedule_pickup_check(
-    path: Path,
-    channel: str,
-    request_id: str,
-    ack: tuple[Path, str, str] | None = None,
-) -> None:
-    """The one follow-up a Send or Solve makes: did WG take the file? (C6)
-
-    A one-shot timer, then the follow-up event onto the main thread, counted
-    under the command that wrote the request. It reads whether one file still
-    exists and nothing else -- no document, no link, no geometry -- and it runs
-    whether or not automatic coordination is on.
-
-    Against a WG that advertises acknowledgements (``ack`` is the inbox, the
-    request kind and its manifest hash), the same timer machinery re-arms every
-    few seconds until WG's acknowledgement file appears or the wait ends: one
-    timer at a time, no thread of its own.
-    """
-
-    if ack is None:
-        _start_pickup_timer(
-            wglink_inbox.SOLVE_PICKUP_NOTICE_SECONDS,
-            wglink_activity.carrying(lambda: _pickup_check(path, channel, request_id)),
-        )
-        return
-    started = time.monotonic()
-    _start_pickup_timer(
-        wglink_inbox.ACK_POLL_SECONDS,
-        wglink_activity.carrying(
-            lambda: _acknowledgement_check(path, channel, request_id, ack, started)
-        ),
-    )
-
-
-def _acknowledgement_check(
-    path: Path,
-    channel: str,
-    request_id: str,
-    ack: tuple[Path, str, str],
-    started: float,
-) -> None:
-    """One look for WG's acknowledgement; re-arms itself until there is an answer.
-
-    accepted -> "WG accepted" (logged, no prompt); refused -> WG's reason verbatim. The request file
-    still waiting after the pickup window is the existing "not picked up" notice.
-    The file gone for the whole wait with no acknowledgement is "taken, not
-    confirmed" -- never "refused", never "solving".
-    """
-
-    ipc, kind, manifest = ack
-    wglink_activity.record(wglink_activity.PICKUP_CHECK)
-    result = wglink_inbox.read_acknowledgement(
-        ipc, request_id, kind=kind, manifest_sha256=manifest
-    )
-    if result is not None:
-        outcome, reason = result
-        if outcome == wglink_inbox.ACK_ACCEPTED:
-            _note_outcome(channel, request_id, "accepted")
-            # Good news is not worth a prompt: WG shows the operation itself.
-            _log(f"[{PANEL_NAME}] request {request_id[:8]}: {wglink_inbox.ACK_ACCEPTED_TEXT}")
-        else:
-            _note_outcome(channel, request_id, "refused")
-            _modal(
-                reason or "WG refused the request.",
-                f"{PANEL_NAME} request refused",
-            )
-        return
-    elapsed = time.monotonic() - started
-    if path.exists():
-        if elapsed >= wglink_inbox.SOLVE_PICKUP_NOTICE_SECONDS:
-            _note_outcome(channel, request_id, "notTaken")
-            _modal(wglink_inbox.REQUEST_NOT_TAKEN_MESSAGE, f"{PANEL_NAME} request waiting")
-            return
-    elif elapsed >= wglink_inbox.ACK_WAIT_SECONDS:
-        _note_outcome(channel, request_id, "takenUnconfirmed")
-        _modal(wglink_inbox.ACK_UNCONFIRMED_TEXT, f"{PANEL_NAME} request not confirmed")
-        return
-    _start_pickup_timer(
-        wglink_inbox.ACK_POLL_SECONDS,
-        wglink_activity.carrying(
-            lambda: _acknowledgement_check(path, channel, request_id, ack, started)
-        ),
-    )
 
 
 def _start_pickup_timer(delay: float, job: object) -> None:
@@ -1553,15 +1427,6 @@ def _start_timer(delay: float, function: object) -> object:
     return timer
 
 
-def _pickup_check(path: Path, channel: str, request_id: str) -> None:
-    wglink_activity.record(wglink_activity.PICKUP_CHECK)
-    if not path.exists():
-        _note_outcome(channel, request_id, "taken")
-        return
-    _note_outcome(channel, request_id, "notTaken")
-    _modal(wglink_inbox.REQUEST_NOT_TAKEN_MESSAGE, f"{PANEL_NAME} request waiting")
-
-
 #: At most this many inbox entries are looked at when WGLink starts.
 STARTUP_RECHECK_LIMIT = 256
 
@@ -1588,6 +1453,9 @@ def _recheck_requests_at_startup() -> None:
         return
     try:
         pending = wglink_inbox.untaken_requests(ipc, limit=STARTUP_RECHECK_LIMIT)
+        # The request the palette follows says so itself; no second notice.
+        followed = (_requests.current() or {}).get("requestId")
+        pending = [(path, age) for path, age in pending if path.stem != followed]
         if not pending:
             return
         paths = [path for path, _age in pending]
@@ -1777,6 +1645,369 @@ def _require_compatible_wg(*, wg_inbox: bool = False) -> None:
         raise wglink_core.WgLinkError(str(exc)) from exc
 
 
+# -------------------------------------------------------- the request palette
+#
+# One modeless HTML palette shows the one Send or Solve the add-in follows
+# (``wglink_requests``): what WG did with it, in WG's own status words, and
+# what the user can do next. It opens when Send or Solve is pressed and,
+# by itself, only when WG needs the user. Nothing about a routine outcome is
+# ever a message box.
+#
+# Fusion's threading rules, which the test fakes model:
+# * the poll runs on a one-shot timer thread at a time and reads only WG's
+#   files (``wglink_requests.poll``); it never touches ``adsk`` except
+#   ``fireCustomEvent`` on the application captured at start-up;
+# * each change reaches the main thread as a follow-up job, which only
+#   renders; a modal holding the main thread delays it (``_command_busy``) and
+#   the palette catches up when the modal closes;
+# * ``sendInfoToHTML`` before the page has loaded is lost, so the page asks
+#   for the state ("ready") and is answered with all of it.
+
+REQUESTS_PALETTE_ID = "hornlab_wglink_requests"
+REQUESTS_PALETTE_FILE = ADDIN_DIR / "requests.html"
+REQUESTS_PALETTE_SIZE = (380, 260)
+#: When ``fireCustomEvent`` reports that it did not deliver, ask again after this.
+FOLLOWUP_RETRY_SECONDS = 1.0
+_requests = wglink_requests.RequestTracker()
+_requests_palette = None
+_requests_palette_ready = False
+_requests_palette_handlers: list[object] = []
+_requests_fallback = None
+_request_poll_armed = False
+_request_poll_lock = threading.Lock()
+# A "Send again" pressed in the palette: the next Send or Solve submits even
+# when the same model's request is still being followed.
+_force_new_request = False
+# A line the palette adds once, until the request moves on.
+_requests_hint: str | None = None
+
+
+def _active_document_name() -> str:
+    """The active document's name, or "" (the palette then says "this model")."""
+
+    document = getattr(_app(), "activeDocument", None)
+    return str(getattr(document, "name", "") or "")
+
+
+def _export_notes(report: dict[str, object]) -> list[str]:
+    """What the user should know about the exported model, in plain words."""
+
+    notes: list[str] = []
+    adopted = report.get("adopted_sources")
+    if isinstance(adopted, list) and adopted:
+        notes.append("Painted source faces were identified for this document.")
+        if report.get("save_source_identities"):
+            notes.append("Save the document to keep them identified.")
+    scope = report.get("scope")
+    if isinstance(scope, dict) and scope.get("status") == "degraded":
+        names = []
+        for record in scope.get("skipped") or []:
+            if isinstance(record, dict) and record.get("kind") != "construction":
+                names.append(str(record.get("name") or record.get("path") or "a body"))
+        if names:
+            shown = ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
+            notes.append(f"Some bodies were left out: {shown}.")
+        else:
+            notes.append("Some bodies were left out.")
+    if report.get("document_capture_error"):
+        notes.append(
+            f"{PANEL_NAME} did not get an editable copy of this Fusion document. "
+            "Keep your Fusion document saved."
+        )
+    return notes
+
+
+def _submission_key(operation: str, inputs: object) -> str:
+    """What makes a second press the same request: document, scope and model state.
+
+    Read on the main thread while the dialog's inputs are valid. A request
+    still under way with the same key is shown again instead of sent again.
+    """
+
+    app = _app()
+    document = getattr(app, "activeDocument", None)
+    product = getattr(app, "activeProduct", None)
+    selection = _send_selection(inputs)
+    root = getattr(product, "rootComponent", None)
+    revisions = []
+    try:
+        components = [root] + [getattr(item, "component", item)
+                               for item in wglink_core._items(getattr(root, "allOccurrences", None))]
+        for component in components:
+            for body in wglink_core._items(getattr(component, "bRepBodies", None)):
+                revisions.append([str(getattr(body, "entityToken", "")),
+                                  str(getattr(body, "revisionId", "")),
+                                  bool(getattr(body, "isVisible", True))])
+        settings = wglink_core._attribute_value(root, wglink_mesh.SETTINGS_ATTRIBUTE)
+    except Exception:  # noqa: BLE001 - an unreadable model is never "the same"
+        return str(uuid.uuid4())
+    return json.dumps([
+        _active_document_id(), str(getattr(document, "name", "")), operation,
+        str(getattr(selection, "entityToken", selection)),
+        _selected_name(inputs, "anchor_instance_id", ""),
+        getattr(getattr(product, "timeline", None), "count", None),
+        getattr(document, "isModified", None), sorted(revisions), settings,
+    ], default=str)
+
+
+def _request_view() -> dict[str, object]:
+    request = _requests.current()
+    if request is None:
+        found = {"headline": "No Send or Solve yet.", "detail": None, "notes": [],
+                 "options": [], "actions": [], "busy": False, "progress": None,
+                 "terminal": True, "diagnostics": {}}
+    else:
+        found = wglink_requests.view(request)
+    if _requests_hint:
+        found["notes"] = list(found.get("notes") or []) + [_requests_hint]
+    return found
+
+
+class RequestsPaletteHTMLHandler(getattr(adsk.core, "HTMLEventHandler", object)):
+    """The page's messages, on the main thread: "ready" and its buttons."""
+
+    def notify(self, args: object) -> None:
+        global _requests_palette_ready
+        try:
+            action = str(getattr(args, "action", "") or "")
+            if action == "ready":
+                _requests_palette_ready = True
+                args.returnData = json.dumps(_request_view())
+            elif action == "action":
+                data = json.loads(str(getattr(args, "data", "") or "{}"))
+                _request_action(str(data.get("id") or "") if isinstance(data, dict) else "")
+        except Exception:  # noqa: BLE001 - a palette message must not raise into Fusion
+            _log(f"[{PANEL_NAME}] request palette\n{traceback.format_exc()}")
+
+
+class RequestsPaletteClosedHandler(getattr(adsk.core, "UserInterfaceGeneralEventHandler", object)):
+    """The user closed the palette: look less often; Requests… reopens it."""
+
+    def notify(self, _args: object) -> None:
+        _requests.visible = False
+
+
+def _requests_palette_handle(create: bool) -> object | None:
+    """This registration's palette, created (hidden) when ``create`` and missing.
+
+    Fusion hands out a new wrapper on every lookup, so the palette is known by
+    the handle kept when it was made. One left by an earlier registration
+    carries that registration's handlers: it is replaced.
+    """
+
+    global _requests_palette, _requests_palette_ready
+    if _requests_palette is not None and getattr(_requests_palette, "isValid", True):
+        return _requests_palette
+    _requests_palette, _requests_palette_ready = None, False
+    palettes = _ui().palettes
+    if not create:
+        return None
+    stale = palettes.itemById(REQUESTS_PALETTE_ID)
+    if stale is not None:
+        stale.deleteMe()
+    url = REQUESTS_PALETTE_FILE.as_uri() + "#" + quote(json.dumps(_request_view()))
+    width, height = REQUESTS_PALETTE_SIZE
+    palette = palettes.add(REQUESTS_PALETTE_ID, PANEL_NAME, url, False, True, True, width, height)
+    try:
+        palette.dockingState = adsk.core.PaletteDockingStates.PaletteDockStateRight
+    except Exception:  # noqa: BLE001 - floating is fine
+        pass
+    _watch_requests_palette(palette)
+    _requests_palette = palette
+    return palette
+
+
+def _watch_requests_palette(palette: object) -> None:
+    incoming, closed = RequestsPaletteHTMLHandler(), RequestsPaletteClosedHandler()
+    palette.incomingFromHTML.add(incoming)
+    palette.closed.add(closed)
+    _requests_palette_handlers[:] = [incoming, closed]
+
+
+def _show_request_palette(open_it: bool = False) -> None:
+    """Render the followed request; open the palette when ``open_it``. Main thread."""
+
+    view = _request_view()
+    try:
+        palette = _requests_palette_handle(create=open_it)
+        if palette is None:
+            return
+        if open_it:
+            palette.isVisible = True
+        _requests.visible = bool(palette.isVisible)
+        if _requests_palette_ready:
+            palette.sendInfoToHTML("status", json.dumps(view))
+    except Exception:  # noqa: BLE001 - a host without HTML palettes keeps a progress line
+        _log(f"[{PANEL_NAME}] request palette unavailable\n{traceback.format_exc()}")
+        _show_request_fallback(view, open_it)
+
+
+def _show_request_fallback(view: dict[str, object], open_it: bool) -> None:
+    """Fusion's modeless progress dialog, carrying the headline, where palettes fail."""
+
+    global _requests_fallback
+    text = " ".join(str(part) for part in (view.get("headline"), view.get("detail")) if part)
+    _log(f"[{PANEL_NAME}] {text}")
+    if _requests_fallback is None and open_it:
+        ui = _ui()
+        try:
+            dialog = ui.createProgressDialog()
+            dialog.isCancelButtonShown = True
+            dialog.show(PANEL_NAME, text, 0, 1, 0)
+            _requests_fallback = dialog
+        except Exception:  # noqa: BLE001 - the Text Commands line stands
+            return
+    if _requests_fallback is not None:
+        try:
+            _requests_fallback.message = text
+            _requests_fallback.progressValue = 1 if view.get("terminal") else 0
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _close_request_palette() -> None:
+    global _requests_palette, _requests_palette_ready, _requests_fallback
+    for item in (_requests_palette, _requests_fallback):
+        if item is None:
+            continue
+        try:
+            if item is _requests_fallback:
+                item.hide()
+            else:
+                item.deleteMe()
+        except Exception:  # noqa: BLE001 - shutdown is best effort
+            pass
+    _requests_palette = _requests_fallback = None
+    _requests_palette_ready = False
+    _requests_palette_handlers.clear()
+
+
+def _request_action(action_id: str) -> None:
+    """A palette button, on the main thread."""
+
+    global _requests_hint, _force_new_request
+    if action_id in {"openWg", "showResults"}:
+        if not wglink_launcher.bring_wg_forward():
+            _requests_hint = f"Switch to {PANEL_NAME}."
+            _show_request_palette()
+    elif action_id == "openSourcesMesh":
+        _schedule_followup(_open_sources_and_mesh)
+    elif action_id == "sendAgain":
+        request = _requests.current() or {}
+        operation = "solve" if request.get("kind") == wglink_requests.SOLVE else "send"
+        _force_new_request = True
+        _schedule_followup(lambda: _execute_command(operation))
+
+
+def _execute_command(operation: str) -> None:
+    try:
+        definition = _ui().commandDefinitions.itemById(COMMANDS[operation][0])
+        if definition is not None:
+            definition.execute()
+    except Exception:  # noqa: BLE001 - the panel button still works
+        _log(f"[{PANEL_NAME}] could not start {COMMANDS[operation][1]}\n{traceback.format_exc()}")
+
+
+def _arm_request_poll(delay: float | None = None) -> None:
+    """One timer at a time looks at the followed request, while it is under way."""
+
+    global _request_poll_armed
+    interval = _requests.poll_interval() if delay is None else delay
+    if interval is None:
+        return
+    with _request_poll_lock:
+        if _request_poll_armed:
+            return
+        _request_poll_armed = True
+    _start_timer(interval, wglink_activity.carrying(_poll_requests_due))
+
+
+def _poll_requests_due() -> None:
+    """The timer thread: look once, hand any change to the main thread, re-arm.
+
+    Reads WG's files and nothing of Fusion. A failure to look is the next
+    look's to retry; it never ends the following.
+    """
+
+    global _request_poll_armed
+    with _request_poll_lock:
+        _request_poll_armed = False
+    try:
+        _poll_requests_once()
+    except Exception:  # noqa: BLE001 - monitoring outlives one bad look
+        pass
+    _arm_request_poll()
+
+
+def _poll_requests_once() -> None:
+    ipc = wglink_workspace.ipc_folder()
+    current = _requests.current()
+    if ipc is None or current is None:
+        return
+    wglink_activity.record(wglink_activity.PICKUP_CHECK)
+    updated = wglink_requests.poll(current, ipc)
+    if updated == current:
+        return
+    previous, taken = _requests.replace(updated)
+    if not taken:
+        return  # a newer request replaced this one meanwhile
+    problem = None
+    try:
+        wglink_requests.save(ipc, updated)
+    except (OSError, ValueError, TypeError) as exc:
+        problem = f"could not record the request being followed: {exc}"
+    with _followups_lock:
+        _followups.append(wglink_activity.carrying(
+            lambda: _request_changed(previous, updated, problem)))
+    _raise_followup_event()
+
+
+def _request_changed(previous: dict[str, object] | None, updated: dict[str, object],
+                     problem: str | None = None) -> None:
+    """The main thread's half of a change: diagnostics, then the palette."""
+
+    global _requests_hint
+    if problem:
+        _log(f"[{PANEL_NAME}] {problem}")
+    before = wglink_requests.outcome(previous) if previous else None
+    after = wglink_requests.outcome(updated)
+    if before != after:
+        _requests_hint = None
+        channel = "solveCommand" if updated.get("kind") == wglink_requests.SOLVE else "snapshot"
+        _note_outcome(channel, str(updated.get("requestId")), after)
+    # WG needs the user: the one time the palette opens by itself.
+    _show_request_palette(open_it=after == "needsYou" and before != "needsYou")
+
+
+def _request_not_sent() -> None:
+    """The command ended before its request reached WG's inbox."""
+
+    current = _requests.current()
+    if current is not None and current.get("local") == wglink_requests.EXPORTING:
+        _requests.begin(wglink_requests.not_sent(current))
+        _show_request_palette()
+
+
+def _recover_request() -> None:
+    """Follow the request a previous session was following. Never submits it again."""
+
+    ipc = wglink_workspace.ipc_folder()
+    if ipc is None:
+        return
+    try:
+        found = wglink_requests.load(ipc)
+    except Exception:  # noqa: BLE001 - a lost record costs only the palette line
+        _log(f"[{PANEL_NAME}] could not read the request being followed\n{traceback.format_exc()}")
+        return
+    if found is None:
+        return
+    _requests.begin(found)
+    if not wglink_requests.terminal(found):
+        _show_request_palette(open_it=True)
+        _arm_request_poll(0.0)
+
+
+
 class CommandExecuteHandler(adsk.core.CommandEventHandler):
     def __init__(self, operation: str):
         super().__init__()
@@ -1788,12 +2019,34 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         # user answered in OK's pop-up (sent with the request).
         self.send_state: SendDialogState | None = None
         self.acknowledged: tuple[str, ...] = ()
+        # What makes a second press the same Send or Solve (_submission_key).
+        self.submission_key: str | None = None
 
     def notify(self, args: object) -> None:
         # Everything this command inspects or changes, including the follow-up
         # it schedules below, is counted under the command that asked for it.
         with wglink_activity.because(wglink_activity.command_cause(self.operation)):
+            if self.operation == "requests":
+                _show_request_palette(open_it=True)
+                return
             self._execute(args)
+
+    def _repeat_press(self, args: object) -> bool:
+        """A second press for a request still under way shows that request instead.
+
+        "Send again" in the palette submits anyway; so does any change to the
+        document, its scope or its model since the first press.
+        """
+
+        global _force_new_request
+        forced, _force_new_request = _force_new_request, False
+        self.submission_key = _submission_key(self.operation, args.command.commandInputs)
+        current = _requests.current()
+        if (forced or current is None or wglink_requests.terminal(current)
+                or current.get("submissionKey") != self.submission_key):
+            return False
+        _show_request_palette(open_it=True)
+        return True
 
     def _execute(self, args: object, *, send_options: dict[str, object] | None = None,
                  admission: wglink_launcher.BackendAdmission | None = None) -> None:
@@ -1815,6 +2068,8 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             if admission is not None and admission.cancelled:
                 return
             if self.operation in {"send", "solve"} and send_options is None:
+                if args is not None and self._repeat_press(args):
+                    return
                 answer = _ask_before_sending(self.send_state)
                 if answer == ASK_CANCELLED:
                     if args is not None:
@@ -1843,6 +2098,16 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             elif self.operation == "update":
                 report = wglink_core.update(_app(), None, options)
             elif self.operation in {"send", "solve"}:
+                followed = wglink_requests.new_request(
+                    str(uuid.uuid4()),
+                    wglink_inbox.KIND_PREPARE_AND_SOLVE if self.operation == "solve"
+                    else wglink_inbox.KIND_RECEIVE_SNAPSHOT,
+                    _active_document_name(),
+                    document_id=_active_document_id(),
+                    submission_key=self.submission_key,
+                )
+                _requests.begin(followed)
+                _show_request_palette(open_it=True)
                 progress = _show_export_progress(self.operation)
                 _update_export_progress(
                     progress, 1, "Exporting STEP and validating the return bundle…"
@@ -1880,9 +2145,10 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                     if solve
                     else wglink_inbox.KIND_RECEIVE_SNAPSHOT,
                     acknowledged=acknowledged if solve else (),
+                    request_id=followed["requestId"],
                 )
                 report["solve_requested"] = solve
-                _update_export_progress(progress, 3, "Return ready in Waveguide Generator.")
+                _update_export_progress(progress, 3, f"Sent to {PANEL_NAME}.")
             elif self.operation == "source":
                 report = _apply_mesh_dialog(inputs, self.mesh_state)
             elif self.operation == "declare":
@@ -1897,6 +2163,10 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             else:
                 raise RuntimeError(f"Unknown Waveguide Generator operation: {self.operation}")
             ran = True
+            if self.operation in {"send", "solve"}:
+                # The palette says what happens next; no message box.
+                _show_request_palette(open_it=True)
+                return
             _message(
                 _summary(self.operation, report),
                 f"{PANEL_NAME} request unconfirmed"
@@ -1923,6 +2193,9 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             _report_error(COMMANDS[self.operation][1], f"{PANEL_NAME} error", exc)
         finally:
             _hide_export_progress(progress)
+            if self.operation in {"send", "solve"}:
+                # Refused, failed or cancelled before its request was written.
+                _request_not_sent()
             # Cleared here; re-driven by the _command_finished() below, after
             # this command has scheduled its own follow-up.
             _command_busy = False
@@ -3058,9 +3331,21 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
         try:
             if self.operation == "fem":
                 _require_fem_regions()
+            if self.operation == "requests":
+                # No inputs: Fusion runs the command at once, and it opens
+                # the request palette.
+                handler = CommandExecuteHandler(self.operation)
+                args.command.execute.add(handler)
+                _handlers.append(handler)
+                return
             inputs = args.command.commandInputs
             send_state = SendDialogState(self.operation) if self.operation in {"send", "solve"} else None
             if send_state is not None:
+                # Say what OK does: Send opens the model in WG; Solve also solves it.
+                try:
+                    args.command.okButtonText = "Solve" if self.operation == "solve" else "Send"
+                except Exception:  # noqa: BLE001 - an older Fusion keeps "OK"
+                    pass
                 selection = inputs.addSelectionInput(
                     "send_selection",
                     "Assembly scope",
@@ -4979,11 +5264,26 @@ def _schedule_followup(job: object) -> None:
 
 
 def _raise_followup_event() -> None:
-    if _followup_event is None:
+    """Ask Fusion for main-thread time. Safe from any thread.
+
+    Uses the application captured at start-up, so a worker never looks
+    ``adsk`` up. When Fusion says it did not deliver (False, or it raises) while
+    jobs wait, a one-shot timer asks again: the queued jobs are never left
+    waiting for an event that is not coming.
+    """
+
+    app = _followup_app
+    if _followup_event is None or app is None:
         return
-    app = _app()
-    if app is not None:
-        app.fireCustomEvent(FOLLOWUP_EVENT_ID)
+    try:
+        delivered = app.fireCustomEvent(FOLLOWUP_EVENT_ID)
+    except Exception:  # noqa: BLE001 - treated as not delivered
+        delivered = False
+    if delivered is False and _followup_event is not None:
+        with _followups_lock:
+            waiting = bool(_followups)
+        if waiting:
+            _start_timer(FOLLOWUP_RETRY_SECONDS, _raise_followup_event)
 
 
 def _run_followups() -> None:
@@ -5142,23 +5442,26 @@ def _start_followups(app: object) -> bool:
 
     With coordination off it is the whole of what starts: no thread, no timer,
     and no watch event. It is raised only by a command's own completion
-    (:func:`_schedule_followup`) or by the one-shot pickup timer a Send or
-    Solve starts (:func:`_schedule_pickup_check`), or that start-up starts
-    for a request it found still waiting (:func:`_recheck_requests_at_startup`).
+    (:func:`_schedule_followup`), by the one-shot poll timer that follows the
+    request a Send or Solve made while it is under way
+    (:func:`_poll_requests_due`), or by the one start-up starts for a request
+    it found still waiting (:func:`_recheck_requests_at_startup`).
     """
 
-    global _followup_event, _followup_handler, _backend_admission
+    global _followup_event, _followup_handler, _backend_admission, _followup_app
     _backend_admission = wglink_launcher.BackendAdmission()
     _followup_event = app.registerCustomEvent(FOLLOWUP_EVENT_ID)
     if _followup_event is None:
         return False
+    _followup_app = app
     _followup_handler = FollowupEventHandler()
     _followup_event.add(_followup_handler)
     return True
 
 
 def _stop_followups(app: object) -> None:
-    global _followup_event, _followup_handler, _backend_progress
+    global _followup_event, _followup_handler, _backend_progress, _followup_app
+    global _request_poll_armed, _force_new_request, _requests_hint
     _backend_admission.close()
     _hide_export_progress(_backend_progress)
     _backend_progress = None
@@ -5173,10 +5476,19 @@ def _stop_followups(app: object) -> None:
                 app.unregisterCustomEvent(FOLLOWUP_EVENT_ID)
         except Exception:  # noqa: BLE001
             pass
+    _followup_event = _followup_handler = _followup_app = None
     for timer in list(_timers):
         timer.cancel()
+    for timer in list(_timers):
+        # A poll already looking finishes its look; none outlives stop().
+        if timer is not threading.current_thread() and timer.is_alive():
+            timer.join(timeout=1.0)
     _timers.clear()
-    _followup_event = _followup_handler = None
+    with _request_poll_lock:
+        _request_poll_armed = False
+    _requests.begin(None)
+    _requests.visible = False
+    _force_new_request, _requests_hint = False, None
     with _followups_lock:
         _followups.clear()
 
@@ -5276,6 +5588,7 @@ def _delete_owned_ui(ui: object | None) -> None:
     _panel = None
     _owned = False
     _handlers.clear()
+    _close_request_palette()
 
 
 def _build_owner(app: object, ui: object) -> None:
@@ -5342,7 +5655,9 @@ def _build_owner(app: object, ui: object) -> None:
         _owned = True
         # Migrate earlier queued requests once, in either gate state.
         _convert_outbox_at_startup()
-        # The pickup checks a restart lost, whatever the gate says (C6, C8).
+        # The request the palette followed, then the pickup checks a restart
+        # lost, whatever the gate says (C6, C8).
+        _recover_request()
         _recheck_requests_at_startup()
         if not _coordinating():
             _start_without_coordination()

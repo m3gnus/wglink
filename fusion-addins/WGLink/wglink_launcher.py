@@ -458,3 +458,27 @@ class BackendAdmission:
     def has_pending_callbacks(self) -> bool:
         with self._lock:
             return bool(self._callbacks)
+
+
+#: WG's macOS application identifier (WG ``launchers/macos``).
+WG_BUNDLE_ID = "is.hornlab.waveguide-generator-v2"
+
+
+def bring_wg_forward(*, platform: str | None = None,
+                     spawn: Callable[..., object] = subprocess.Popen) -> bool:
+    """Ask the system to bring Waveguide Generator to the front, starting it if needed.
+
+    macOS only: ``open -b`` with WG's application identifier, which returns at
+    once and reads nothing of Fusion. Elsewhere there is no dependable way to
+    raise another program's window; False tells the caller to say "Switch to
+    Waveguide Generator" instead.
+    """
+
+    if (platform or sys.platform) != "darwin":
+        return False
+    try:
+        spawn(["/usr/bin/open", "-b", WG_BUNDLE_ID], stdin=subprocess.DEVNULL,
+              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+    except (OSError, ValueError):
+        return False
+    return True

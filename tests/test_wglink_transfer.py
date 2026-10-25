@@ -206,10 +206,12 @@ def test_an_id_that_is_not_a_plain_file_name_is_refused(tmp_path: Path, command_
 # -- the commands: one path, synchronous outcome -------------------------------
 
 
-def _transfer(monkeypatch, tmp_path: Path, name: str, *, advertised: object = 4, live: bool = False):
+def _transfer(monkeypatch, tmp_path: Path, name: str, *, advertised: object = 4, live: bool = False,
+              real_timers: bool = False):
     ui = _UI(_Panels(), _Definitions(reserve_ids=False))
     app = _Application(ui)
     app.activeProduct = types.SimpleNamespace(objectType="adsk::fusion::Design")
+    app.activeDocument = types.SimpleNamespace(name="Horn A", isModified=False)
     module = _load_instance(monkeypatch, name, ui, app)
     ipc, _bundles = _per_request_folders(monkeypatch, module, tmp_path)
     _advertise(ipc, advertised, live=live)
@@ -227,9 +229,10 @@ def _transfer(monkeypatch, tmp_path: Path, name: str, *, advertised: object = 4,
         },
     )
     timers: list[tuple[float, object]] = []
-    monkeypatch.setattr(
-        module, "_start_timer", lambda delay, function: timers.append((delay, function))
-    )
+    if not real_timers:
+        monkeypatch.setattr(
+            module, "_start_timer", lambda delay, function: timers.append((delay, function))
+        )
     monkeypatch.setattr(module, "_owns_active_ipc_lease", lambda: True)
     return types.SimpleNamespace(module=module, ui=ui, app=app, ipc=ipc, bundle=bundle, timers=timers)
 
@@ -254,12 +257,11 @@ def test_send_and_solve_write_one_request_differing_only_in_kind(
     assert payload["bundlePath"] == "wgreturn/speaker.wgreturn"
     assert ("returnId" in payload) is (kind == SOLVE)
     assert _outbox(fixture.ipc) == []
-    title, text = fixture.ui.messages[-1]
-    assert title == "Waveguide Generator"
-    if operation == "solve":
-        assert "Progress and results appear in Waveguide Generator." in text
-    else:
-        assert f"Sent to Waveguide Generator (request {payload['operationId'][:8]})" in text
+    # No message box: the request palette follows the request from here.
+    assert fixture.ui.messages == []
+    shown = _palette(fixture).load()
+    assert shown["headline"] == "Horn A · Sent to Waveguide Generator. Waiting for it to pick up the model."
+    assert shown["diagnostics"]["requestId"] == payload["operationId"]
     assert fixture.module._request_trace["correlationId"] == payload["operationId"]
 
 
@@ -335,7 +337,7 @@ def test_a_write_whose_outcome_is_unknown_is_retried_once_with_the_same_id(
     assert len(calls) == 2 and calls[0] == calls[1]
     [payload] = _inbox(fixture.ipc)
     assert payload == calls[0][1]
-    assert "Sent to Waveguide Generator" in fixture.ui.messages[-1][1]
+    assert "Sent to Waveguide Generator" in _palette(fixture).load()["headline"]
 
 
 def test_a_write_that_keeps_failing_is_a_visible_refusal(monkeypatch, tmp_path: Path) -> None:
@@ -379,14 +381,44 @@ def test_a_refusal_is_an_answer_and_is_never_retried(monkeypatch, tmp_path: Path
     assert calls == []  # Refused before exporting or planning an inbox write.
 
 
-def test_pressing_send_again_is_a_new_request(monkeypatch, tmp_path: Path) -> None:
+def test_pressing_send_again_on_the_same_model_shows_the_request_under_way(
+    monkeypatch, tmp_path: Path
+) -> None:
     fixture = _transfer(monkeypatch, tmp_path, "WGLink_send_twice")
 
     _run(fixture.module, "send")
     _run(fixture.module, "send")
 
-    ids = {payload["operationId"] for payload in _inbox(fixture.ipc)}
-    assert len(ids) == 2
+    assert len(_inbox(fixture.ipc)) == 1
+    assert _palette(fixture).isVisible is True
+
+    # "Send again" in the palette is a deliberate new request.
+    fixture.module._force_new_request = True
+    _run(fixture.module, "send")
+    assert len({payload["operationId"] for payload in _inbox(fixture.ipc)}) == 2
+
+
+def test_a_press_after_the_request_finished_is_a_new_request(monkeypatch, tmp_path: Path) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_send_after_done")
+
+    _run(fixture.module, "send")
+    for path in (fixture.ipc / ".wg-solve-requests").iterdir():
+        path.unlink()  # a WG without receipts took it: all it will ever say
+    _fire_timers(fixture)
+    _run(fixture.module, "send")
+
+    assert len(_inbox(fixture.ipc)) == 1  # the second request, waiting
+    assert fixture.module._requests.current()["local"] == "submitted"
+
+
+def test_a_press_after_the_model_changed_is_a_new_request(monkeypatch, tmp_path: Path) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_send_changed")
+
+    _run(fixture.module, "send")
+    fixture.app.activeDocument = types.SimpleNamespace(name="Horn B", isModified=True)
+    _run(fixture.module, "send")
+
+    assert len({payload["operationId"] for payload in _inbox(fixture.ipc)}) == 2
 
 
 # -- C6: the pickup check -------------------------------------------------------
@@ -400,68 +432,80 @@ def _deliver_followups(module, app) -> None:
 
 
 def _fire_timers(fixture) -> None:
-    for _delay, function in list(fixture.timers):
-        function()
+    due = list(fixture.timers)
     fixture.timers.clear()
+    for _delay, function in due:
+        function()
+
+
+def _palette(fixture):
+    return fixture.ui.palettes.items["hornlab_wglink_requests"]
 
 
 @pytest.mark.parametrize("operation", ["send", "solve"])
-def test_a_request_wg_leaves_untaken_is_reported_once_under_its_command(
+def test_a_request_wg_leaves_untaken_is_shown_in_the_palette_under_its_command(
     monkeypatch, tmp_path: Path, operation: str
 ) -> None:
     fixture = _transfer(monkeypatch, tmp_path, f"WGLink_pickup_{operation}")
     module = fixture.module
     reads: list[int] = []
     monkeypatch.setattr(module, "_fusion_snapshot", lambda: reads.append(1) or {})
+    monkeypatch.setattr(module.wglink_inbox, "SOLVE_PICKUP_NOTICE_SECONDS", 0.0)
 
     _run(module, operation)
+    palette = _palette(fixture)
+    palette.load()
     [(delay, _function)] = fixture.timers
-    assert delay == module.wglink_inbox.SOLVE_PICKUP_NOTICE_SECONDS
-    before = len(fixture.ui.messages)
+    assert delay == module.wglink_requests.POLL_VISIBLE_SECONDS
     _fire_timers(fixture)
     _deliver_followups(module, fixture.app)
 
-    titles = [title for title, _text in fixture.ui.messages[before:]]
-    assert titles == ["Waveguide Generator request waiting"]
-    text = fixture.ui.messages[-1][1]
-    for cause in ("closed", "older than this Waveguide Generator add-in", "not collecting requests"):
-        assert cause in text
-    assert "solve" not in text.lower()
-    # The request is not moved or dropped, and nothing in Fusion was read.
+    assert fixture.ui.messages == []
+    shown = palette.shown
+    assert shown["headline"] == "Waveguide Generator has not picked up Horn A yet."
+    assert [action["id"] for action in shown["actions"]] == ["openWg", "sendAgain"]
+    assert module._recent_outcomes[-1]["outcome"] == "notTaken"
+    # The request is not moved or dropped, nothing in Fusion was read, and
+    # it is still followed: WG may take it yet.
     assert len(_inbox(fixture.ipc)) == 1
     assert reads == []
-    assert module.wglink_activity.LOG.counts()["pickup_check"] == {f"command:{operation}": 1}
+    assert set(module.wglink_activity.LOG.counts()["pickup_check"]) == {f"command:{operation}"}
+    assert len(fixture.timers) == 1
 
 
-def test_a_request_wg_took_is_not_reported(monkeypatch, tmp_path: Path) -> None:
+def test_a_request_a_wg_without_receipts_took_ends_the_following(monkeypatch, tmp_path: Path) -> None:
     fixture = _transfer(monkeypatch, tmp_path, "WGLink_pickup_taken")
     module = fixture.module
 
     _run(module, "send")
     for path in (fixture.ipc / ".wg-solve-requests").iterdir():
         path.unlink()
-    before = len(fixture.ui.messages)
     _fire_timers(fixture)
     _deliver_followups(module, fixture.app)
 
-    assert fixture.ui.messages[before:] == []
+    assert fixture.ui.messages == []
     assert module._recent_outcomes[-1]["outcome"] == "taken"
+    assert "Follow progress in Waveguide Generator" in _palette(fixture).load()["headline"]
     assert module.wglink_activity.LOG.counts()["pickup_check"] == {"command:send": 1}
+    assert fixture.timers == []  # nothing more to look at
 
 
 def test_a_pickup_check_held_behind_a_command_runs_when_it_ends(monkeypatch, tmp_path: Path) -> None:
     fixture = _transfer(monkeypatch, tmp_path, "WGLink_pickup_busy")
     module = fixture.module
     fired: list[str] = []
-    monkeypatch.setattr(fixture.app, "fireCustomEvent", lambda event_id, *_a: fired.append(event_id))
+    monkeypatch.setattr(fixture.app, "fireCustomEvent", lambda event_id, *_a: fired.append(event_id) or True)
+    monkeypatch.setattr(module.wglink_inbox, "SOLVE_PICKUP_NOTICE_SECONDS", 0.0)
     monkeypatch.setattr(module, "_followup_event", object())
+    monkeypatch.setattr(module, "_followup_app", fixture.app)
 
     _run(module, "send")
+    palette = _palette(fixture)
+    palette.load()
     module._command_busy = True
     _fire_timers(fixture)
-    before = len(fixture.ui.messages)
     _deliver_followups(module, fixture.app)
-    assert fixture.ui.messages[before:] == []
+    assert "Sent to" in palette.shown["headline"]  # held, not dropped
     assert len(module._followups) == 1
 
     # The command that held the thread finishes (the user cancels Detach).
@@ -471,7 +515,8 @@ def test_a_pickup_check_held_behind_a_command_runs_when_it_ends(monkeypatch, tmp
     _run(module, "detach")
     assert module.FOLLOWUP_EVENT_ID in fired
     _deliver_followups(module, fixture.app)
-    assert [title for title, _text in fixture.ui.messages] [-1] == "Waveguide Generator request waiting"
+    assert palette.shown["headline"] == "Waveguide Generator has not picked up Horn A yet."
+    assert [title for title, _text in fixture.ui.messages] == ["Waveguide Generator — confirm Detach"]
 
 
 @pytest.mark.parametrize("coordination", [False, None], ids=["off", "on"])
@@ -482,16 +527,19 @@ def test_the_pickup_check_rides_its_own_event_in_both_gate_states(
 
     fixture = _transfer(monkeypatch, tmp_path, f"WGLink_pickup_gate_{coordination}")
     module = fixture.module
+    monkeypatch.setattr(module.wglink_inbox, "SOLVE_PICKUP_NOTICE_SECONDS", 0.0)
     if coordination is not None:
         module.SETTINGS_PATH.write_text(json.dumps({"automatic_coordination": coordination}))
     module.run(None)
     try:
         assert module.FOLLOWUP_EVENT_ID in fixture.app.events
         _run(module, "send")
+        palette = _palette(fixture)
+        palette.load()
         _fire_timers(fixture)
-        before = len(fixture.ui.messages)
         _deliver_followups(module, fixture.app)
-        assert [title for title, _text in fixture.ui.messages[before:]] == ["Waveguide Generator request waiting"]
+        assert palette.shown["headline"] == "Waveguide Generator has not picked up Horn A yet."
+        assert fixture.ui.messages == []
     finally:
         module.stop(None)
 

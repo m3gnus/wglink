@@ -148,7 +148,7 @@ def test_command_lifecycle_title_save_size_and_first_promoted_button(scene):
     assert scene.ui.messages == []
     assert module.COMMANDS["source"][:2] == ("hornlab_wglink_set_source", "Sources & Mesh…")
     assert module.PANEL_NAME == "Waveguide Generator"
-    assert module.PROMOTED_COMMANDS == ("source", "solve", "send")
+    assert module.PROMOTED_COMMANDS == ("source", "solve", "send", "requests")
     assert command.parentCommandDefinition.name == "Sources & Mesh — Waveguide Generator"
     assert command.okButtonText == "Save" and not command.isExecutedWhenPreEmpted
     assert initial == [(660, 720)] and minimum == [(420, 420)]

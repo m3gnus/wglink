@@ -56,6 +56,7 @@ def test_registration_command_and_attribute_ids_stay_compatible():
         "update": "hornlab_wglink_update",
         "send": "hornlab_wglink_send",
         "detach": "hornlab_wglink_detach",
+        "requests": "hornlab_wglink_requests",
     }
     core = _assignments("wglink_core.py")
     assert core["ATTRIBUTE_GROUP"] == "WGLink"

@@ -196,17 +196,23 @@ def _paused(monkeypatch, fixture) -> list[float]:
     return pauses
 
 
-_UNCONFIRMED = "Waveguide Generator request unconfirmed"
+def _said(fixture) -> str:
+    """What the request palette says now: its headline and detail."""
+
+    palette = fixture.ui.palettes.items["hornlab_wglink_requests"]
+    shown = palette.load() if not palette.loaded else palette.shown
+    return " ".join(part for part in (shown["headline"], shown["detail"]) if part)
 
 
 def _assert_unconfirmed(fixture, request_id: str) -> None:
-    title, text = fixture.ui.messages[-1]
-    assert title == _UNCONFIRMED
-    assert f"request {request_id[:8]}" in text
-    assert "WG may already have it" in text and "CAD Link panel" in text
+    assert fixture.ui.messages == []  # not a message box: the palette says it
+    text = _said(fixture)
+    assert text.startswith("Waveguide Generator has not picked up Horn A yet.")
+    assert "may already have it" in text and "check before you" in text
     assert "not asked" not in text and "Sent to Waveguide Generator" not in text
+    assert fixture.module._requests.current()["requestId"] == request_id
     assert _outcome(fixture) == "unconfirmed"
-    # The pickup check still runs for that id, as for Sent.
+    # The request is still followed for that id, as for Sent.
     assert len(fixture.timers) == 1
 
 
@@ -237,7 +243,7 @@ def test_a_sharing_violation_on_the_first_rename_is_retried_under_the_same_id(
     [payload] = _inbox(fixture.ipc)
     assert destinations[0] == f"{payload['operationId']}.json"
     assert _staging(inbox) == []
-    assert "Sent to Waveguide Generator" in fixture.ui.messages[-1][1]
+    assert "Sent to Waveguide Generator" in _said(fixture)
     assert _outcome(fixture) == "requested"
     assert len(fixture.timers) == 1
 
@@ -270,8 +276,8 @@ def test_a_rename_that_landed_and_raised_is_not_reported_as_not_asked(
     [payload] = _inbox(fixture.ipc)
     assert payload["kind"] == SOLVE and payload["returnId"] == "wgr_1"
     assert _staging(fixture.ipc / ".wg-solve-requests") == []
-    title, text = fixture.ui.messages[-1]
-    assert title == "Waveguide Generator" and "Sent to WG (request" in text and "solving" not in text
+    text = _said(fixture)
+    assert "Sent to Waveguide Generator" in text and "solving" not in text.lower()
     assert _outcome(fixture) == "requested"
     assert len(fixture.timers) == 1
 
@@ -592,8 +598,8 @@ def test_the_command_says_sent_only_for_its_own_complete_request(
     _run(fixture.module, operation)
 
     if variant == "control: complete":
-        assert fixture.ui.messages[-1][0] == "Waveguide Generator"
-        assert "Sent to Waveguide Generator" in fixture.ui.messages[-1][1]
+        assert fixture.ui.messages == []
+        assert "Sent to Waveguide Generator" in _said(fixture)
         assert _outcome(fixture) == "requested"
     else:
         _assert_unconfirmed(fixture, fields["command_id"])
@@ -748,7 +754,7 @@ def test_control_a_solve_file_of_the_schema_attempted_says_sent(
         assert "Update Waveguide Generator" in fixture.ui.messages[-1][1]
         return
     assert staged == [attempted] * 3
-    assert "Sent to WG (request" in fixture.ui.messages[-1][1]
+    assert "Sent to Waveguide Generator" in _said(fixture)
     assert _outcome(fixture) == "requested"
 
 
@@ -818,7 +824,7 @@ def test_a_retry_that_lands_after_wg_took_the_first_is_sent_under_the_same_id(
     assert [path.name for path in destinations] == [destinations[0].name] * 2
     [payload] = _inbox(fixture.ipc)
     assert payload["operationId"] == destinations[0].stem
-    assert "Sent to Waveguide Generator" in fixture.ui.messages[-1][1]
+    assert "Sent to Waveguide Generator" in _said(fixture)
     assert _outcome(fixture) == "requested"
 
 

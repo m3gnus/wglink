@@ -116,14 +116,14 @@ def test_startup_registers_the_command_and_icon_only_under_the_capability(
         assert (fixture.ui.commandDefinitions.itemById(fem_id) is not None) is enabled
         manage = module._panel.controls.itemById(module.MANAGE_DROPDOWN_ID)
         assert (fem_id in [item.definition.id for item in manage.controls._items]) is enabled
-        assert len(registered) == (8 if enabled else 7)
+        assert len(registered) == (9 if enabled else 8)
         if not enabled:
             assert all("fem" not in " ".join(record).casefold() for record in registered)
             # Enabling WG later does not add a command to the current panel.
             _capabilities(fixture, {"schemaVersion": 1, "femRegions": 1})
             module.run(None)
             assert fixture.ui.commandDefinitions.itemById(fem_id) is None
-            assert len(registered) == 7
+            assert len(registered) == 8
         else:
             record = next(record for record in registered if record[0] == fem_id)
             assert record[1] == "Declare FEM Region…"
@@ -166,8 +166,8 @@ def test_backend_resume_drops_a_withdrawn_fem_capability(monkeypatch, tmp_path, 
         _finish(fixture)
         assert len(fixture.exports) == 1
         assert "fem_regions" not in fixture.exports[0]
-        assert [title for title, _text in fixture.ui.messages] == ["Waveguide Generator"]
-        assert "FEM" not in fixture.ui.messages[0][1]
+        # Resumed and sent without a word about FEM: no message box at all.
+        assert fixture.ui.messages == []
         assert [request["kind"] for request in _inbox(fixture.ipc)] == [
             "receive_snapshot" if operation == "send" else "prepare_and_solve"
         ]
