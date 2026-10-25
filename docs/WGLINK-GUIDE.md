@@ -1,501 +1,281 @@
-# Waveguide Generator User Guide
+# Waveguide Generator add-in for Fusion: user guide
 
-The Waveguide Generator add-in connects Fusion 360 to the Waveguide Generator app (WG). It inserts a
-WG design as native, managed Fusion history, keeps it updated as the design
-changes in WG, and sends Fusion geometry back to WG to be solved — including
-models drawn from scratch in Fusion. This guide is for using the add-in; the
-architecture and update limits are documented in
-[`fusion-addins/WGLink/README.md`](../fusion-addins/WGLink/README.md), and the
-WG side of the workflow in WG's own user guide.
+The Waveguide Generator add-in connects Autodesk Fusion to the Waveguide
+Generator app (WG). It does two things:
+
+- it sends a Fusion model to WG to be set up and solved, including models
+  drawn from scratch in Fusion;
+- it inserts a WG waveguide into Fusion as native geometry, and updates it
+  when the design changes in WG.
+
+This guide is for using the add-in. WG's side of the workflow, including driver
+setup, solvers and results, is in WG's CAD Link guide and user manual (in the
+`waveguide-generator` repository, `docs/CAD-LINK-GUIDE.md` and
+`docs/USER-MANUAL.md`). Developer material lives here:
+
+- [Implementation and development guide](../fusion-addins/WGLink/README.md):
+  compatibility, delivery, file layout, the head-less Audit and Relink tools,
+  and installing from a checkout;
+- [Naming a link](WGLINK-LINK-NAMING.md), including the head-less
+  `wglink_core.set_link_name` rename;
+- [Validating a change without a release](WGLINK-DEV-LOOP.md);
+- [Request status contract](REQUEST-STATUS.md) and
+  [mesh settings contract](MESH-SIZING-V1.md);
+- [Head-less workflow status](HEADLESS.md).
 
 ## 1. Install
 
-The Waveguide Generator platform installer installs or updates the Fusion add-in
-on macOS and Windows. It also connects Update to WG's existing pinned Python
-environment, so the Fusion add-in needs neither this source checkout nor a
-second virtual environment. Restart Fusion after installing WG and confirm
-**Run on Startup** is ticked for `WGLink` under **Utilities → Scripts and
-Add-Ins**. The Scripts and Add-Ins entry stays `WGLink` because Fusion
-and WG updates use that folder and entry name. The toolbar panel is named
-**Waveguide Generator**.
+WG's installer for macOS and Windows installs or updates the add-in and
+connects it to WG's own Python runtime, so nothing else is needed. If the add-in
+is missing, close Fusion and use **Install add-in** on WG's **CAD Link** panel.
 
-For add-in development, install from this repository's checkout instead:
+1. Restart Fusion after installing WG.
+2. Open **Utilities → Scripts and Add-Ins → Add-Ins**, select **WGLink**, run
+   it, and tick **Run on Startup**. Fusion's own record of this checkbox wins
+   over the add-in's setting, so a copy once started by hand stays manual until
+   you tick it.
+3. The commands appear in the **Waveguide Generator** panel under
+   **Utilities**. The add-in list keeps the name `WGLink` so updates and
+   existing documents keep working.
+4. In WG, choose the **WGLink folder** under **Settings → CAD Link**. The
+   add-in reads the same setting, so you never choose a folder in Fusion.
 
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python scripts/install_wglink_addin.py --symlink
-```
-
-Use the symlink install for development. Update resamples spline profiles by invoking this
-repository's `.venv` and `scripts/wglink_resample.py`; Fusion's embedded Python
-does not have the scientific stack. Those packages come from the add-in
-checkout's own active environment — the installer never probes sibling
-checkouts for them.
-
-Fusion's own record of the Run on Startup toggle
-overrides the add-in manifest, so a copy once started by hand stays manual
-until the box is ticked. Install from exactly one location: a second copy
-loads a second module instance. Waveguide Generator elects one active copy and keeps the
-others as recovery standbys, but duplicate installations still make upgrades
-and support needlessly ambiguous.
-
-One-time setup on the WG side: choose a **WGLink folder** in WG under
-**Settings → CAD Link**. The add-in reads the same setting, so Insert and
-Send need no folder dialogs afterwards.
-
-Exports are no longer watched. Press **Send to WG** to send Fusion geometry;
-use **Update** or an explicit WG **Send to CAD** Update handoff to apply a new
-WG export. Creating an export alone never raises a newer-export prompt.
-
-Internally, `wglink_inbox.py` handles WG requests and acknowledgements,
-`wglink_handoff.py` reads Insert/Update and return requests, and
-`wglink_status.py` publishes Fusion status. `WGLink.py` owns the panel and
-main-thread command execution.
-
-### Compatibility
-
-Compatibility comes from WG's advertised capabilities, not its product version
-string. Insert, Update, WG handoffs and return requests require capability
-schema 1 and integer `fusionRequestDelivery >= 3`. They continue to work when
-WG's CAD Link request consumer is off. Send and Solve additionally require
-integer `solveCommandDelivery >= 4`. An unsupported schema or delivery version
-asks you to **Update Waveguide Generator** before export or model mutation.
-A missing advertisement or disabled Send/Solve consumer asks you to start WG
-and check its WGLink folder.
-
-Return requests publish a `.wgreturn` bundle for WG to read directly; they do
-not write WG's Send/Solve inbox. Like Send and Solve, they still require WG's
-`automaticDomain` and `documentUp` manifest capabilities before export.
-`sourceIdentity` remains optional.
-
-The file-channel split deliberately changes these compatibility behaviors;
-include them in the R-2 re-pin and release notes:
-
-- Solve no longer falls back to schema 3. New Send and Solve requests always
-  use schema 4 and require `solveCommandDelivery >= 4`.
-- Unanswered items from earlier sessions in `.wglink-outbox` stay queued for
-  an older or unavailable WG until a later startup with both delivery channels
-  compatible. Previously, with inbox 3, queued Solves were converted to schema
-  3 and queued Sends were removed with a not-delivered notice. Answered items
-  retain their existing handling.
+Install from one place only. A second copy is kept as a standby, but it makes
+upgrades and support harder; remove the extra registration and restart Fusion.
 
 ## 2. The panel
 
-Three everyday commands sit directly on the Waveguide Generator panel. **Manage Link…**
-contains only **Declare Body…**, **Insert**, **Update**, and **Detach**.
-
 | Command | What it does |
 |---|---|
-| **Set WG Source…** | Mark the selected faces as the `LF`, `MF`, `HF`, or `PASSIVE_CARDIOID` drive source (applies an appearance with that exact name and stamps the source's identity; Clear removes both). A face already painted `PORT_EXIT`, the role's old name, is still recognised. |
-| **Solve in WG** | Start WG's backend when needed, export the assembly and ask WG to prepare and solve it. |
-| **Send to WG** | Export the assembly as a validated `.wgreturn` bundle without asking for a solve. |
-| Declare Body… | Classify a body for the return: `exterior-shell` includes an open surface body, `exclude` leaves a body out, Clear restores automatic scoping. |
-| Insert | Insert a WG `.wglink` bundle as a managed link. Optionally give the link a **Link name** of your own; leave it empty to use WG's design name. Ordinarily unneeded: WG's Send to CAD offers the insert automatically. |
-| Update | Rebuild a managed link in place from its design's latest locator, even if its stored bundle still exists. An invalid locator refuses. Without a locator, use the stored bundle; if it moved, find the newest export of the same design in WG's current workspace. |
-| Detach | Permanently remove Waveguide Generator identity without changing geometry. Fusion asks for confirmation because the only way back is to insert a fresh copy from WG. |
+| **Sources & Mesh…** | Set up sources and mesh, then Send or Solve. |
+| **Send to WG** | Open this model in WG to inspect or set up. Does not solve. |
+| **Solve in WG** | Send and solve now. |
+| **Requests…** | Show the progress of your latest Send or Solve, and earlier ones. |
+| **Manage Link…** | A menu of the less frequent commands below. |
+| Declare Body… | Mark a body as **Exterior shell** (solve its outer surface) or **Exclude** (leave it out); **Clear declaration** goes back to automatic. |
+| Declare FEM Region… | Mark a solid body of air as a FEM region (section 7). |
+| Insert | Insert a WG design as a managed link. Usually not needed: WG's **Send to CAD** inserts it for you. You can give the link a **Link name** of your own. |
+| Update | Rebuild a managed link in place from the newest export of its design. |
+| Detach | Remove the WG link data without changing the geometry. Fusion asks first, because the only way back is a fresh Insert. |
 
-Audit, Relink and renaming a link remain available through the headless
-`wglink_core.audit`, `wglink_core.relink` and `wglink_core.set_link_name`
-APIs. Audit's document/link data is also published
-continuously to WG in `.fusion-status.json`, so it does not need a panel
-command. Newer heartbeats add optional `linkName`, `bodyObjectIds`,
-`transformHash`, `sourceIds`, and `driveChannelIds` members to each managed
-link. They come from
-the same strict observation used by Send to WG; an unavailable or fallback
-identity is omitted, while older WG clients can continue ignoring the added
-members under heartbeat schema 1.
+## 3. Sources & Mesh…
 
-**Send to WG** and **Solve in WG** publish the complete return bundle before
-writing one request to `ipc/wglink/.wg-solve-requests/<operationId>.json`.
-Send imports and displays the snapshot; Solve also asks WG to prepare and solve.
-A request keeps the same id across a delivery retry, so WG can recover it as
-one operation. Pressing Send or Solve again creates a new request.
+Open **Waveguide Generator ▸ Sources & Mesh…** to tell WG which faces make
+sound and how fine to mesh the model.
 
-With a current installed WG, **Solve in WG** and **Send to WG** start its
-backend when needed through the launcher WG last advertised. Startup runs in
-the background; Fusion remains responsive. Presses during startup share one
-startup attempt, then each command exports and submits on Fusion's main thread.
-An already collecting backend receives the command without another launch.
-The backend uses the same WG data folder, saved settings and history; opening
-WG later shows the same jobs and results. A configured non-default
-`WG2_DATA_DIR` is passed explicitly to the launcher.
+1. **Drivers.** One fixed row for each role: **HF**, **MF**, **LF** and **Port
+   or passive opening**. Click a row's **Pick faces**, then click faces in the
+   model. One face picker fills whichever row you chose. A face picked for a
+   second row moves there, and the dialog says so. **✕** clears a row. Leave
+   unused rows empty. Drivers that come from a linked WG design are read-only.
+2. **Walls.** The triangle size for every surface that is not a driver and not
+   in a size zone.
+3. **Size zones.** Optional parts that are finer or coarser than the walls.
+   Click **+ Fine size zone (15 mm)** or **+ Coarse size zone (40 mm)**, name
+   it, change its size if you like, and pick its faces or whole bodies.
+   Removing a zone gives its faces back to the wall size.
+4. **Advanced.** **Grading distance** (how far from each driver the mesh grows
+   to the wall size), **Symmetry** (**Automatic** or **Off**; Off solves the
+   whole model, which is slower) and **Reset to defaults**.
+5. **Estimate.** About how many triangles WG will solve, against WG's limit.
+   Until WG has seen the model it is a range from a quarter model to the whole
+   model, because WG decides whether it can use symmetry. After a solve it
+   also shows the count WG last used.
+6. Click **Save**, or **Cancel** to change nothing. Saving stores everything in
+   the Fusion document and sends nothing. Then use **Send to WG** or **Solve in
+   WG**.
 
-Startup is bounded to at most 75 seconds of waiting. If startup fails, Waveguide Generator
-shows the reason and asks you to start WG manually; it exports and writes no
-request. If you switch documents while WG is starting, run the command again
-from the intended document. Older WG installations and development checkouts
-that advertise no supported launcher still need WG started manually.
-Insert, Update and WG-initiated handoffs do not start the backend.
+Defaults: HF 6 mm, MF 15 mm, LF and port 25 mm, walls 25 mm, grading distance
+100 mm. Smaller sizes mean more triangles.
 
-The add-in exchanges requests, acknowledgements, Insert/Update handoffs and
-status with WG through files. After Send or Solve, the **request palette**
-(docked right; **Requests…** reopens it) follows the request: picked up by WG,
-preparing, waiting for the solver, solving with the frequency count, solved,
-or what WG needs from you, in WG's own words (`docs/REQUEST-STATUS.md`). It
-opens by itself only when WG needs you; answer in WG, or use **Open Sources &
-Mesh…** when the model meshes too large. If WG leaves the request waiting for
-a minute, the palette says WG has not picked it up. A WG that could not take
-the model says why, when its reason reads as words for a user. Routine
-outcomes are never a message box.
+The dialog gives each driver a lasting identity, so WG keeps that driver's
+setup from one send to the next. If you split, copy or delete a driver face,
+or repaint one by hand, reopen Sources & Mesh…, pick every face of that driver
+again and Save. WG then asks for that driver's setup once more.
 
-Earlier queued returns are migrated to request files once at startup. If an
-older WG cannot accept a queued Send, Waveguide Generator reports it as not delivered and
-asks you to update WG and send again. A failed migration keeps the request
-under its original id for the next startup.
+## 4. Send and Solve
 
-## 3. The linked round trip
+1. Click **Send to WG** or **Solve in WG**.
+2. **Assembly scope**: leave it empty to send the whole design, or select one
+   occurrence.
+3. **Solver anchor instance** (only with several linked waveguides): the one
+   whose throat and direction set the solve's origin and axis.
+4. Read **Pre-flight**. It lists the bodies, drivers, any cut and FEM regions
+   that will be sent, and sorts problems three ways:
+   - **Fix first.** **Send** or **Solve** stays disabled and the text says what
+     to change. Examples: no driver and no moving FEM surface ("This model has
+     no driver yet."), a driver or size zone without faces, a face in two rows,
+     a size zone without a name or with a repeated name, an unclassified
+     surface body.
+   - **Asked when you click OK.** A body that is not a closed solid asks
+     whether to send anyway. A Solve whose smallest possible mesh is still
+     over WG's limit asks: **Yes** solves anyway, **No** opens Sources & Mesh…,
+     **Cancel** goes back. If you solve anyway here, WG does not ask again.
+   - **Noted.** For example, a size zone whose faces are all outside the
+     selected occurrence is left out of that send.
+5. Click **Send** or **Solve**.
 
-1. In WG, **Send to CAD** writes the bundle and raises Fusion; the add-in
-   offers the Insert (first time) or Update (afterwards) — one click.
-   If the Fusion document contains multiple managed placements of the same WG
-   design, choose the instance in WG first. The handoff names that exact
-   instance; the Waveguide Generator add-in refuses missing, stale, or ambiguous placement identity
-   rather than updating whichever copy happens to appear first.
-2. Edit in Fusion: move and joint the **wrapper occurrence**, not the managed
-   bodies inside it. WG parameters appear as `wg_<name>_*` user parameters.
-3. **Solve in WG** sends the geometry back and starts the solve. WG switches
-   itself to CAD mode and shows progress; if the ingestion reports blocking
-   findings, WG parks the request and shows what it is waiting on.
+If WG is not running, the add-in starts it in the background where it can and
+then sends; Fusion stays responsive. If WG cannot be started, the add-in says
+why and sends nothing; start WG yourself and try again.
 
-Renaming the WG design is safe: the parameter namespace stays fixed to its
-lineage. Each new export has its own immutable bundle folder; existing legacy
-folders remain readable.
+### The progress panel
+
+The **Waveguide Generator** panel docks on the right whenever you click Send
+or Solve, and opens by itself when WG needs you. Close it whenever you like;
+**Requests…** opens it again. It shows each request:
+
+- "<model> is open in Waveguide Generator." after a Send;
+- "Preparing the simulation…", "Waiting for the solver to start.", then
+  "Solving · 12 of 36 frequencies";
+- "Solved (run 4)." with **Show results in Waveguide Generator**;
+- "Waveguide Generator needs you." with WG's question and **Open Waveguide
+  Generator**. When the mesh is too large it also offers **Open Sources &
+  Mesh…**. You answer in WG's pop-up;
+- "Waveguide Generator could not prepare <model>. This has been recorded for
+  the developers." when WG hit a problem of its own.
+
+If WG has not picked a model up after a while, the panel says so and offers
+**Send again**. The list shows **This document** or **All documents**;
+**Clear finished** removes finished entries. It keeps the last 50 requests
+from the last 30 days, also across a Fusion restart; a restart never sends
+anything again. Technical detail is under the folded **Diagnostics**.
+
+## 5. A WG waveguide in Fusion
+
+1. In WG, **Send to CAD** writes the design and raises Fusion; the add-in
+   inserts it the first time and offers **Update** afterwards. If the document
+   holds several placements of the same design, choose the placement in WG
+   first; the add-in never guesses which copy you mean.
+2. Move and joint the **wrapper component** the add-in created, not the bodies
+   inside it. WG's parameters appear as `wg_<name>_*` user parameters.
+3. Build your own features from the inserted sketches, planes and axes where
+   you can. Check them after each **Update**.
+4. **Solve in WG** sends the finished model back and solves it.
 
 ### Immutable exports and manual Update
 
-WG publishes one `<export-id>.wglink/` directory per export in the existing
-`wglink` exchange folder. Its contents keep the existing bundle format.
-`<design-id>.latest.json` selects the current export. Manual Update reads that
-locator in the current WG exchange folder (then beside the stored bundle)
-before accepting the stored path, validates its exact keys, schema,
-positive sequence, relative basename, manifest IDs and checksums, and refuses
-symlinks. A present but invalid locator never falls back to an older export.
-No locator means the legacy stored-path and workspace lookup still applies.
+Each export from WG is kept as its own folder and never changed afterwards.
+**Update** always applies the newest export of the link's design, even if the
+one applied before still exists. If WG's record of the newest export is
+damaged, Update stops rather than falling back to an older export. A **Send to
+CAD** from WG applies exactly the export it names. An add-in older than this
+behaviour keeps applying the export it has until you update it from WG
+(**Install add-in**) and restart Fusion. The details are in the
+[implementation guide](../fusion-addins/WGLink/README.md).
 
-An explicit WG handoff always opens its own `bundlePath`, never latest. Missing
-paths or bundle/export ID mismatches refuse before creating or changing a
-Fusion document. The optional `bundleLayout: "immutable-v1"` is additive to the
-existing handoff fields. Document attribute names, schema and parameter slugs
-stay the same; `bundle_path` records the immutable export actually applied.
+A link has three names, and they may differ: the Fusion document name (WG uses
+it for your runs), WG's design name (a label), and an optional **Link name**
+you give at Insert (the label in the add-in's menus and the timeline). The
+`wg_<name>_*` parameters keep the name the design had when it was first
+exported, even after you rename it, so your own expressions keep working.
 
-The add-in advertises `immutableBundles: 1` in its existing Fusion heartbeat.
-An older WG ignores that extra field and its stable-folder exports still work.
-Older add-ins still accept automatic Sends to immutable paths; their manual
-Update stays on the applied export until the add-in is updated through WG's
-add-in update action and Fusion is restarted. There is no mutable mirror.
+## 6. A model drawn in Fusion
 
-### The three names a link has
+A model with no WG design behind it works the same way. It needs:
 
-A linked document carries three separate names, and they are allowed to differ.
-Nothing is wrong when they do.
+1. **Drivers**, picked in Sources & Mesh….
+2. **The bodies to solve.** One visible solid or surface body is taken as the
+   outside of the speaker. With several visible bodies, use **Declare Body…**
+   to mark surface bodies **Exterior shell** or **Exclude**. Hidden bodies are
+   left out.
+3. **A sensible placement.** WG works out which way the model radiates.
+   Putting the throat at the origin, radiating along +Z, and centring the
+   model on x = 0 and y = 0 lets WG find mirror symmetry. Pre-flight warns
+   when the placement looks wrong.
 
-| Name | Where it comes from | What it controls |
-|---|---|---|
-| **Fusion document name** | You, in Fusion (`waveguide v1`) | The Fusion document and its `.f3d`. Waveguide Generator publishes it to WG, which titles the CAD project with it. |
-| **WG design name** | WG, from the design you exported (`260308Tritonia-M`) | Nothing, on its own. It is a label WG stamps into the bundle, and it follows a rename in WG. |
-| **Link name** | You, optionally, in the Insert dialog | The link's label in the Waveguide Generator add-in's menus, in the timeline group, and in what WG shows for the placement. Nothing else. |
+### Models already cut in half or quarter
 
-The `wg_<name>_*` user parameters are a **fourth** thing, and no name above
-moves them. That namespace is minted from the design's name the first time it
-is exported, and then frozen to the design's lineage for good. Fusion datums,
-enclosure expressions and your own features all reference it by name, and
-Fusion cannot retarget an expression to
-a different parameter. So a design first exported as `260308Tritonia-M` keeps
-`wg_260308tritonia_m_*` even after it is renamed in WG, and even in a document
-you called something else. New bundle folders use the export ID; old stable
-folder paths remain readable. Keeping the namespace preserves every existing
-linked document through design renames.
+There is no model-domain choice: WG picks the smallest safe domain itself. If
+you cut the model in Fusion on an origin plane with **Split Body** or a cut
+extrude, the add-in records the cut and Pre-flight shows it, for example
+**Cut: Split Body 3 at x = 0**. WG checks it against the mesh. A clean cut on
+the YZ or XZ plane can be mirrored. A capped, leaking or unsafe cut cannot,
+and WG says what to change. With no recorded cut, a cut shape is solved as it
+is. Driver faces need no adjustment: a half model's driver is already half its
+area.
 
-Rename a link at any time — it changes a label and nothing a rebuild or a
-return reads:
+### Assembly scope
 
-```python
-wglink_core.set_link_name(app, "Left waveguide")            # one link
-wglink_core.set_link_name(app, "Left waveguide", {"instance_id": "..."})
-wglink_core.set_link_name(app, "")                          # back to WG's name
-```
+A selected occurrence is sent in its component's own frame, read from Fusion's
+native bodies, so a moved or jointed wrapper still lands correctly. The add-in
+cannot send a placed occurrence that itself contains sub-assemblies. Instead,
+leave Assembly scope empty, select one of the sub-assemblies, or move the
+occurrence back to the assembly origin by editing the joint or Move feature
+that placed it. (Fusion's **Ground** does not move it back.)
 
-The wrapper component (`Waveguide Generator <name> 1`) is an ordinary Fusion component and
-you can rename it in the browser yourself; Waveguide Generator finds its links by stored
-identity, never by a component or timeline name.
+## 7. FEM regions
 
-## 4. Starting from a model drawn in Fusion
-
-A from-scratch model — no WG design behind it — is a legal return. Three
-requirements:
-
-1. **A drive source.** Mark the throat or diaphragm face with
-   **Set WG Source…**. Hand-painting an appearance named exactly `LF`, `MF`,
-   `HF`, or `PASSIVE_CARDIOID` onto the face does the same thing.
-2. **Exterior bodies.** One visible, undeclared solid or surface body is taken
-   as the exterior shell. With multiple visible bodies, classify open surfaces
-   with **Declare Body…** (`exterior-shell` or `exclude`); otherwise the export
-   refuses them as unclassified. Hidden bodies are intentionally left out.
-3. **The solver frame.** With no link to anchor the model, WG assumes it
-   radiates along **+Z**, throat at the **origin**, centred on x = 0 and
-   y = 0 so mirror symmetry can be found. The Send/Solve dialogs show a
-   pre-flight summary — scope, sources with areas, and bold warnings when the
-   frame looks wrong. Fix placement before sending.
-
-In WG the return arrives marked `unlinked`; acknowledge that one finding, set
-mesh sizing and drive channels in the CAD Link panel, and solve.
-
-### Pre-flight checks
-
-Send, Solve, Sources & Mesh… and Waveguide Generator itself use one set of
-pre-flight rules (`preflight_findings` in `wglink_protocol.py`, which WG
-vendors byte for byte). Each finding is one of three kinds:
-
-- **Fix first.** Send and Solve stay disabled, and the pre-flight box says what
-  to change: no source and no FEM driver, a source or surface group without
-  faces, two painted sources with the same role, a surface group without a name
-  or with a repeated name, unreadable mesh settings, a scope that cannot be
-  exported, an inconsistent declared domain or FEM region. WG refuses such a
-  return in the same words when another writer sends one. A model whose only
-  driver is a FEM region's moving surface needs no source, in Sources & Mesh…
-  and in Send alike.
-- **Asked on OK.** One pop-up lists them. A body that is not a closed solid
-  offers **Send anyway**, unless you declared it with Declare Body… or it is a
-  shell WG made. A Solve whose approximate count is over the solved
-  triangle limit even for the smallest domain WG could use offers **Solve
-  anyway** or **Change mesh resolution**, which opens Sources & Mesh…. Solve
-  anyway travels with the request, so WG does not ask again; a WG that does
-  not read it asks as before.
-- **Noted.** A saved surface group painted only outside the selected subtree is
-  left out of that export. A group with no painted faces anywhere is a fix-first
-  finding: select its faces again in Sources & Mesh….
-
-### Source identity
-
-A Waveguide Generator that reads source identities keeps a painted source's
-settings from one return to the next by the identity **Set WG Source…** stamped
-on its faces. Once WG reads them, Send and Solve refuse a painted role, and the
-message names it, when:
-
-- faces were painted by hand or before identities existed — select them and run
-  **Set WG Source…** with that role; faces added to a source that still resolves
-  keep its identity;
-- a face's paint was removed or changed by hand, a face was removed, split or
-  copied, or the role carries two identities — select **every** face that should
-  drive the role and run **Set WG Source…** again. That gives the source a new
-  identity, and WG asks for its setup once;
-- some of the source's faces are outside what you are sending — include them,
-  or select them and **Clear** their WG source. Clear also takes the identity off
-  a face whose paint you already removed by hand.
-
-A linked waveguide's throat needs nothing: its identity follows the link.
-
-**Upgrade note.** The first time WG advertises source identities, every
-document's status token changes once, because source ids are part of it. WG
-therefore shows models it imported earlier as changed; send them again. Painted
-sources marked before this release are refused until you re-run
-**Set WG Source…** on them.
-
-## 5. Automatic model domain
-
-There is no Model domain dropdown. Send and Solve show **Automatic (WG
-decides)** in pre-flight, and WG chooses the smallest safe domain from the solve
-mesh.
-
-For a model already cut on an origin plane, Waveguide Generator reads the Fusion timeline
-during that explicit Send or Solve. A live, unsuppressed **Split Body** or cut
-extrude whose current result has a planar cut face on the YZ, XZ or XY origin
-plane is recorded with its feature name and the side the exported body kept.
-The extrude sketch plane alone does not establish the cut plane. A Split Body
-tool on an origin plane is also recorded; a construction plane counts only when
-it is coincident with an origin plane (for example an offset of zero). If the
-cut face cannot be read at the current timeline marker, its advisory descriptor
-is omitted. Pre-flight shows evidence such as **Cut: Split Body 3 at x = 0**.
-
-WG revalidates that evidence against the solve mesh. Supported positive-side,
-open cuts can be mirrored; negative-side, capped, leaking or otherwise unsafe
-cuts are refused with a remedy. With no surviving cut evidence, a pre-cut shape
-is solved as shown rather than guessed to be symmetric. Full models keep WG's
-validated automatic cutting.
-
-The automatic contract is negotiated. A capable WG receives
-`assembly.domain = {"kind":"automatic"}` under `domain-automatic-v1`, plus any
-recorded `assembly.cut_provenance`. This Waveguide Generator version refuses Send, Solve and
-WG-requested returns against an older WG, because silently omitting those fields
-would change the model-domain meaning and discard the cut evidence. Update and
-restart WG before exporting.
-
-Sources need no adjustment. A half model's drive face is already half its full
-area, which is exactly what WG's own cutter would have produced, and the solver
-scales the mirrored domain the same way either way.
-
-## 6. Assembly scope
-
-**Leave Assembly scope empty** to return the root component, or select exactly
-one occurrence.
-
-A selected occurrence is exported as its **component**, in that component's own
-frame. Fusion's STEP export takes a Component and writes it in its own
-coordinates; it offers no way to export an occurrence in its assembly
-placement. So the bundle states which frame it is in
-(`coordinate_system.export_frame`), and every coordinate in it — the bounding
-box, each instance placement, and cut plane — is read from
-the native bodies, which Fusion defines as the bodies "outside the context of
-an assembly". A moved or jointed wrapper occurrence therefore returns
-correctly, which is the ordinary Waveguide Generator round trip: Insert places the wrapper,
-you move and joint it, and Solve in WG returns it.
-
-When WG advertises support, the return also records Fusion's current general
-Y-up or Z-up modelling orientation as `coordinate_system.document_up`. This is
-captured at export, so changing the preference later does not reinterpret an
-older return.
-
-The one shape this cannot do is a **placed occurrence that itself contains
-sub-assemblies**. Its children's bodies are native to their own components, and
-getting from there to the exported frame means composing the placement chain —
-arithmetic the Waveguide Generator add-in will not do unverified. That case is refused, and there are
-three real ways forward: leave Assembly scope empty and send the whole root
-assembly, select one of the sub-assemblies on its own, or move the occurrence
-back onto the assembly origin by editing or deleting the joint or Move feature
-that placed it. (Fusion's **Ground** is not one of them: it freezes an
-occurrence where it already is and never moves it back to the origin.)
-
-## 7. FEM regions for coupled FEM/BEM solves
-
-A WG that advertises `femRegions` can solve bounded air (a rear chamber, a
-port, a phase plug, a compression-driver cavity) with tetrahedral FEM and
-couple it to the BEM exterior, the way Boundary Lab does. Model each air
-volume as **one closed solid body**, then run **Manage Link… > Declare FEM
+FEM regions solve bounded air (a rear chamber, a port, a phase plug, a
+compression-driver cavity) and couple it to the outside field. Model each air
+volume as **one closed solid body**, then run **Manage Link… → Declare FEM
 Region…** on it:
 
-1. Select the air body. A body declared before reloads its settings and faces.
-2. Name the region, and set its mesh size and bulk loss factor (0 is lossless
-   air; Boundary Lab's presets 0.002 to 0.05 add damping).
-3. **Add group** for every face set that is not a plain wall, and give each a
-   name, a kind, a local mesh size and its faces:
-   - **Driver diaphragm (moving)** with a drive role (LF, MF or HF). It joins
-     the same drive channel as a painted source of that role. **Relative level
-     (dB)** sets its motion relative to the driver (default 0, from −120 to 0
-     dB inclusive).
-   - **Interface to exterior air** for each opening where the chamber meets
-     the exterior: a port exit, a horn throat. WG makes the exterior mesh
-     conform to it.
+1. Select the air body. A body declared before reloads its settings.
+2. Name the region and set its mesh size and loss factor (0 is lossless air;
+   0.002 to 0.05 adds damping).
+3. Add a group for every face set that is not a plain wall, with a name, a
+   kind, a local mesh size and its faces:
+   - **Driver diaphragm (moving)** with a role (LF, MF or HF). It joins the
+     driver of that role. **Relative level (dB)** sets its motion relative to
+     the driver (0 down to −120 dB).
+   - **Interface to exterior air** where the chamber meets the outside, such
+     as a port exit or horn throat.
    - **Plane-wave termination** for an anechoic tube end.
-   - **Rigid wall (local size)** for a wall that needs a finer mesh. Enable
-     **Absorbing lining** for Miki lining, then set its thickness (default
-     30 mm) and flow resistivity (default 5000 Pa·s/m²); both must be positive.
+   - **Rigid wall (local size)** for a wall that needs a finer mesh. Tick
+     **Absorbing lining** for a lined wall and set its thickness (default
+     30 mm) and flow resistivity (default 5000 Pa·s/m²).
 
-   Every face in no group is a rigid wall at the region size. OK stays
-   disabled, with the reason shown, until the declaration is complete: one
-   group per face, faces of the selected body only, unique names, and a drive
-   role for each diaphragm.
-4. **Hide the air body** before Send or Solve. Fusion exports by visibility, so
-   a visible air body would also be sent as exterior geometry; the Waveguide Generator add-in refuses
-   that by name and exports each region separately.
+   Faces in no group are rigid walls. OK stays disabled, with the reason, until
+   every face is in at most one group, names are unique and each diaphragm has
+   a role.
+4. **Hide the air body** before Send or Solve. Fusion sends visible bodies, so
+   a visible air body would also be sent as a wall.
 
-The declaration lives on the body and on each face as Waveguide Generator attributes, so it
-follows the faces through later edits. A group whose faces all disappeared
-(a face rebuilt by an edit) refuses the Send rather than silently becoming a
-wall: reopen the dialog and reselect its faces. A diaphragm in a FEM region
-drives the return on its own, so a compression driver needs no painted source.
-Several moving groups sharing one drive role mean **one physical driver**:
-front and rear surfaces of its shared diaphragm in two regions, or dome and
-surround in one region. A role with several painted channels is ambiguous and
-refused. WG refuses ideal-source channels with FEM diaphragms in more than one
-region. An electrodynamic channel alone does not prove a shared diaphragm.
-Two separate physical drivers must use separate drive channels (roles), then
-WG's **Combine**.
-
-Pre-flight lists each region as, for example, **FEM region: Rear chamber
-(8 mm; 1 interface, 1 moving)**. The return carries `fem-regions/<id>.step`
-per region and `scope.fem_regions` under the `fem-regions-v1` feature. Faces
-travel as area, centroid, normal and bounding box in millimetres; WG matches
-them to the meshed surfaces and keeps ownership of every mesh tag. Against a WG
-without `femRegions`, a design that declares regions is refused, and one that
-declares none sends exactly as before.
-`femRegions >= 1` accepts v1 with optional rigid-group `lining` and
-moving-group `relative_level_db`; WG converts the dB value to the linear motion
-weight `10 ** (relative_level_db / 20)` and rejects a converted weight that is
-zero or nonfinite. WG maps `lining` to BEAT
-`wall_impedance {model: "miki", thickness_m: thickness_mm/1000, flow_resistivity_pa_s_per_m2: unchanged}`.
-Changed lining or level invalidates the return-state hash.
-
-FEM regions are sent in the root frame only: leave Assembly scope empty, or
-select an occurrence placed at the assembly origin.
+Several moving groups on one role are **one physical driver**, for example the
+front and rear of one diaphragm in two regions, or a dome and surround in one.
+Two separate drivers need separate roles. If a group's faces disappear after an
+edit, Send stops until you reopen the dialog and pick them again. FEM regions
+are sent in the root frame only: leave Assembly scope empty, or select an
+occurrence placed at the assembly origin.
 
 ## 8. Troubleshooting
 
-- **"Why is this link called something I never typed?"** — it is WG's name for
-  the design, not a name for your Fusion document. See *The three names a link
-  has* in section 3. Give the link your own **Link name** at Insert, or rename
-  it afterwards with `wglink_core.set_link_name`. The `wg_<name>_*` parameters
-  keep the bundle's namespace either way, on purpose.
-- **"Waveguide Generator has no selected WGLink folder"** — choose the
-  WGLink folder in WG under Settings → CAD Link, then send again.
-- **"The WGLink folder Waveguide Generator is set to no longer exists"** — the
-  folder WG remembers was moved, renamed or deleted. The message names it.
-  Choose the folder again in WG under Settings → CAD Link, then send again.
-- **"The Waveguide Generator add-in cannot find the component that holds the WG waveguide …"** — Send
-  could not find the component the waveguide was inserted into, so it cannot
-  say where the waveguide sits, and it will not guess. If you deleted or
-  replaced that component, undo it and send again. If it is still there, do
-  not insert a second copy (a whole-assembly Send would carry both); report it
-  with the message. What makes the component unfindable in that case is not
-  yet known.
-- **The panel is missing after a Fusion restart** — tick Run on Startup for
-  `WGLink` in Scripts and Add-Ins (see Install); Fusion's toggle overrides the manifest.
-- **"Waveguide Generator helper body … is still visible"** on Send — a freestanding
-  insertion leaves a stitched surface shell behind, and Fusion's STEP export
-  writes every visible body of the exported component, so that shell would
-  reach the solver as a second radiating surface. Insert now hides it, but a
-  document inserted by an earlier Waveguide Generator still has it visible. Hide **the body
-  itself** in the browser — the refusal names it — and send again, or run
-  Insert again. Hiding a folder that contains the body will not work: Autodesk
-  exports a body that is invisible only because its group is hidden as if it
-  were visible.
-- **A surface sits on top of the waveguide in the browser, and I selected and
-  simulated it by mistake** — a freestanding insertion leaves a stitched
-  surface shell behind. It is zero-thickness and coincident with the final
-  solid, so in the browser and in the canvas it is easy to pick instead of the
-  body you meant, and a solve started from it is a solve of the wrong
-  geometry. Insert hides it, and so does **Update** — run Update on the
-  document and Waveguide Generator hides every leftover helper body it still shows,
-  reporting them under `helpers`. Audit names them without touching anything,
-  so you can see which document is affected before you change it. A document
-  built before this change keeps the shell visible until one of those runs.
-  Failing that, hide **the body itself** in the browser. Hiding a folder or
-  group that contains it does **not** work: Autodesk exports a body that is
-  invisible only because its group is hidden as if it were visible, so it
-  would still reach the STEP file and the solver. Do not delete the shell —
-  Waveguide Generator reads its managed bodies by role for tag repair and anchoring, and a
-  deleted one cannot be restored without recreating the link.
-- **"Waveguide Generator parameter namespace mismatch"** on Update — the document's link
-  predates the stable-namespace fix and its bundle was renamed. The refusal
-  names the recovery: Detach and delete the component, then Insert; the
-  rebuild restores the managed bodies, datums and parameters, and only
-  user-authored features on the old parameters need repointing.
-- **"The Waveguide Generator add-in creates parameters on Insert; it never takes over ones it did not
-  create"** — the namespace this Insert would have used is already occupied by
-  parameters Waveguide Generator does not own, and it could not allocate a free one either.
-  Insert normally steps to the next free namespace on its own: Detach leaves a
-  link's `wg_<name>_*` parameters and the geometry they drive behind, so a
-  fresh Insert of that design takes `wg_<name>2_` rather than reassigning the
-  detached model's expressions. The refusal names the colliding parameters;
-  rename or delete them, or keep them and let the new link have its own
-  namespace. Only Update rewrites parameters, and only for the namespace a
-  link this document still records was minted with.
-- **"The linked bundle could not be found in the current WG workspace"** —
-  Update already searched the selected WG workspace by design identity. Put the
-  bundle back under that workspace and run Update again. If it was deliberately
-  moved elsewhere, re-point it with the headless `wglink_core.relink` API.
-- **Nothing arrives in WG after Solve in WG** — current installed WG can start
-  its backend automatically. A startup refusal shows the reason; start WG
-  manually and try again. A request already written survives until WG takes it.
-  Open the WG window to see progress and results.
-- **WG shows an update as still running after Fusion restarted** — Waveguide Generator
-  settles what it can against the open document, read-only, and never runs an
-  interrupted update again. If the update was for a document you do not have
-  open, Waveguide Generator keeps it rather than reporting it as never started; open that
-  document and it is settled. An update that had started changing the model
-  reports **Update interrupted — recovery required**: undo the partial change
-  or repair the link, then send it from WG again.
-- **Duplicate Waveguide Generator installations** — remove the extra registration and
-  restart Fusion. Current copies elect one active panel and file request service and promote a
-  surviving standby if the owner stops, but a mixed-version duplicate remains
-  an unsupported installation to diagnose.
+- **The panel is missing after a restart.** Tick **Run on Startup** for
+  `WGLink` in Scripts and Add-Ins (section 1).
+- **"Waveguide Generator has no selected WGLink folder"**, or the folder no
+  longer exists. Choose the folder again in WG under **Settings → CAD Link**,
+  then send again.
+- **Nothing arrives in WG.** Open WG and check it is running and current. The
+  progress panel says whether WG picked the model up; use **Send again** only
+  after checking WG, because each Send is a new request.
+- **Send and Solve stay disabled.** Read Pre-flight; it names what to change.
+- **"…helper body … is … still visible"** on Send. An older insert left a
+  helper surface visible, and Fusion sends every visible body. Run **Update**
+  (it hides leftover helper bodies), or hide **the body itself** in the
+  browser. Hiding the folder that holds it does not work, and do not delete
+  it: the add-in needs it to repair the link.
+- **I selected and solved a thin surface by mistake.** That is the same helper
+  surface, lying exactly on the solid. Run **Update** to hide it.
+- **The link has a name I never typed.** It is WG's design name. Give your own
+  **Link name** at Insert, or rename it later with the head-less
+  `wglink_core.set_link_name` ([Naming a link](WGLINK-LINK-NAMING.md)). The
+  parameters keep their name on purpose.
+- **Update says the parameter names do not match.** The link predates the
+  stable parameter names. Detach, delete the component and Insert again; only
+  your own features that use the old parameters need repointing.
+- **Insert will not take over existing parameters.** The add-in never adopts
+  parameters it did not create. Insert normally picks the next free name
+  (`wg_<name>2_`); if it cannot, rename or delete the parameters it names.
+- **Update cannot find the design.** Put the WG export back under WG's WGLink
+  folder and run Update again.
+- **WG shows an update as still running after Fusion restarted.** The add-in
+  settles it against the open document without running it again. Open the
+  document it was for. If it reports **Update interrupted — recovery
+  required**, undo the partial change and send it from WG again.
+- **The add-in cannot find the component that holds the WG waveguide.** It
+  will not guess where the waveguide sits. If you deleted or replaced that
+  component, undo it and send again. If it is still there, do not insert a
+  second copy; report the problem with the message.
+
+For the full detail of an error, open **View → Show Text Commands** in Fusion.
