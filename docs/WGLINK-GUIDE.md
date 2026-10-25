@@ -279,3 +279,35 @@ occurrence placed at the assembly origin.
   second copy; report the problem with the message.
 
 For the full detail of an error, open **View → Show Text Commands** in Fusion.
+
+## 9. Upgrading or installing by hand
+
+Most people never need this section: WG's installer installs and updates the
+add-in for you.
+
+**Installing from a checkout.** Developers install the add-in from this
+repository instead:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python scripts/install_wglink_addin.py --symlink
+```
+
+Then restart Fusion and tick **Run on Startup** as in section 1. The
+[implementation guide](../fusion-addins/WGLink/README.md) has the details.
+
+### Compatibility
+
+The add-in checks what WG says it supports, not WG's version number. If WG is
+too old, the add-in asks you to **Update Waveguide Generator** before it
+exports anything. This release changes two things for people upgrading from an
+older add-in; they belong in the R-2 re-pin and the release notes:
+
+- Solve no longer falls back to schema 3. Send and Solve always use the newer
+  request format and need a WG that advertises `solveCommandDelivery >= 4`.
+  With an older WG, update WG first.
+- Sends and Solves left over from an earlier session in `.wglink-outbox`
+  stay queued until WG starts with a compatible version. Before, queued Solves were
+  converted to the old format and queued Sends were removed with a "not
+  delivered" notice.
