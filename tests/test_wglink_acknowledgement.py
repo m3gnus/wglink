@@ -302,7 +302,9 @@ def test_without_the_capability_no_receipt_is_read_and_taken_is_the_end(
     assert _tick(fixture) == []
 
     shown = _shown(fixture)
-    assert shown["headline"] == "Horn A · Waveguide Generator picked it up. Follow progress in Waveguide Generator."
+    assert shown["headline"] == (
+        "Horn A · Waveguide Generator picked it up. Follow progress in Waveguide Generator."
+        if operation == "solve" else "Horn A · Waveguide Generator has it.")
     assert "solving" not in shown["headline"].lower()
     assert fixture.module._recent_outcomes[-1]["outcome"] == "taken"
     assert fixture.timers == []

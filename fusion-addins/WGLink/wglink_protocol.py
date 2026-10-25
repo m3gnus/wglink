@@ -2090,9 +2090,16 @@ def request_status_known(record: object) -> bool:
     return isinstance(state, str) and state in REQUEST_STATUS_STATES
 
 
-_OPEN_WG = {"id": "openWg", "label": f"Open {APP_NAME}"}
-_OPEN_SOURCES_MESH = {"id": "openSourcesMesh", "label": "Open Sources & Mesh…"}
-_SHOW_RESULTS = {"id": "showResults", "label": f"Show results in {APP_NAME}"}
+#: The buttons ``request_status_text`` offers, ``{id, label}``. A reader that
+#: adds buttons of its own uses these for the shared ones.
+REQUEST_STATUS_OPEN_WG = {"id": "openWg", "label": f"Open {APP_NAME}"}
+REQUEST_STATUS_OPEN_SOURCES_MESH = {"id": "openSourcesMesh", "label": "Open Sources & Mesh…"}
+REQUEST_STATUS_SHOW_RESULTS = {"id": "showResults", "label": f"Show results in {APP_NAME}"}
+REQUEST_STATUS_ACTION_IDS = tuple(action["id"] for action in (
+    REQUEST_STATUS_OPEN_WG, REQUEST_STATUS_OPEN_SOURCES_MESH, REQUEST_STATUS_SHOW_RESULTS))
+_OPEN_WG = REQUEST_STATUS_OPEN_WG
+_OPEN_SOURCES_MESH = REQUEST_STATUS_OPEN_SOURCES_MESH
+_SHOW_RESULTS = REQUEST_STATUS_SHOW_RESULTS
 _NOTICE_TEXT = {
     "fullModel": f"Solved the whole model; {APP_NAME} could not use symmetry for this one.",
     "cutModel": f"Solved the model as cut in CAD; {APP_NAME} could not use any further symmetry for this one.",
@@ -2114,8 +2121,14 @@ def request_status_text(record: Mapping[str, Any]) -> dict[str, Any]:
     try:
         return _request_status_text(record)
     except Exception:  # noqa: BLE001 - a user always gets a sentence
-        return {"headline": f"Open {APP_NAME} to see this request.", "detail": None,
-                "options": [], "actions": [dict(_OPEN_WG)]}
+        return request_status_fallback_text()
+
+
+def request_status_fallback_text() -> dict[str, Any]:
+    """The words for a request nothing more can be said about: open WG to see it."""
+
+    return {"headline": f"Open {APP_NAME} to see this request.", "detail": None,
+            "options": [], "actions": [dict(_OPEN_WG)]}
 
 
 def _request_status_text(record: Mapping[str, Any]) -> dict[str, Any]:

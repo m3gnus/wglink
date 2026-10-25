@@ -319,10 +319,13 @@ Commands and requests cross through WG's machine-local IPC folder,
   nothing is "not collecting requests", and both refuse. A refusal before the
   request is written is a message box, as before; everything after it is the
   **request palette** (below). Pressing Send or Solve again for the same model
-  while its request is still under way shows that request instead of sending
-  it twice; the palette's **Send again** / **Solve again**, or any change to
-  the document, its scope or its model, makes a new request. A second request
-  never replaces one WG has not read yet. The file is staged under a hidden name,
+  while its request is still under way asks first ("Solve it again?" — Yes
+  sends again, No shows its progress); a press is never dropped. The same model
+  means the same document, scope, anchor, bodies, occurrence placements and
+  visibility, parameters, timeline and mesh settings; any change sends at
+  once, as does the palette's **Send again** / **Solve again**. A new request
+  for the same document and command takes back the previous one if WG has not
+  picked it up yet (only a file still under its own name in the inbox). The file is staged under a hidden name,
   synced and renamed into place, so WG never sees part of one. The request is
   planned once: WG's capability decides its schema and exact contents before
   the first attempt, and every attempt writes that same request -- a retry
@@ -360,9 +363,20 @@ Commands and requests cross through WG's machine-local IPC folder,
   follow-up event, which only renders (a modal holds it until it closes). A
   request WG leaves in the inbox for a minute reads "has not picked up", and
   one taken without a receipt for two minutes "picked up but has not
-  confirmed"; neither is ever "solving". The request is recorded in
-  `.fusion-request-status.json`, so a restarted add-in resumes following it
-  and never submits it again.
+  confirmed"; neither is ever "solving". A write the add-in could not confirm
+  stays "has not picked up" until WG answers: the file's absence alone is never
+  read as picked up. No state is a dead end: every one still under way offers
+  Send/Solve again where the add-in cannot tell what WG has, and a request WG
+  stops reporting on (10 minutes without news, 1 minute once WG no longer
+  advertises that it reads requests) reads "has not reported on <name> for a
+  while" with Open Waveguide Generator and Solve again, looked at every 30 s,
+  and not at all after a day. A request WG could not finish is still looked at
+  every 30 s for an hour, because WG's Try again moves it back to preparing.
+  The request is recorded in `.fusion-request-status.json`, so a restarted
+  add-in resumes following it and never submits it again; a record more than
+  two days old is not resumed, and the palette reopens by itself only for a
+  request that is still moving. Where HTML palettes are unavailable, each
+  change is one Text Commands line and only "WG needs you" is a message box.
 - **The start-up pickup check.** Following a request does not survive the
   loss of its record, so at start-up Waveguide Generator looks once at
   the inbox for its own request files WG has not taken -- reading nothing in

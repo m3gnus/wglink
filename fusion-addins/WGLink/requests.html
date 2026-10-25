@@ -79,10 +79,12 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}
     });
     byId("diagnostics").textContent = JSON.stringify(view.diagnostics || {}, null, 2);
   }
+  // True when the answer carried the state; an empty answer is asked again.
   function received(reply) {
     if (typeof reply === "string" && reply) {
-      try { render(JSON.parse(reply)); } catch (ignored) {}
+      try { render(JSON.parse(reply)); return true; } catch (ignored) {}
     }
+    return false;
   }
   // Python's updates; anything sent before "ready" below is lost by Fusion,
   // so the add-in answers "ready" with the whole state.
@@ -96,13 +98,14 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}
     if (location.hash.length > 1) { render(JSON.parse(decodeURIComponent(location.hash.slice(1)))); }
   } catch (ignored) {}
   function ready(attempt) {
-    var reply = send("ready", "");
-    if (reply === null) {
+    function again() {
       if (attempt < 50) { setTimeout(function () { ready(attempt + 1); }, 200); }
-      return;
     }
-    if (reply && typeof reply.then === "function") { reply.then(received, function () {}); }
-    else { received(reply); }
+    var reply = send("ready", "");
+    if (reply === null) { again(); return; }
+    if (reply && typeof reply.then === "function") {
+      reply.then(function (value) { if (!received(value)) { again(); } }, again);
+    } else if (!received(reply)) { again(); }
   }
   window.addEventListener("load", function () { ready(0); });
 })();

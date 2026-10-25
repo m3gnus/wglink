@@ -104,39 +104,41 @@ def requests_not_taken_at_startup_message(count: int) -> str:
     )
 
 
-def wg_acknowledges(ipc_folder: Path) -> bool:
-    """Whether WG advertises that it writes an acknowledgement for each request."""
+def _advertised(payload: object, name: str, minimum: int = 1) -> bool:
+    """Whether a capability file names ``name`` as an integer of at least ``minimum``.
 
-    payload = _read_json(Path(ipc_folder) / CAPABILITIES_FILENAME)
+    Capability schema 1 only; a missing or unreadable file, another schema, or
+    a value that is not such an integer (a boolean is not one) reads as no.
+    """
+
     if not isinstance(payload, Mapping):
         return False
     schema = payload.get("schemaVersion")
     if isinstance(schema, bool) or schema != CAPABILITIES_SCHEMA_VERSION:
         return False
-    if SOLVE_COMMAND_DELIVERY not in payload:
-        return False
-    value = payload.get(SOLVE_ACKNOWLEDGEMENT)
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+    value = payload.get(name)
+    return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
+
+
+def wg_acknowledges(ipc_folder: Path) -> bool:
+    """Whether WG advertises that it writes an acknowledgement for each request."""
+
+    payload = _read_json(Path(ipc_folder) / CAPABILITIES_FILENAME)
+    return (_advertised(payload, SOLVE_ACKNOWLEDGEMENT)
+            and SOLVE_COMMAND_DELIVERY in payload)
 
 
 def wg_reports_request_status(ipc_folder: Path) -> bool:
     """Whether WG advertises that it writes a status file for each request.
 
-    ``requestStatus`` at least ``REQUEST_STATUS_SCHEMA_VERSION`` under capability
-    schema 1 (docs/REQUEST-STATUS.md). Read once, when a request is submitted:
-    the request keeps what it saw, so a capability file that is briefly missing
-    never downgrades a request already being followed.
+    ``requestStatus`` at least ``REQUEST_STATUS_SCHEMA_VERSION`` (docs/REQUEST-STATUS.md).
+    Recorded on a request when it is submitted, so a capability file that is
+    briefly missing never downgrades a request already being followed.
     """
 
-    payload = _read_json(Path(ipc_folder) / CAPABILITIES_FILENAME)
-    if not isinstance(payload, Mapping):
-        return False
-    schema = payload.get("schemaVersion")
-    if isinstance(schema, bool) or schema != CAPABILITIES_SCHEMA_VERSION:
-        return False
-    value = payload.get(wglink_protocol.REQUEST_STATUS_CAPABILITY)
-    return (isinstance(value, int) and not isinstance(value, bool)
-            and value >= wglink_protocol.REQUEST_STATUS_SCHEMA_VERSION)
+    return _advertised(_read_json(Path(ipc_folder) / CAPABILITIES_FILENAME),
+                       wglink_protocol.REQUEST_STATUS_CAPABILITY,
+                       wglink_protocol.REQUEST_STATUS_SCHEMA_VERSION)
 
 
 #: A status file WG is replacing can be briefly unreadable on Windows: one

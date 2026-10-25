@@ -405,33 +405,56 @@ def test_a_request_whose_export_never_finished_reads_not_sent_after_a_restart(tm
     assert wglink_requests.view(loaded)["headline"] == "Horn A was not sent to Waveguide Generator."
 
 
-def test_the_palette_buttons(monkeypatch, tmp_path: Path) -> None:
+def test_the_palette_buttons_run_after_the_pages_message_returns(monkeypatch, tmp_path: Path) -> None:
     fixture = _following(monkeypatch, tmp_path, "WGLink_palette_buttons")
     module = fixture.module
     palette = _palette(fixture)
     palette.load()
     raised: list[bool] = []
     monkeypatch.setattr(module.wglink_launcher, "bring_wg_forward", lambda: raised.append(True) or False)
-    scheduled: list[object] = []
-    monkeypatch.setattr(module, "_schedule_followup", scheduled.append)
+    opened: list[bool] = []
+    monkeypatch.setattr(module, "_open_sources_and_mesh", lambda: opened.append(True))
+    sent_inside: list[int] = []
+    real_send = palette.sendInfoToHTML
+
+    def guarded_send(action, data):
+        sent_inside.append(dispatching[0])
+        return real_send(action, data)
+
+    dispatching = [0]
+    real_dispatch = palette._send
+
+    def dispatch(action, data=""):
+        dispatching[0] += 1
+        try:
+            return real_dispatch(action, data)
+        finally:
+            dispatching[0] -= 1
+
+    object.__setattr__(palette, "sendInfoToHTML", guarded_send)
+    object.__setattr__(palette, "_send", dispatch)
 
     palette.click("openWg")
+    assert raised == []  # nothing ran inside the page's own message
+    _deliver_followups(module, fixture.app)
     assert raised == [True]
     assert palette.shown["notes"][-1] == "Switch to Waveguide Generator."
+    assert sent_inside and all(depth == 0 for depth in sent_inside)
 
     palette.click("openSourcesMesh")
-    assert scheduled == [module._open_sources_and_mesh]
+    _deliver_followups(module, fixture.app)
+    assert opened == [True]
 
     executed: list[str] = []
     fixture.ui.commandDefinitions.items["hornlab_wglink_solve"] = types.SimpleNamespace(
         isValid=True, execute=lambda: executed.append("solve"))
     palette.click("sendAgain")
-    assert module._force_new_request is True
-    scheduled[-1]()
+    _deliver_followups(module, fixture.app)
     assert executed == ["solve"]
+    assert module._force_new_request[0] == "solve"
 
 
-def test_requests_reopens_the_palette(monkeypatch, tmp_path: Path) -> None:
+def test_requests_reopens_the_palette_without_running_a_command(monkeypatch, tmp_path: Path) -> None:
     fixture = _following(monkeypatch, tmp_path, "WGLink_palette_reopen")
     module = fixture.module
     palette = _palette(fixture)
@@ -441,10 +464,9 @@ def test_requests_reopens_the_palette(monkeypatch, tmp_path: Path) -> None:
         commandInputs=types.SimpleNamespace(), execute=types.SimpleNamespace(add=added.append))
 
     module.CommandCreatedHandler("requests").notify(types.SimpleNamespace(command=command))
-    [handler] = added
-    handler.notify(types.SimpleNamespace(command=command))
 
     assert palette.isVisible is True
+    assert added == []  # no execute: nothing changes, nothing to undo
     assert fixture.ui.messages == []
 
 
@@ -457,6 +479,7 @@ def test_every_local_line_is_user_text(kind: str, name: str | None) -> None:
     records = [base, wglink_requests.not_sent(base), submitted,
                dict(submitted, receipt={"outcome": "accepted", "reason": None},
                     capabilities={"acknowledgement": True, "requestStatus": False})]
+    records.append(dict(submitted, receipt={"outcome": "accepted", "reason": None}, quiet=True))
     records += [dict(submitted, local=local) for local in (
         wglink_requests.UNCONFIRMED, wglink_requests.NOT_TAKEN, wglink_requests.TAKEN,
         wglink_requests.TAKEN_UNCONFIRMED)]
@@ -467,6 +490,8 @@ def test_every_local_line_is_user_text(kind: str, name: str | None) -> None:
             if text:
                 assert wglink_protocol.user_text_violations(text, names=(name,)) == [], text
         assert {action["id"] for action in shown["actions"]} <= set(wglink_requests.ACTION_IDS)
+    question = wglink_requests.repeat_question(base)
+    assert wglink_protocol.user_text_violations(question, names=(name,)) == []
 
 
 def test_a_status_file_being_replaced_is_read_again_once(monkeypatch, tmp_path: Path) -> None:
@@ -502,3 +527,339 @@ def test_only_an_advertised_request_status_is_read(tmp_path: Path, value: object
     assert wglink_inbox.wg_reports_request_status(tmp_path) is False
     _advertise_status(tmp_path, 1)
     assert wglink_inbox.wg_reports_request_status(tmp_path) is True
+
+
+# -- no dead ends: every state still under way has a way on --------------------
+
+
+def _submitted(tmp_path: Path, *, confirmed: bool = True, acknowledgement: bool = True,
+               request_status: bool = True, kind: str = SOLVE) -> dict:
+    (tmp_path / wglink_inbox.SOLVE_REQUESTS_DIRECTORY).mkdir(exist_ok=True)
+    (tmp_path / wglink_inbox.CAPABILITIES_FILENAME).write_text(json.dumps({
+        "schemaVersion": 1, "solveCommandDelivery": 4,
+        **({"solveAcknowledgement": 1} if acknowledgement else {}),
+        **({"requestStatus": 1} if request_status else {})}))
+    request = wglink_requests.new_request("req-1", kind, "Horn A", now=1.0)
+    return wglink_requests.submitted(request, manifest_sha256="sha256:x", confirmed=confirmed,
+                                     acknowledgement=acknowledgement,
+                                     request_status=request_status, now=1.0)
+
+
+def _ids(shown: dict) -> list[str]:
+    return [action["id"] for action in shown["actions"]]
+
+
+@pytest.mark.parametrize("acknowledgement", [True, False], ids=["receipts", "old-wg"])
+def test_an_unconfirmed_write_is_never_read_as_picked_up(tmp_path: Path, acknowledgement: bool) -> None:
+    request = _submitted(tmp_path, confirmed=False, acknowledgement=acknowledgement,
+                         request_status=acknowledgement)
+
+    for now in (wglink_inbox.ACK_WAIT_SECONDS + 2, wglink_requests.QUIET_SECONDS + 5):
+        request = wglink_requests.poll(request, tmp_path, now=now)
+        shown = wglink_requests.view(request, now=now)
+        assert request["local"] == wglink_requests.UNCONFIRMED
+        assert "picked up" in shown["headline"] and "has not" in shown["headline"]
+        assert shown["terminal"] is False and _ids(shown) == ["openWg", "sendAgain"]
+    tracker = wglink_requests.RequestTracker()
+    tracker.begin(request)
+    assert tracker.poll_interval(now=wglink_requests.QUIET_SECONDS + 5) == wglink_requests.POLL_QUIET_SECONDS
+    assert tracker.poll_interval(now=wglink_requests.FOLLOW_LIMIT_SECONDS + 5) is None
+
+
+def test_taken_but_unconfirmed_offers_solve_again(tmp_path: Path) -> None:
+    request = wglink_requests.poll(_submitted(tmp_path), tmp_path, now=wglink_inbox.ACK_WAIT_SECONDS + 2)
+
+    shown = wglink_requests.view(request, now=wglink_inbox.ACK_WAIT_SECONDS + 2)
+    assert request["local"] == wglink_requests.TAKEN_UNCONFIRMED
+    assert _ids(shown) == ["openWg", "sendAgain"] and shown["busy"] is False
+
+
+@pytest.mark.parametrize("held", [
+    {"receipt": {"outcome": "accepted", "reason": None}},
+    {"status": {"state": "preparing"}}, {"status": {"state": "queued"}},
+    {"status": {"state": "solving"}}, {"status": {"state": "somethingNewer"}},
+], ids=["accepted-no-status", "preparing", "queued", "solving", "unknown-state"])
+def test_a_request_wg_stops_reporting_on_goes_quiet_with_a_way_on(tmp_path: Path, held: dict) -> None:
+    request = _submitted(tmp_path)
+    if "status" in held:
+        request["status"] = wglink_protocol.validate_request_status({
+            "contract": "wg-request-status", "schemaVersion": 1, "seq": 1,
+            "requestId": "req-1", **held["status"]})
+    else:
+        request.update(held)
+    early = wglink_requests.view(wglink_requests.poll(request, tmp_path, now=5.0), now=5.0)
+    assert early["terminal"] is False and "for a while" not in early["headline"]
+
+    quiet = wglink_requests.poll(request, tmp_path, now=1.0 + wglink_requests.QUIET_SECONDS)
+
+    shown = wglink_requests.view(quiet, now=1.0 + wglink_requests.QUIET_SECONDS)
+    assert shown["headline"] == "Waveguide Generator has not reported on Horn A for a while."
+    assert _ids(shown) == ["openWg", "sendAgain"] and shown["busy"] is False
+    tracker = wglink_requests.RequestTracker()
+    tracker.begin(quiet)
+    assert tracker.poll_interval(now=1.0 + wglink_requests.QUIET_SECONDS) == wglink_requests.POLL_QUIET_SECONDS
+
+
+def test_quiet_comes_sooner_when_wg_no_longer_reads_requests(tmp_path: Path) -> None:
+    request = _submitted(tmp_path)
+    request["receipt"] = {"outcome": "accepted", "reason": None}
+    soon = 1.0 + wglink_requests.QUIET_WITHOUT_WG_SECONDS
+    assert wglink_requests.poll(request, tmp_path, now=soon)["quiet"] is False
+
+    (tmp_path / wglink_inbox.CAPABILITIES_FILENAME).unlink()  # WG closed
+
+    assert wglink_requests.poll(request, tmp_path, now=soon)["quiet"] is True
+
+
+def test_news_after_quiet_moves_the_request_on(tmp_path: Path) -> None:
+    request = _submitted(tmp_path)
+    request["receipt"] = {"outcome": "accepted", "reason": None}
+    quiet = wglink_requests.poll(request, tmp_path, now=1.0 + wglink_requests.QUIET_SECONDS)
+    folder = tmp_path / wglink_inbox.ACK_DIRECTORY
+    folder.mkdir()
+    (folder / "req-1.status.json").write_text(json.dumps({
+        "contract": "wg-request-status", "schemaVersion": 1, "seq": 2, "requestId": "req-1",
+        "documentName": "Horn A", "state": "solving"}))
+
+    moving = wglink_requests.poll(quiet, tmp_path, now=2.0 + wglink_requests.QUIET_SECONDS)
+
+    assert moving["quiet"] is False
+    assert wglink_requests.view(moving, now=2.0 + wglink_requests.QUIET_SECONDS)["headline"] == "Horn A · Solving…"
+
+
+def test_wg_needing_the_user_is_never_busy_or_quiet(tmp_path: Path) -> None:
+    request = _submitted(tmp_path)
+    request["status"] = wglink_protocol.validate_request_status({
+        "contract": "wg-request-status", "schemaVersion": 1, "seq": 1, "requestId": "req-1",
+        "state": "needsYou", "prompt": {"code": "mesh_too_large", "nextStep": "Too many triangles."}})
+
+    later = wglink_requests.poll(request, tmp_path, now=1.0 + 3 * wglink_requests.QUIET_SECONDS)
+
+    shown = wglink_requests.view(later)
+    assert later["quiet"] is False and shown["busy"] is False
+
+
+def test_wgs_try_again_after_could_not_finish_is_seen_for_an_hour(tmp_path: Path) -> None:
+    request = _submitted(tmp_path)
+    folder = tmp_path / wglink_inbox.ACK_DIRECTORY
+    folder.mkdir()
+
+    def write(seq: int, state: str, **extra) -> None:
+        (folder / "req-1.status.json").write_text(json.dumps({
+            "contract": "wg-request-status", "schemaVersion": 1, "seq": seq, "requestId": "req-1",
+            "documentName": "Horn A", "state": state, **extra}))
+
+    write(1, "couldNotFinish", phase="preparing", failure={"recorded": True})
+    stopped = wglink_requests.poll(request, tmp_path, now=10.0)
+    assert wglink_requests.view(stopped)["terminal"] is True
+    tracker = wglink_requests.RequestTracker()
+    tracker.begin(stopped)
+    assert tracker.poll_interval(now=20.0) == wglink_requests.POLL_QUIET_SECONDS
+
+    write(2, "preparing")
+    again = wglink_requests.poll(stopped, tmp_path, now=600.0)
+    assert wglink_requests.view(again, now=600.0)["headline"] == "Horn A · Preparing the simulation…"
+
+    write(3, "couldNotFinish", phase="preparing", failure={"recorded": True})
+    final = wglink_requests.poll(again, tmp_path, now=700.0)
+    write(4, "preparing")
+    assert wglink_requests.poll(final, tmp_path, now=700.0 + wglink_requests.RETRY_WATCH_SECONDS + 1) == final
+    tracker.begin(final)
+    assert tracker.poll_interval(now=700.0 + wglink_requests.RETRY_WATCH_SECONDS + 1) is None
+
+
+def test_an_old_record_is_not_resumed(tmp_path: Path) -> None:
+    request = _submitted(tmp_path)
+    wglink_requests.save(tmp_path, request)
+
+    assert wglink_requests.load(tmp_path, now=2.0)["requestId"] == "req-1"
+    assert wglink_requests.load(tmp_path, now=2.0 + wglink_requests.RECORD_MAX_AGE_SECONDS) is None
+
+
+def test_a_quiet_request_resumes_at_start_up_without_opening_the_palette(
+    monkeypatch, tmp_path: Path
+) -> None:
+    fixture = _following(monkeypatch, tmp_path, "WGLink_palette_quiet_restart_a")
+    _claim(fixture, fixture.request_id)
+    _write_ack(fixture.ipc, fixture.request_id, _ack_payload(
+        fixture.request_id, "accepted", kind=SOLVE, manifestSha256=fixture.request["manifestSha256"]))
+    _tick(fixture)
+    record = wglink_requests.load(fixture.ipc)
+    record.update(quiet=True, heardAt=record["heardAt"] - wglink_requests.QUIET_SECONDS)
+    wglink_requests.save(fixture.ipc, record)
+    fixture.module.stop(None)
+    fixture.ui.palettes.items.clear()
+
+    second = _load_instance(monkeypatch, "WGLink_palette_quiet_restart_b", fixture.ui, fixture.app)
+    monkeypatch.setattr(second.wglink_workspace, "ipc_folder", lambda **_kwargs: fixture.ipc)
+    timers: list = []
+    monkeypatch.setattr(second, "_start_timer", lambda delay, function: timers.append((delay, function)))
+    second.run(None)
+    try:
+        assert second._requests.current()["requestId"] == fixture.request_id
+        assert fixture.ui.palettes.items == {}  # not opened by itself
+        assert [delay for delay, _function in timers] == [0.0]  # still looked at, slowly
+    finally:
+        second.stop(None)
+
+
+@pytest.mark.parametrize(("state", "extra", "headline", "actions"), [
+    ("couldNotFinish", {"phase": "solving", "failure": {"recorded": True}},
+     "Waveguide Generator could not finish solving Horn A. This has been recorded for the developers.",
+     ["openWg"]),
+    ("cancelled", {"cancelReason": "replaced"}, "Horn A · Replaced by a newer solve.", ["openWg"]),
+    ("refused", {"failure": {"recorded": False, "message": "Select at least one source face."}},
+     "Waveguide Generator could not take Horn A.", ["openWg"]),
+])
+def test_wgs_endings_in_the_palette(monkeypatch, tmp_path: Path, state, extra, headline, actions) -> None:
+    fixture = _following(monkeypatch, tmp_path, f"WGLink_palette_end_{state}")
+    _status(fixture, state, 1, **extra)
+
+    shown = _tick(fixture)
+
+    assert shown["headline"] == headline and _ids(shown) == actions
+    assert shown["terminal"] is True and shown["busy"] is False
+    assert fixture.ui.messages == []
+    assert fixture.module._recent_outcomes[-1]["outcome"] == state
+
+
+@pytest.mark.parametrize("local", ["notTaken", "takenUnconfirmed"])
+def test_the_add_ins_own_waits_in_the_palette(monkeypatch, tmp_path: Path, local: str) -> None:
+    fixture = _following(monkeypatch, tmp_path, f"WGLink_palette_wait_{local}")
+    if local == "notTaken":
+        monkeypatch.setattr(fixture.module.wglink_inbox, "SOLVE_PICKUP_NOTICE_SECONDS", 0.0)
+    else:
+        _claim(fixture, fixture.request_id)
+        monkeypatch.setattr(fixture.module.wglink_inbox, "ACK_WAIT_SECONDS", 0.0)
+
+    shown = _tick(fixture)
+
+    assert fixture.module._requests.current()["local"] == local
+    assert _ids(shown) == ["openWg", "sendAgain"] and shown["terminal"] is False
+    assert fixture.ui.messages == []
+
+
+def test_a_request_that_was_not_sent_is_recorded(monkeypatch, tmp_path: Path) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_palette_not_sent")
+    monkeypatch.setattr(fixture.module.wglink_send, "send",
+                        lambda *_a, **_k: (_ for _ in ()).throw(fixture.module.wglink_core.WgLinkError("no")))
+
+    _run(fixture.module, "solve")
+
+    assert wglink_requests.load(fixture.ipc)["local"] == wglink_requests.NOT_SENT
+    assert _palette(fixture).load()["headline"] == "Horn A was not sent to Waveguide Generator."
+
+
+# -- the host: palettes that fail, reload, or already exist ----------------------
+
+
+def test_without_html_palettes_there_is_no_dialog_held_open(monkeypatch, tmp_path: Path) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_palette_fallback")
+    _advertise_acks(fixture.ipc)
+    _advertise_status(fixture.ipc)
+    monkeypatch.setattr(fixture.ui.palettes, "add",
+                        lambda *_a: (_ for _ in ()).throw(RuntimeError("no HTML palettes")))
+    _run(fixture.module, "solve")
+    [request] = _inbox(fixture.ipc)
+    fixture.request, fixture.request_id = request, request["operationId"]
+    _status(fixture, "solving", 1)
+    due = list(fixture.timers)
+    fixture.timers.clear()
+    for _delay, function in due:
+        function()
+    _deliver_followups(fixture.module, fixture.app)
+
+    assert fixture.ui.progress_dialogs[1:] == []  # only the export's own, already hidden
+    assert any("Horn A · Solving" in line for line in fixture.ui.text_palette.written)
+    assert fixture.ui.messages == []
+
+    _status(fixture, "needsYou", 2, prompt={"nextStep": "Choose a mesh.", "options": [
+        {"id": "a", "label": "Solve anyway"}]})
+    due = list(fixture.timers)
+    fixture.timers.clear()
+    for _delay, function in due:
+        function()
+    _deliver_followups(fixture.module, fixture.app)
+    [(_title, text)] = fixture.ui.messages  # the one news worth a box
+    assert "needs you" in text and "Solve anyway" in text
+
+
+def test_a_reloaded_page_asks_again_and_gets_everything(monkeypatch, tmp_path: Path) -> None:
+    fixture = _following(monkeypatch, tmp_path, "WGLink_palette_reload")
+    palette = _palette(fixture)
+    palette.load()
+    palette.loaded = False  # Fusion is reloading the page
+    _status(fixture, "queued", 1)
+    due = list(fixture.timers)
+    fixture.timers.clear()
+    for _delay, function in due:
+        function()
+    _deliver_followups(fixture.module, fixture.app)
+    assert palette.dropped  # sent while it could not hear
+
+    assert palette.reload()["headline"] == "Horn A · Waiting for the solver to start."
+
+
+def test_a_palette_left_by_an_earlier_registration_is_replaced(monkeypatch, tmp_path: Path) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_palette_duplicate")
+    stale = fixture.ui.palettes.add("hornlab_wglink_requests", "Waveguide Generator", "file:///old", True)
+
+    _run(fixture.module, "send")
+
+    assert stale.isValid is False
+    assert _palette(fixture) is not stale and _palette(fixture).isVisible is True
+
+
+def test_stop_waits_for_a_look_in_progress_and_nothing_follows_it(monkeypatch, tmp_path: Path) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_palette_stop_mid_look", real_timers=True)
+    module = fixture.module
+    _advertise_acks(fixture.ipc)
+    _advertise_status(fixture.ipc)
+    module.run(None)
+    entered, release = threading.Event(), threading.Event()
+    real_poll = module.wglink_requests.poll
+
+    def slow_poll(*args, **kwargs):
+        entered.set()
+        release.wait(5.0)
+        return real_poll(*args, **kwargs)
+
+    monkeypatch.setattr(module.wglink_requests, "poll", slow_poll)
+    monkeypatch.setattr(module.wglink_requests, "POLL_VISIBLE_SECONDS", 0.01)
+    _run(module, "solve")
+    assert entered.wait(5.0)
+    look = [timer for timer in module._timers if timer.is_alive()]
+    fixture.app.fired.clear()
+    threading.Timer(0.2, release.set).start()
+
+    module.stop(None)
+
+    assert not any(timer.is_alive() for timer in look)
+    assert module._timers == [] and module._request_poll_armed is False
+    assert module._start_timer(0.0, lambda: None) is None  # nothing re-arms behind stop()
+    assert module.FOLLOWUP_EVENT_ID not in fixture.app.fired
+
+
+def test_fusion_holds_events_while_a_modal_is_open(monkeypatch, tmp_path: Path) -> None:
+    from fusion_fakes import FusionEventLoop
+
+    fixture = _following(monkeypatch, tmp_path, "WGLink_palette_event_loop")
+    module = fixture.module
+    module.run(None)
+    try:
+        palette = _palette(fixture)
+        palette.load()
+        loop = FusionEventLoop(fixture.app)
+        monkeypatch.setattr(module, "_followup_app", types.SimpleNamespace(fireCustomEvent=loop.fire))
+        _status(fixture, "queued", 1)
+        with loop.modal():
+            due = list(fixture.timers)
+            fixture.timers.clear()
+            for _delay, function in due:
+                function()
+            assert loop.pump() == 0
+            assert palette.shown["headline"].startswith("Horn A · Sent to")
+        assert loop.pump() == 1
+        assert palette.shown["headline"] == "Horn A · Waiting for the solver to start."
+    finally:
+        module.stop(None)

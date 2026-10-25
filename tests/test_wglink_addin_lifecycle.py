@@ -24,7 +24,7 @@ import types
 
 import pytest
 
-from fusion_fakes import FakePalettes
+from fusion_fakes import FakePalettes, MainThreadOnly
 
 
 ADDIN = Path(__file__).resolve().parents[1] / "fusion-addins" / "WGLink" / "WGLink.py"
@@ -55,10 +55,16 @@ class _CustomEvent:
             self.handlers.remove(handler)
 
 
-class _Application:
-    """Enough Application surface for the watcher's registration dance."""
+class _Application(MainThreadOnly):
+    """Enough Application surface for the watcher's registration dance.
+
+    Main-thread only, as Fusion's is, except ``fireCustomEvent``.
+    """
+
+    _THREAD_SAFE = frozenset({"fireCustomEvent"})
 
     def __init__(self, ui: "_UI") -> None:
+        super().__init__()
         self.userInterface = ui
         self.events: dict[str, _CustomEvent] = {}
         self.fired: list[str] = []
@@ -80,7 +86,7 @@ class _Application:
         return self.events.pop(event_id, None) is not None
 
     def fireCustomEvent(self, event_id: str, _payload: str = "") -> bool:
-        self.fired.append(event_id)
+        object.__getattribute__(self, "fired").append(event_id)
         return True
 
 
@@ -262,7 +268,7 @@ class _Palette:
         self.written.append(text)
 
 
-class _UI:
+class _UI(MainThreadOnly):
     def __init__(
         self,
         panels: _Panels,
@@ -270,6 +276,7 @@ class _UI:
         *,
         dialog_result: object | None = None,
     ) -> None:
+        super().__init__()
         self.commandDefinitions = definitions
         self.messages: list[tuple[str, str]] = []
         self.dialog_result = dialog_result
@@ -3821,7 +3828,10 @@ def test_a_blocked_delivery_does_not_starve_heartbeat_scheduling(
 
     monkeypatch.setattr(module.wglink_status, "write_fusion_status_payload", blocked_write)
     stop = threading.Event()
-    publisher = threading.Thread(target=module._publish_fusion_status, daemon=True)
+    # The snapshot is read on the main thread, as the tick does; only the
+    # delivery runs on the blocked thread (Fusion objects are main-thread only).
+    snapshot = module._fusion_snapshot()
+    publisher = threading.Thread(target=module._publish_fusion_status, args=(snapshot,), daemon=True)
     carrier = threading.Thread(
         target=module._watch_loop, args=(app, stop), daemon=True
     )

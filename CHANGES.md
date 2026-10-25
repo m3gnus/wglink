@@ -9,9 +9,10 @@
   opens by itself only when WG needs you; **Requests…** in the panel reopens
   it. Technical details sit under its collapsed Diagnostics.
 - Pressing Send or Solve again for an unchanged model while its request is
-  under way shows that request instead of sending it twice; the palette's
-  **Send again** sends a new one. A restarted add-in resumes following the
-  request without sending it again.
+  under way asks whether to send it again or show its progress; a changed
+  model, or the palette's **Send again**, sends at once. A request WG stops
+  reporting on says so calmly, with Open Waveguide Generator and Solve again.
+  A restarted add-in resumes following the request without sending it again.
 - The OK buttons read **Send** and **Solve**, and the commands say what each
   does: Send opens the model in WG and does not solve.
 

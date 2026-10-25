@@ -381,44 +381,157 @@ def test_a_refusal_is_an_answer_and_is_never_retried(monkeypatch, tmp_path: Path
     assert calls == []  # Refused before exporting or planning an inbox write.
 
 
-def test_pressing_send_again_on_the_same_model_shows_the_request_under_way(
-    monkeypatch, tmp_path: Path
+def _press(module, operation: str, *, force_new: bool = False) -> None:
+    """A press of OK in the Send or Solve dialog (``force_new``: the dialog the
+    palette's "Send again" opened)."""
+
+    handler = module.CommandExecuteHandler(operation)
+    handler.force_new = force_new
+    handler.notify(types.SimpleNamespace(command=types.SimpleNamespace(commandInputs=_dialog_inputs())))
+
+
+@pytest.mark.parametrize("operation", ["send", "solve"])
+def test_a_repeat_press_of_the_same_model_asks_and_no_shows_progress(
+    monkeypatch, tmp_path: Path, operation: str
 ) -> None:
-    fixture = _transfer(monkeypatch, tmp_path, "WGLink_send_twice")
+    fixture = _transfer(monkeypatch, tmp_path, f"WGLink_repeat_no_{operation}")
+    _press(fixture.module, operation)
+    [first] = _inbox(fixture.ipc)
+    _palette(fixture).close()
+    fixture.ui.dialog_result = "no"
 
-    _run(fixture.module, "send")
-    _run(fixture.module, "send")
+    _press(fixture.module, operation)
 
-    assert len(_inbox(fixture.ipc)) == 1
+    [(title, question)] = fixture.ui.messages
+    assert title == "Waveguide Generator"
+    assert ("already working on Horn A" if operation == "solve" else "still on its way") in question
+    assert "Yes:" in question and "No: Show its progress." in question
+    assert _inbox(fixture.ipc) == [first]  # nothing sent, nothing lost
     assert _palette(fixture).isVisible is True
 
-    # "Send again" in the palette is a deliberate new request.
-    fixture.module._force_new_request = True
-    _run(fixture.module, "send")
-    assert len({payload["operationId"] for payload in _inbox(fixture.ipc)}) == 2
+
+def test_a_repeat_press_answered_yes_sends_again_and_takes_back_the_untaken_one(
+    monkeypatch, tmp_path: Path
+) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_repeat_yes")
+    _press(fixture.module, "solve")
+    [first] = _inbox(fixture.ipc)
+    fixture.ui.dialog_result = "yes"
+
+    _press(fixture.module, "solve")
+
+    assert len(fixture.ui.messages) == 1  # asked once
+    [second] = _inbox(fixture.ipc)  # the first, never picked up, was taken back
+    assert second["operationId"] != first["operationId"]
+    assert fixture.module._requests.current()["requestId"] == second["operationId"]
+
+
+def test_a_press_without_a_question_box_still_sends(monkeypatch, tmp_path: Path) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_repeat_no_box")
+    _press(fixture.module, "send")
+    monkeypatch.setattr(fixture.ui, "messageBox", None)
+
+    _press(fixture.module, "send")
+
+    assert fixture.module._requests.current()["requestId"] == _inbox(fixture.ipc)[-1]["operationId"]
+    assert fixture.module._requests.current()["local"] == "submitted"
+
+
+def test_the_palettes_send_again_does_not_ask(monkeypatch, tmp_path: Path) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_repeat_forced")
+    _press(fixture.module, "send")
+
+    _press(fixture.module, "send", force_new=True)
+
+    assert fixture.ui.messages == []
+    assert len({payload["operationId"] for payload in _inbox(fixture.ipc)}) == 1
+    assert fixture.module._requests.current()["requestId"] == _inbox(fixture.ipc)[0]["operationId"]
+
+
+def test_send_again_is_spent_by_one_dialog_and_never_outlives_it(monkeypatch, tmp_path: Path) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_repeat_spent")
+    module = fixture.module
+    _press(module, "solve")
+    executed: list[str] = []
+    fixture.ui.commandDefinitions.items["hornlab_wglink_solve"] = types.SimpleNamespace(
+        isValid=True, execute=lambda: executed.append("solve"))
+
+    module._request_action("sendAgain")
+    assert executed == ["solve"]
+    assert module._take_force_new_request("send") is False  # another command spends it
+    assert module._take_force_new_request("solve") is False  # and it is gone
+
+    module._request_action("sendAgain")
+    assert module._take_force_new_request("solve") is True
+    assert module._take_force_new_request("solve") is False  # one dialog only
+
+    # A dialog that was never opened leaves nothing behind.
+    fixture.ui.commandDefinitions.items["hornlab_wglink_solve"] = types.SimpleNamespace(
+        isValid=True, execute=lambda: (_ for _ in ()).throw(RuntimeError("busy")))
+    module._request_action("sendAgain")
+    assert module._force_new_request is None
+
+    # Nor does one the user cancelled long ago.
+    module._force_new_request = ("solve", time.monotonic() - 1.0)
+    assert module._take_force_new_request("solve") is False
 
 
 def test_a_press_after_the_request_finished_is_a_new_request(monkeypatch, tmp_path: Path) -> None:
     fixture = _transfer(monkeypatch, tmp_path, "WGLink_send_after_done")
 
-    _run(fixture.module, "send")
+    _press(fixture.module, "send")
     for path in (fixture.ipc / ".wg-solve-requests").iterdir():
         path.unlink()  # a WG without receipts took it: all it will ever say
     _fire_timers(fixture)
-    _run(fixture.module, "send")
+    _press(fixture.module, "send")
 
+    assert fixture.ui.messages == []  # nothing to ask about
     assert len(_inbox(fixture.ipc)) == 1  # the second request, waiting
     assert fixture.module._requests.current()["local"] == "submitted"
 
 
-def test_a_press_after_the_model_changed_is_a_new_request(monkeypatch, tmp_path: Path) -> None:
-    fixture = _transfer(monkeypatch, tmp_path, "WGLink_send_changed")
+def _moved_model(app, transform: list[float], *, parameter: str = "10 mm") -> None:
+    body = types.SimpleNamespace(entityToken="body-1", revisionId="rev-1", isVisible=True)
+    component = types.SimpleNamespace(bRepBodies=[body], attributes=None)
+    occurrence = types.SimpleNamespace(
+        component=component, fullPathName="Driver:1", isLightBulbOn=True,
+        transform2=types.SimpleNamespace(asArray=lambda: list(transform)))
+    root = types.SimpleNamespace(bRepBodies=[], allOccurrences=[occurrence], attributes=None)
+    app.activeProduct = types.SimpleNamespace(
+        objectType="adsk::fusion::Design", rootComponent=root,
+        timeline=types.SimpleNamespace(count=7),
+        allParameters=[types.SimpleNamespace(name="throat", expression=parameter, value=1.0)])
 
-    _run(fixture.module, "send")
-    fixture.app.activeDocument = types.SimpleNamespace(name="Horn B", isModified=True)
-    _run(fixture.module, "send")
 
-    assert len({payload["operationId"] for payload in _inbox(fixture.ipc)}) == 2
+@pytest.mark.parametrize("change", ["moved", "parameter"])
+def test_a_press_after_the_model_changed_never_asks(monkeypatch, tmp_path: Path, change: str) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, f"WGLink_send_changed_{change}")
+    monkeypatch.setattr(fixture.module, "_active_document_id", lambda: "doc-1")
+    _moved_model(fixture.app, [1.0] * 16)
+    _press(fixture.module, "solve")
+    first = fixture.module._requests.current()["requestId"]
+    if change == "moved":
+        _moved_model(fixture.app, [1.0] * 15 + [4.0])  # a joint moved the driver
+    else:
+        _moved_model(fixture.app, [1.0] * 16, parameter="12 mm")
+
+    _press(fixture.module, "solve")
+
+    assert fixture.ui.messages == []
+    assert fixture.module._requests.current()["requestId"] != first
+
+
+def test_the_same_model_pressed_again_is_asked_about(monkeypatch, tmp_path: Path) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_send_unchanged")
+    monkeypatch.setattr(fixture.module, "_active_document_id", lambda: "doc-1")
+    fixture.ui.dialog_result = "no"
+    _moved_model(fixture.app, [1.0] * 16)
+    _press(fixture.module, "solve")
+    fixture.app.activeDocument.isModified = True  # saving state is not a change
+
+    _press(fixture.module, "solve")
+
+    assert len(fixture.ui.messages) == 1
 
 
 # -- C6: the pickup check -------------------------------------------------------
@@ -485,7 +598,7 @@ def test_a_request_a_wg_without_receipts_took_ends_the_following(monkeypatch, tm
 
     assert fixture.ui.messages == []
     assert module._recent_outcomes[-1]["outcome"] == "taken"
-    assert "Follow progress in Waveguide Generator" in _palette(fixture).load()["headline"]
+    assert _palette(fixture).load()["headline"] == "Horn A · Waveguide Generator has it."
     assert module.wglink_activity.LOG.counts()["pickup_check"] == {"command:send": 1}
     assert fixture.timers == []  # nothing more to look at
 

@@ -29,12 +29,15 @@ class MainThreadOnly:
     """
 
     VIOLATIONS: list[str] = []
+    #: Members Fusion documents as callable from any thread.
+    _THREAD_SAFE: frozenset = frozenset()
 
     def __init__(self) -> None:
         object.__setattr__(self, "_main_thread", threading.get_ident())
 
     def _guard(self, name: str) -> None:
-        if not name.startswith("_") and threading.get_ident() != object.__getattribute__(self, "_main_thread"):
+        if (not name.startswith("_") and name not in type(self)._THREAD_SAFE
+                and threading.get_ident() != object.__getattribute__(self, "_main_thread")):
             MainThreadOnly.VIOLATIONS.append(name)
             raise RuntimeError(f"Fusion object used off the main thread: {name}")
 
@@ -96,6 +99,12 @@ class FakeHTMLPalette(MainThreadOnly):
             handler.notify(args)
         return args.returnData
 
+    def reload(self) -> dict | None:
+        """Fusion reloaded the page: it hears nothing until it says "ready" again."""
+
+        self.loaded = False
+        return self.load()
+
     def load(self) -> dict | None:
         """The page finished loading and asked for the state; what it was answered."""
 
@@ -142,6 +151,9 @@ class FakePalettes(MainThreadOnly):
     def add(self, palette_id: str, name: str, url: str, is_visible: bool = True,
             show_close_button: bool = True, is_resizable: bool = True,
             width: int = 0, height: int = 0, *_rest: object) -> FakeHTMLPalette:
+        if self.itemById(palette_id) is not None:
+            # Fusion refuses a second palette under an id still in use.
+            raise RuntimeError(f"palette id already in use: {palette_id}")
         palette = FakeHTMLPalette(palette_id, name, url, is_visible, width, height)
         self.items[palette_id] = palette
         self.added.append(palette)
@@ -161,3 +173,49 @@ class FlakyEvents:
         if isinstance(answer, BaseException):
             raise answer
         return bool(answer)
+
+
+class FusionEventLoop:
+    """Custom events as Fusion delivers them: queued, and handed to their
+    handlers only when the main thread pumps and no modal is open.
+
+    Install with ``app.fireCustomEvent = loop.fire``; ``modal()`` is a message
+    box held open, during which nothing is delivered.
+    """
+
+    def __init__(self, app: object) -> None:
+        self.app = app
+        self.queued: list[str] = []
+        self.modal_open = False
+
+    def fire(self, event_id: str, _payload: str = "") -> bool:
+        self.queued.append(event_id)
+        return True
+
+    def pump(self) -> int:
+        """Deliver what is queued; how many events reached a handler."""
+
+        if self.modal_open:
+            return 0
+        delivered = 0
+        queued, self.queued = self.queued, []
+        for event_id in queued:
+            event = self.app.events.get(event_id)
+            for handler in list(getattr(event, "handlers", [])):
+                handler.notify(types.SimpleNamespace(eventId=event_id))
+                delivered += 1
+        return delivered
+
+    class _Modal:
+        def __init__(self, loop: "FusionEventLoop") -> None:
+            self.loop = loop
+
+        def __enter__(self) -> "FusionEventLoop":
+            self.loop.modal_open = True
+            return self.loop
+
+        def __exit__(self, *_exc: object) -> None:
+            self.loop.modal_open = False
+
+    def modal(self) -> "FusionEventLoop._Modal":
+        return FusionEventLoop._Modal(self)
