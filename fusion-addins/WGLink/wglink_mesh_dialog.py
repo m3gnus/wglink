@@ -195,7 +195,7 @@ def _table_rows(state, kind):
     return list(state.sources) if kind == "source" else list(state.group_order)
 
 
-def _set_target(inputs, state, kind, row_id, *, notice=""):
+def _set_target(inputs, state, kind, row_id, *, notice="", focus_picker=True):
     """Point the one picker at a row: clear it, load that row's faces, focus it.
 
     The notice of an earlier action ends here, unless the retarget is itself
@@ -215,11 +215,42 @@ def _set_target(inputs, state, kind, row_id, *, notice=""):
         for table_id, table_kind in ((DRIVERS_TABLE, "source"), (ZONES_TABLE, "group")):
             table = inputs.itemById(table_id)
             table.selectedRow = (_table_rows(state, kind).index(row_id) if table_kind == kind else -1)
-        picker.hasFocus = True
+        if focus_picker:
+            picker.hasFocus = True
     finally:
         state.restoring = restoring
     inputs.itemById("mesh_target").formattedText = (
         f"Picking faces for: <b>{html.escape(_row_label(kind, record))}</b>")
+
+
+def _selected_row_changed(inputs, state, kind, row_id, *, focus_picker=True):
+    """One row-selection path for table events and their child-cell events."""
+    if _rows(state, kind)[row_id].get("instance_id"):
+        # A linked row can be highlighted, but cannot take ownership of picks.
+        _set_target(inputs, state, *state.target, notice=state.notice, focus_picker=False)
+    elif state.target != (kind, row_id):
+        _set_target(inputs, state, kind, row_id, focus_picker=focus_picker)
+
+
+def _row_cell_changed(inputs, state, input_id):
+    """Fusion reports the clicked table cell, not its TableCommandInput id.
+
+    Match the table's selected row too: programmatic count/label updates and
+    edits to another row's value must not silently move the face picker.
+    """
+    for kind, fields, table_id in (("source", ("label", "count", "size"), DRIVERS_TABLE),
+                                    ("group", ("name", "count", "size"), ZONES_TABLE)):
+        for field in fields:
+            prefix = f"mesh_{kind}_{field}_"
+            if not input_id.startswith(prefix):
+                continue
+            row_id = int(input_id[len(prefix):])
+            rows = _table_rows(state, kind)
+            if row_id in rows and inputs.itemById(table_id).selectedRow == rows.index(row_id):
+                _selected_row_changed(inputs, state, kind, row_id,
+                                      focus_picker=field not in ("name", "size"))
+            return True
+    return False
 
 
 def _read_zone_names(inputs, state):
@@ -724,11 +755,9 @@ class MeshInputChangedHandler(adsk.core.InputChangedEventHandler):
                 rows = _table_rows(state, kind)
                 selected = args.input.selectedRow
                 if 0 <= selected < len(rows):
-                    row = rows[selected]
-                    if _rows(state, kind)[row].get("instance_id"):
-                        _set_target(inputs, state, *state.target, notice=state.notice)
-                    elif state.target != (kind, row):
-                        _set_target(inputs, state, kind, row)
+                    _selected_row_changed(inputs, state, kind, rows[selected])
+            elif _row_cell_changed(inputs, state, input_id):
+                pass
             elif input_id.startswith("mesh_pick_"):
                 kind, row = input_id[len("mesh_pick_"):].rsplit("_", 1)
                 if state.target != (kind, int(row)):

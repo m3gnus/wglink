@@ -181,6 +181,35 @@ def test_row_buttons_and_row_clicks_retarget_the_one_picker_and_edits_do_not(sce
     assert reopened[f"mesh_group_size_{side}"].value == 3
 
 
+@pytest.mark.parametrize("kind,field", [
+    ("source", "label"), ("source", "count"), ("source", "size"),
+    ("group", "name"), ("group", "count"), ("group", "size"),
+])
+def test_native_child_cell_events_target_the_highlighted_row(scene, kind, field):
+    inputs, items, state = build(scene)
+    zone = add_zone(scene, inputs, items, state)
+    target(scene, inputs, items, state, "source", HF)
+    row = MF if kind == "source" else zone
+    table = items["mesh_sources_table" if kind == "source" else "mesh_groups_table"]
+    order = list(state.sources) if kind == "source" else state.group_order
+    table.selectedRow = order.index(row)
+    cell = items[f"mesh_{kind}_{field}_{row}"]
+    inputs.command.focused = cell
+    # Real Fusion emits the child id (observed for label/count), not a table event.
+    change(scene, inputs, items, state, cell.id)
+    assert state.target == (kind, row)
+    assert items["mesh_faces"]._entities == faces_of(state, kind, row)
+    other = items["mesh_groups_table" if kind == "source" else "mesh_sources_table"]
+    assert other.selectedRow == -1
+    if field in ("name", "size"):
+        assert inputs.command.focused is cell  # typing must keep keyboard focus
+    else:
+        assert items["mesh_faces"].hasFocus
+    # Programmatic refresh of another row's count cannot take the picker back.
+    change(scene, inputs, items, state, f"mesh_source_count_{HF}")
+    assert state.target == (kind, row)
+
+
 def _dialog_command(inputs):
     class Event:
         def __init__(self):
@@ -466,6 +495,27 @@ def test_linked_sources_are_read_only_and_keep_their_faces(scene, monkeypatch):
     assert faces_of(state, "source", row) == [scene.faces[0]]
     assert faces_of(state, "source", HF) == [] and items["mesh_faces"]._entities == []
     assert state.notice == "HF – high-frequency driver (from the Waveguide Generator design) keeps its faces; change them in Waveguide Generator."
+
+
+@pytest.mark.parametrize("field", ["label", "count", "size"])
+def test_linked_child_cell_events_never_take_ownership_of_the_picker(scene, monkeypatch, field):
+    module = scene.module
+    original = module.wglink_send.preflight_scope
+    def linked(app, options, *, authoring_context):
+        result = original(app, options, authoring_context=authoring_context)
+        authoring_context["sources"][0]["instance_id"] = "linked-design"
+        return result
+    monkeypatch.setattr(module.wglink_send, "preflight_scope", linked)
+    inputs, items, state = build(scene)
+    row = next(row for row, record in state.sources.items() if record.get("instance_id"))
+    prior = state.target
+    table = items["mesh_sources_table"]
+    table.selectedRow = list(state.sources).index(row)
+    change(scene, inputs, items, state, f"mesh_source_{field}_{row}")
+    assert state.target == prior
+    assert table.selectedRow == list(state.sources).index(prior[1])
+    assert faces_of(state, "source", row) == [scene.faces[0]]
+    assert items["mesh_faces"]._entities == []
 
 
 def test_custom_size_and_clearing_a_driver_and_restoring_guard(scene):
