@@ -719,7 +719,8 @@ def test_an_unread_document_refuses_a_handoff_rather_than_inserting(
     })
 
     assert inserted == []
-    assert "could not read this Fusion document's WG links" in fixture.ui.messages[-1][1]
+    assert "could not use Horn" in fixture.ui.messages[-1][1]
+    assert "Send the model from WG again" in fixture.ui.messages[-1][1]
 
 
 # -- scenarios: nothing between commands with the gate off; the tick with it on -
@@ -864,7 +865,7 @@ def test_a_cad_link_folder_that_no_longer_exists_is_named_at_command_time(
     _command(module, "send")
 
     title, text = ui.messages[-1]
-    assert title == "Waveguide Generator refused"
+    assert title == "Waveguide Generator"
     assert "no longer exists" in text
     assert str(gone) in text
     assert "Settings → CAD Link" in text
@@ -1151,7 +1152,7 @@ def test_a_refused_send_still_publishes_status_after_the_command(
     module.run(None)
     try:
         _command(module, "send")  # WG stops collecting after the export, before delivery
-        assert fixture.ui.messages[-1][0] == "Waveguide Generator refused"
+        assert fixture.ui.messages[-1][0] == "Waveguide Generator"
         _deliver_every_event(fixture.app)
         assert _count(module, "status_publication", "command:send") == 1
 

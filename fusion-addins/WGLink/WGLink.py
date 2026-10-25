@@ -820,7 +820,7 @@ def _send_backend_options() -> dict[str, object]:
     # so overwriting one loses evidence.
     output = wglink_workspace.return_folder()
     if output is None:
-        raise wglink_text.problem("workspace", _no_workspace_text())
+        raise wglink_text.UserFacing("workspace", _no_workspace_text())
     return {
         "output_folder": str(output),
         "capture_document": wglink_workspace.capture_document(),
@@ -1204,7 +1204,7 @@ def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[s
     ipc = wglink_workspace.ipc_folder(create=True)
     workspace = wglink_workspace.workspace_root()
     if ipc is None or workspace is None:
-        raise wglink_text.problem("workspace", _no_workspace_text(action))
+        raise wglink_text.UserFacing("workspace", _no_workspace_text(action))
     bundle = Path(str(report.get("bundle_path") or ""))
     not_asked = (
         "This model was saved, but Waveguide Generator has not received it. "
@@ -1502,7 +1502,7 @@ def _require_compatible_wg(*, wg_inbox: bool = False) -> None:
     try:
         if ipc is None:
             if wglink_workspace.missing_workspace() is not None:
-                raise wglink_text.problem("workspace", _no_workspace_text())
+                raise wglink_text.UserFacing("workspace", _no_workspace_text())
             raise wglink_inbox.WgNotCollectingError(wglink_inbox.WG_NOT_COLLECTING_MESSAGE)
         if wg_inbox:
             wglink_inbox.require_wg_delivery(ipc)
