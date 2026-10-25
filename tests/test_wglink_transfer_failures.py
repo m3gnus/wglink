@@ -1073,12 +1073,53 @@ def test_a_request_left_waiting_across_a_restart_is_reported_once_at_start_up(
             assert cause in text
         assert "solve" not in text.lower() and "send" not in text.lower()
         assert _startup_checks(fixture.module) == {"startup": 1}
-        # Checked at once, because both were already past the window: no timer.
+        # Both were reported immediately. History recovery may also schedule
+        # its own look; delivering it must not repeat the startup notice.
+        _fire_timers(fixture)
+        _deliver_followups(fixture.module, fixture.app)
+        assert [text for title, text in fixture.ui.messages if title == _WAITING] == waiting
+        assert _startup_checks(fixture.module) == {"startup": 1}
         assert fixture.timers == []
         # Nothing was moved or dropped.
         assert len(_inbox(fixture.ipc)) == 2
     finally:
         fixture.module.stop(None)
+
+
+@pytest.mark.parametrize("coordination", [False, None], ids=["off", "on"])
+@pytest.mark.parametrize("kind", [SNAPSHOT, SOLVE], ids=["send", "solve"])
+def test_a_waiting_request_in_history_is_reported_by_the_palette_without_a_second_notice(
+    monkeypatch, tmp_path: Path, coordination: bool | None, kind: str
+) -> None:
+    fixture = _start(monkeypatch, tmp_path, f"WGLink_restart_followed_{coordination}_{kind}",
+                     coordination=coordination)
+    module = fixture.module
+    monkeypatch.setattr(module, "_active_document_id", lambda: "doc-1")
+    path = _leave_request(fixture.ipc, "followed-1", kind=kind)
+    before = path.read_bytes()
+    request = module.wglink_requests.new_request(
+        "followed-1", kind, "Horn", document_id="doc-1", now=time.time() - 3600)
+    request = module.wglink_requests.submitted(
+        request, manifest_sha256=FIELDS["manifest_sha256"], acknowledgement=False,
+        request_status=False, confirmed=True, now=time.time() - 3600)
+    module.wglink_requests.save(fixture.ipc, {"schema": 1, "entries": [request]})
+
+    module.run(None)
+    try:
+        palette = fixture.ui.palettes.items["hornlab_wglink_requests"]
+        assert palette.isVisible
+        shown = palette.load()
+        assert "has not picked up" in shown["headline"]
+        assert len(shown["entries"]) == 1
+        _fire_timers(fixture)
+        _deliver_followups(module, fixture.app)
+        assert palette.shown == shown
+        assert _WAITING not in [title for title, _text in fixture.ui.messages]
+        assert _startup_checks(module) == {"startup": 1}  # the tracker's look only
+        assert [entry["requestId"] for entry in module._requests.entries()] == ["followed-1"]
+        assert path.read_bytes() == before and len(_inbox(fixture.ipc)) == 1
+    finally:
+        module.stop(None)
 
 
 def test_the_start_up_re_check_reads_the_inbox_and_nothing_in_fusion(
@@ -1116,7 +1157,9 @@ def test_a_request_younger_than_the_window_gets_the_rest_of_its_minute(
     module.run(None)
     try:
         assert _WAITING not in [title for title, _text in fixture.ui.messages]
-        [(delay, _function)] = fixture.timers
+        # Recovery's immediate history look is independent of the one pickup
+        # check, which must still give the youngest request its full minute.
+        [delay] = [delay for delay, _function in fixture.timers if delay > 0]
         window = module.wglink_inbox.SOLVE_PICKUP_NOTICE_SECONDS
         assert window - 25.0 < delay <= window - 20.0 + 1.0
         _fire_timers(fixture)
@@ -1124,6 +1167,10 @@ def test_a_request_younger_than_the_window_gets_the_rest_of_its_minute(
         waiting = [text for title, text in fixture.ui.messages if title == _WAITING]
         assert len(waiting) == 1 and waiting[0].startswith("2 request(s)")
         assert _startup_checks(module) == {"startup": 1}
+        _fire_timers(fixture)
+        _deliver_followups(module, fixture.app)
+        assert [text for title, text in fixture.ui.messages if title == _WAITING] == waiting
+        assert len(_inbox(fixture.ipc)) == 2
     finally:
         module.stop(None)
 
@@ -1149,7 +1196,7 @@ def test_control_a_request_wg_takes_before_the_check_is_not_reported(
         module.stop(None)
 
 
-def test_nothing_waiting_means_no_check_no_timer_and_no_notice(monkeypatch, tmp_path: Path) -> None:
+def test_nothing_waiting_means_no_pickup_check_or_notice(monkeypatch, tmp_path: Path) -> None:
     fixture = _start(monkeypatch, tmp_path, "WGLink_restart_nothing", coordination=False)
     inbox = fixture.ipc / ".wg-solve-requests"
     inbox.mkdir()
@@ -1167,6 +1214,9 @@ def test_nothing_waiting_means_no_check_no_timer_and_no_notice(monkeypatch, tmp_
 
     fixture.module.run(None)
     try:
+        assert _WAITING not in [title for title, _text in fixture.ui.messages]
+        _fire_timers(fixture)
+        _deliver_followups(fixture.module, fixture.app)
         assert _WAITING not in [title for title, _text in fixture.ui.messages]
         assert fixture.timers == []
         assert _startup_checks(fixture.module) == {}
