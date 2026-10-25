@@ -139,3 +139,15 @@ def test_body_revision_visibility_placement_and_parameters_invalidate_learning(m
     assert send_module.mesh_geometry_key(design, [body]) != first
     body.revisionId = ''
     assert send_module.mesh_geometry_key(design, [body]) is None
+
+
+def test_matching_evidence_can_reduce_a_drawn_half_further_without_double_reducing(tmp_path):
+    mesh = protocol.default_mesh([])
+    estimate = {'full': 40000, 'half': 20000, 'quarter': 10000}
+    history.remember(tmp_path, 'solve1', 'sha256:one', 'doc', ['body'], mesh, [], estimate, drawn_fraction=.5)
+    status(tmp_path, fraction=.25)
+    learned = history.learn(tmp_path, 'doc', ['body'], mesh, [])
+    assert history.matching_fraction(learned) == .5
+    display = model.estimate_display(estimate, declared_reduced=True, learned=learned)
+    assert 'About 20,000 triangles' in display['text'] and '–' not in display['text']
+    assert learned['calibration']['estimated'] == 20000

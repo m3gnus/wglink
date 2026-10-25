@@ -228,7 +228,7 @@ def estimate_display(estimate: Mapping[str, Any], *, symmetry: str = "auto",
     fraction = history.matching_fraction(learned)
     single = symmetry == "off" or declared_reduced or fraction is not None
     full = estimate["full"]
-    count = full if symmetry == "off" or declared_reduced else round(full * (fraction or 1.0))
+    count = full if symmetry == "off" else round(full * (fraction or 1.0))
     if single:
         text = f"About {count:,} triangles for the part {protocol.APP_NAME} solves."
     else:
