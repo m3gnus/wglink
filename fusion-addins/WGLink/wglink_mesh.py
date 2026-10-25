@@ -265,6 +265,11 @@ def drawn_fraction(domain: Mapping[str, Any] | None, cuts: list, included: list)
     if domain.get('kind') in ('half', 'quarter'):
         return .5 if domain['kind'] == 'half' else .25
     ids = {row['object_id'] for row in included}
-    planes = {plane for plane in ('x0', 'y0') if ids and ids <=
-              {cut.get('body_object_id') for cut in cuts if cut.get('plane') == plane}}
+    covered = {}
+    for cut in cuts:
+        key = (cut.get('plane'), cut.get('kept_side'), cut.get('export_frame'))
+        covered.setdefault(key, set()).add(cut.get('body_object_id'))
+    # Two bodies cut on opposite sides together can still make a full model.
+    planes = {plane for (plane, _side, _frame), bodies in covered.items()
+              if plane in ('x0', 'y0') and ids and ids <= bodies}
     return .5 ** len(planes)

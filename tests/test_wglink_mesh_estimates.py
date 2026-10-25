@@ -160,3 +160,14 @@ def test_ceiling_counts_the_physical_quarter_once(drawn, least):
     assert (display['ceiling'] is not None) == (least > 22000)
     assert model.least_solved_fraction('auto', drawn) * estimate['full'] == least
     assert model.least_solved_fraction('off', drawn) == 1
+
+
+def test_opposite_side_cuts_on_different_bodies_do_not_claim_a_reduced_assembly():
+    included = [{'object_id': 'left'}, {'object_id': 'right'}]
+    cuts = [{'body_object_id': 'left', 'plane': 'x0', 'kept_side': 'negative', 'export_frame': 'root'},
+            {'body_object_id': 'right', 'plane': 'x0', 'kept_side': 'positive', 'export_frame': 'root'}]
+    assert model.drawn_fraction({}, cuts, included) == 1
+    cuts[0]['kept_side'] = 'positive'
+    assert model.drawn_fraction({}, cuts, included) == .5
+    cuts[0]['export_frame'] = 'selected-component'
+    assert model.drawn_fraction({}, cuts, included) == 1
