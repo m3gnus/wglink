@@ -407,6 +407,11 @@ def sources_mesh_baseline(context: Any) -> Callable[[Run], Iterator[None]]:
                 for entity in entities:
                     run.check("Fusion accepted a scripted pick", bool(picker.addSelection(entity)))
                 notify_changed(handler, picker)
+                try:
+                    # A user's click is followed by Fusion's preview; ask for it here.
+                    state.command.doExecutePreview()
+                except Exception as exc:  # noqa: BLE001
+                    run.result.setdefault("previewErrors", []).append(repr(exc))
 
             def save(state) -> Iterator[None]:
                 state.command.doExecute(True)
@@ -425,8 +430,13 @@ def sources_mesh_baseline(context: Any) -> Callable[[Run], Iterator[None]]:
             run.check("the picker starts on the HF row", state.target == ("source", hf))
             pick(handler, inputs, face)
             yield
-            step = record("HF face picked", inputs, hfFaces=len(faces_in(state, "source", hf)))
+            step = record("HF face picked", inputs, hfFaces=len(faces_in(state, "source", hf)),
+                          pickerCount=inputs.itemById(dialog_module.PICKER).selectionCount,
+                          previewFailure=getattr(state, "preview_failure", None))
             run.check("HF row holds the face", step["hfFaces"] == 1)
+            run.check("live: the picked face shows the HF colour before Save", step["faceAppearance"] == role_name,
+                      step["faceAppearance"])
+            run.check("live: the picker keeps the face through the preview", step["pickerCount"] == 1)
             yield from save(state)
             yield
             step = record("saved")
@@ -452,17 +462,20 @@ def sources_mesh_baseline(context: Any) -> Callable[[Run], Iterator[None]]:
             run.check("a new zone becomes the target", state.target == ("group", zone))
             pick(handler, inputs, side, face)
             yield
-            step = record("zone picks", inputs, notice=state.notice,
+            step = record("zone picks", inputs, notice=state.notice, sideAppearance=_appearance(side),
                           zoneFaces=len(faces_in(state, "group", zone)), hfFaces=len(faces_in(state, "source", hf)))
             run.check("the HF face moved into the zone", (step["zoneFaces"], step["hfFaces"]) == (2, 0), step)
             run.check("the move is announced", "Moved 1 face from HF" in state.notice, state.notice)
+
             click(handler, inputs, f"mesh_pick_source_{hf}")
             pick(handler, inputs, face)
             yield
-            step = record("HF face moved back", inputs, notice=state.notice,
+            step = record("HF face moved back", inputs, notice=state.notice, sideAppearance=_appearance(side),
                           zoneFaces=len(faces_in(state, "group", zone)), hfFaces=len(faces_in(state, "source", hf)))
             run.check("the face moved back to HF", (step["zoneFaces"], step["hfFaces"]) == (1, 1), step)
             group_name = wglink["wglink_author"].group_appearance_name(state.groups[zone]["group_id"])
+            run.check("live: both rows show their colours before Save",
+                      (step["faceAppearance"], step["sideAppearance"]) == (role_name, group_name), step)
             yield from save(state)
             yield
             step = record("saved with a zone", sideAppearance=_appearance(side))
@@ -470,8 +483,28 @@ def sources_mesh_baseline(context: Any) -> Callable[[Run], Iterator[None]]:
             run.check("zone face carries its zone appearance", step["sideAppearance"] == group_name,
                       step["sideAppearance"])
             run.check("still no message box", not messages, messages)
+
+            # 4. Live colour is only a preview: Cancel puts the face back.
+            other = min((f for f in _items(body.faces) if f not in (face, side)),
+                        key=lambda f: float(f.pointOnFace.x))
+            before_cancel = _appearance(other)
+            yield from open_dialog("cancel")
+            handler, state = latest_dialog_state(context, "MeshInputChangedHandler")
+            inputs = state.command.commandInputs
+            click(handler, inputs, f"mesh_pick_source_{driver_row(state, 'LF')}")
+            pick(handler, inputs, other)
+            yield
+            step = record("LF face picked, not saved", inputs, otherAppearance=_appearance(other))
+            run.check("live: the LF pick shows the LF colour",
+                      step["otherAppearance"] == wglink["wglink_author"].role_appearance_name("LF"), step["otherAppearance"])
             ui.terminateActiveCommand()
             yield
+            yield
+            step = record("cancelled", otherAppearance=_appearance(other))
+            run.check("Cancel removed the live colour", step["otherAppearance"] == before_cancel,
+                      (before_cancel, step["otherAppearance"]))
+            run.check("Cancel kept the saved colours",
+                      (step["faceAppearance"], _appearance(side)) == (role_name, group_name))
         finally:
             wglink["_message"] = original_message
             if document is not None:

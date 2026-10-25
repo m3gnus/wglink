@@ -1033,3 +1033,32 @@ def test_a_repeated_pick_report_keeps_the_move_notice(scene):
     assert state.notice.startswith("Moved 1 face")
     pick(scene, inputs, items, state, scene.faces[1])  # a new, plain pick clears it
     assert state.notice == ""
+
+
+def test_the_preview_paints_through_save_and_never_keeps_a_result(scene):
+    module = scene.module
+    dialog = module.wglink_mesh_dialog
+    inputs, items = _building_inputs(module, phase="commandCreated")
+    events = []
+    command = types.SimpleNamespace(commandInputs=inputs, executePreview=types.SimpleNamespace(add=events.append))
+    state = dialog.MeshDialogState()
+    state.command = command
+    dialog._build_mesh_dialog(inputs, state)
+    [preview] = events
+    assert preview in module._handlers
+    args = types.SimpleNamespace(command=command, isValidResult=True)
+    preview.notify(args)  # before activation: nothing to show yet
+    assert args.isValidResult is False and scene.faces[1].override is None
+    inputs.activate()
+    dialog.MeshDialogActivateHandler(state).notify(types.SimpleNamespace(command=command))
+    target(scene, inputs, items, state, "source", MF)
+    pick(scene, inputs, items, state, scene.faces[1])
+    preview.notify(args)
+    # Fusion rolls this back before Save or Cancel; here it shows Save's colour.
+    assert scene.faces[1].appearance.name == "MF" and args.isValidResult is False
+    target(scene, inputs, items, state, "source", HF)
+    unpick(scene, inputs, items, state, scene.faces[0])
+    target(scene, inputs, items, state, "source", MF)
+    unpick(scene, inputs, items, state, scene.faces[1])
+    preview.notify(args)  # nothing drives the model: no colours, no error box
+    assert state.preview_failure and scene.ui.messages == []

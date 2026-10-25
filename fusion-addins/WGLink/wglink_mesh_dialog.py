@@ -59,6 +59,8 @@ class MeshDialogState:
         self.notice = ""
         # Read-only texts as last set, so an unchanged text is not set again.
         self.shown = {}
+        # The live Command (set by WGLink.py before construction).
+        self.command = None
 
 
 PICKER = "mesh_faces"
@@ -286,6 +288,11 @@ MESH_DIALOG_RETRY = "Close and reopen Sources & Mesh… to retry before saving."
 
 
 def _build_mesh_dialog(inputs, state):
+    preview = getattr(state.command, "executePreview", None)
+    if preview is not None:
+        handler = MeshPreviewHandler(state)
+        preview.add(handler)
+        host._handlers.append(handler)
     state.restoring = True
     try:
         design = wglink_core._design(host._app())
@@ -646,6 +653,31 @@ class MeshInputChangedHandler(adsk.core.InputChangedEventHandler):
             host._report_error("Updating Sources & Mesh…", f"{host.PANEL_NAME} error", exc)
         finally:
             self.state.restoring = False
+
+
+class MeshPreviewHandler(adsk.core.CommandEventHandler):
+    """Show the colours Save would paint, while the dialog is open.
+
+    It runs the Save itself (``_apply_mesh_dialog``: the same writers and
+    journal) inside Fusion's preview, which Fusion rolls back before the next
+    preview, before Save and on Cancel. ``isValidResult`` stays False so Save
+    always runs for real. Settings that cannot be saved yet simply show no
+    colours; the dialog's own validation explains why.
+    """
+
+    def __init__(self, state):
+        super().__init__()
+        self.state = state
+
+    def notify(self, args):
+        args.isValidResult = False
+        state = self.state
+        if state.construction_failed or not state.activated or state.restoring:
+            return
+        try:
+            _apply_mesh_dialog(args.command.commandInputs, state)
+        except Exception as exc:  # noqa: BLE001 - a preview never interrupts the user
+            state.preview_failure = repr(exc)
 
 
 class MeshValidateInputsHandler(adsk.core.ValidateInputsEventHandler):
