@@ -93,7 +93,7 @@ class Runner:
             if self.run is not None:
                 self._advance()
         except Exception:  # noqa: BLE001 - the runner itself must never raise into Fusion
-            self.log(f"[WGLink dev tests] runner error:\n{traceback.format_exc()}")
+            self.log(f"[dev tests] runner error:\n{traceback.format_exc()}")
 
     def _start_next(self) -> None:
         try:
@@ -120,7 +120,7 @@ class Runner:
                 self._finish(run)
                 continue
             self.run, self.steps, self.ticks = run, scenario(run), 0
-            self.log(f"[WGLink dev tests] started {run.scenario} ({run.id})")
+            self.log(f"[dev tests] started {run.scenario} ({run.id})")
             return
 
     def _advance(self) -> None:
@@ -150,7 +150,7 @@ class Runner:
     def _finish(self, run: Run) -> None:
         run.result["finishedAt"] = _now()
         write_json(self.results / f"{run.id}.json", run.result)
-        self.log(f"[WGLink dev tests] {run.scenario} ({run.id}): {run.result['status']}")
+        self.log(f"[dev tests] {run.scenario} ({run.id}): {run.result['status']}")
 
 
 class Watcher:
@@ -218,8 +218,8 @@ def _appearance(face: Any) -> str | None:
         return None
 
 
-def snapshot(design: Any) -> dict[str, Any]:
-    """What the spike must leave untouched, keyed by position, not token."""
+def snapshot(design: Any, attribute_group: str) -> dict[str, Any]:
+    """What a scenario must leave untouched, keyed by position, not token."""
 
     faces = {}
     for body_index, body in enumerate(_bodies(design)):
@@ -230,7 +230,7 @@ def snapshot(design: Any) -> dict[str, Any]:
                 source = None
             faces[f"{body_index}:{getattr(body, 'name', '?')}:{face_index}"] = [source, _appearance(face)]
     attributes = []
-    for attribute in _items(design.findAttributes("WGLink", "")):
+    for attribute in _items(design.findAttributes(attribute_group, "")):
         attributes.append([str(getattr(attribute, "name", "")), str(getattr(attribute, "value", ""))])
     timeline = getattr(design, "timeline", None)
     try:
@@ -344,7 +344,8 @@ def sources_mesh_baseline(context: Any) -> Callable[[Run], Iterator[None]]:
         source_id = wglink["COMMANDS"]["source"][0]
         role_name = wglink["wglink_author"].role_appearance_name("HF")
         user_document = app.activeDocument
-        user_before = snapshot(context.design()) if user_document is not None else None
+        group = wglink["wglink_core"].ATTRIBUTE_GROUP
+        user_before = snapshot(context.design(), group) if user_document is not None else None
         messages: list[list[str]] = []
         original_message = wglink["_message"]
         wglink["_message"] = lambda text, title="": messages.append([str(title), str(text)])
@@ -440,7 +441,7 @@ def sources_mesh_baseline(context: Any) -> Callable[[Run], Iterator[None]]:
                     run.result["scratchClosed"] = repr(exc)
         if user_before is not None:
             yield
-            changes = _diff(user_before, snapshot(context.design()))
+            changes = _diff(user_before, snapshot(context.design(), group))
             run.check("the user's own document is unchanged", not changes, changes[:20])
 
     return scenario

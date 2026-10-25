@@ -84,6 +84,7 @@ def test_dialogs_notifications_and_error_literals_have_no_old_display_name():
         ("WGLink.py", "WGLinkPickupCheck"): 1,
         ("WGLink.py", "WGLinkOwnerCandidate"): 1,
         ("WGLink.py", "WGLinkFileRequests"): 1,
+        ("wglink_dev_tests.py", "WGLinkDevTests"): 1,  # dev-only runner thread
         ("wglink_core.py", "WGLink"): 1,  # persisted attribute group
         ("wglink_launcher.py", "WGLinkOwnerProbe"): 1,
         ("wglink_launcher.py", "WGLinkBackendAdmission"): 1,
