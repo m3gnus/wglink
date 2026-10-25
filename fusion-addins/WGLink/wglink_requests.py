@@ -588,7 +588,9 @@ def load(ipc: Path, *, now: float | None = None) -> dict[str, Any] | None:
 
 
 def can_show(ipc: Path) -> bool:
-    capabilities = wglink_inbox._read_json(Path(ipc) / wglink_inbox.CAPABILITIES_FILENAME) or {}
+    capabilities = wglink_inbox._read_json(Path(ipc) / wglink_inbox.CAPABILITIES_FILENAME)
+    if not isinstance(capabilities, dict):
+        return False
     return (type(capabilities.get(wglink_protocol.SHOW_REQUEST_CAPABILITY)) is int
             and capabilities[wglink_protocol.SHOW_REQUEST_CAPABILITY] == 1)
 

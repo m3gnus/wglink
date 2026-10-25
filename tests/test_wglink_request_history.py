@@ -81,6 +81,9 @@ def test_show_request_capability_and_one_pointer_per_press(tmp_path):
     assert requests.show_request(tmp_path, request) is None
     assert not (tmp_path / protocol.SHOW_REQUESTS_DIRECTORY).exists()
     path = tmp_path / "wg-capabilities.json"
+    for malformed in (None, ["showRequest"], "showRequest"):
+        path.write_text(json.dumps(malformed))
+        assert not requests.can_show(tmp_path)
     for value in (True, "1", 0, 2):
         path.write_text(json.dumps({protocol.SHOW_REQUEST_CAPABILITY: value}))
         assert requests.show_request(tmp_path, request) is None
