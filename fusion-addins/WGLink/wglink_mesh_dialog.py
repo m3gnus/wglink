@@ -239,10 +239,15 @@ def _picked(inputs, state):
             label = _row_label(owner_kind, owner)
             moved[label] = moved.get(label, 0) + 1
         kept.append(face)
+    unchanged = [wglink_send._face_key(face) for face in kept] == [
+        wglink_send._face_key(face) for face in target["faces"]]
     target["faces"] = kept
     notices.extend(f"Moved {_face_count_text(count)} from {label} to {_row_label(kind, target)}."
                    for label, count in moved.items())
-    state.notice = " ".join(notices)
+    if notices or not unchanged:
+        # A repeated report of the same picks (Fusion can send one per
+        # programmatic change) must not wipe the notice of the real change.
+        state.notice = " ".join(notices)
     if reload_picker:
         # Show exactly what the row now holds: faces, never a body or a refused face.
         _set_target(inputs, state, kind, row_id)

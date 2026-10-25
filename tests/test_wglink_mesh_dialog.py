@@ -1022,3 +1022,14 @@ def test_a_save_with_nothing_to_say_shows_no_message_box(scene, monkeypatch, sum
     module.CommandExecuteHandler("source").notify(types.SimpleNamespace(
         command=types.SimpleNamespace(commandInputs=types.SimpleNamespace()), isValidResult=True))
     assert scene.ui.messages == shown
+
+
+def test_a_repeated_pick_report_keeps_the_move_notice(scene):
+    inputs, items, state = build(scene)
+    add_zone(scene, inputs, items, state)
+    pick(scene, inputs, items, state, scene.faces[0])
+    assert state.notice == "Moved 1 face from HF – high-frequency driver to Zone 'Fine zone 1'."
+    change(scene, inputs, items, state, "mesh_faces")  # Fusion reports the same selection again
+    assert state.notice.startswith("Moved 1 face")
+    pick(scene, inputs, items, state, scene.faces[1])  # a new, plain pick clears it
+    assert state.notice == ""
