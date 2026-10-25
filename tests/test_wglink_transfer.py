@@ -580,6 +580,35 @@ def _moved_model(app, transform: list[float], *, parameter: str = "10 mm") -> No
         allParameters=[types.SimpleNamespace(name="throat", expression=parameter, value=1.0)])
 
 
+@pytest.mark.parametrize("change", ["revision", "visibility", "placement", "parameter"])
+def test_repeat_detection_and_mesh_learning_both_observe_model_changes(
+    monkeypatch, tmp_path: Path, change: str
+) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, f"WGLink_shared_revision_{change}")
+    module = fixture.module
+    _moved_model(fixture.app, [1.0] * 16)
+    design = fixture.app.activeProduct
+    occurrence = design.rootComponent.allOccurrences[0]
+    body = occurrence.component.bRepBodies[0]
+    repeated = module._submission_key("solve", _dialog_inputs())
+    learned = module.wglink_send.mesh_geometry_key(design, [body])
+    assert learned is not None
+    if change == "revision":
+        body.revisionId = "rev-2"
+    elif change == "visibility":
+        body.isVisible = False
+    elif change == "placement":
+        occurrence.transform2 = types.SimpleNamespace(asArray=lambda: [2.0] * 16)
+    else:
+        design.allParameters[0].expression = "20 mm"
+    assert module._submission_key("solve", _dialog_inputs()) != repeated
+    assert module.wglink_send.mesh_geometry_key(design, [body]) != learned
+    # An unmeasurable body may still be sent again, but never reuses a fraction.
+    body.revisionId = ""
+    assert module.wglink_send.mesh_geometry_key(design, [body]) is None
+    assert isinstance(module._submission_key("solve", _dialog_inputs()), str)
+
+
 @pytest.mark.parametrize("change", ["moved", "parameter"])
 def test_a_press_after_the_model_changed_never_asks(monkeypatch, tmp_path: Path, change: str) -> None:
     fixture = _transfer(monkeypatch, tmp_path, f"WGLink_send_changed_{change}")

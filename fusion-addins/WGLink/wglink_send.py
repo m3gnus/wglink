@@ -5192,40 +5192,66 @@ def send(
     }
 
 
-def mesh_geometry_key(design: object, scope_bodies: list[object],
-                      face_members: dict[str, list[object]] | None = None) -> object:
-    """Body revisions and placements, as in the send submission key.
+def design_revision_key(design: object, *, require_revisions: bool = False) -> object:
+    """One model snapshot for repeat presses and request-bound mesh learning.
 
-    Property reads only. Missing revisions disable learning, rather than
-    mistaking two unmeasurable models for the same geometry.
+    Repeat presses tolerate unnamed Fusion objects; learning requires complete
+    revision and placement evidence so an unknown model never reuses a fraction.
+    Callers add their own scope, face memberships, marks and mesh settings.
     """
     try:
-        root = design.rootComponent
+        root = getattr(design, "rootComponent", None)
+        if require_revisions and root is None:
+            return None
         components = [root]
         occurrences, bodies, parameters = [], [], []
         for occurrence in wglink_core._items(getattr(root, "allOccurrences", None)):
-            components.append(occurrence.component)
+            if require_revisions and any(not hasattr(occurrence, name) for name in
+                                         ("component", "fullPathName", "isLightBulbOn")):
+                return None
+            components.append(getattr(occurrence, "component", occurrence))
             transform = getattr(occurrence, "transform2", None)
             if transform is None:
-                transform = occurrence.transform
-            occurrences.append([str(occurrence.fullPathName), list(transform.asArray()),
-                                bool(occurrence.isLightBulbOn)])
+                transform = getattr(occurrence, "transform", None)
+            as_array = getattr(transform, "asArray", None)
+            if require_revisions and not callable(as_array):
+                return None
+            placement = list(as_array()) if callable(as_array) else str(transform) if transform is not None else None
+            occurrences.append([str(getattr(occurrence, "fullPathName", getattr(occurrence, "name", ""))),
+                                placement, bool(getattr(occurrence, "isLightBulbOn", True))])
         for component in components:
             for body in wglink_core._items(getattr(component, "bRepBodies", None)):
-                if not getattr(body, "revisionId", None) or not getattr(body, "entityToken", None):
+                token, revision = getattr(body, "entityToken", ""), getattr(body, "revisionId", "")
+                if require_revisions and (not token or not revision or not hasattr(body, "isVisible")):
                     return None
-                bodies.append([str(body.entityToken), str(body.revisionId), bool(body.isVisible)])
+                bodies.append([str(token), str(revision), bool(getattr(body, "isVisible", True))])
         for parameter in wglink_core._items(getattr(design, "allParameters", None)):
-            parameters.append([str(parameter.name), str(parameter.expression), repr(parameter.value)])
+            if require_revisions and any(not hasattr(parameter, name) for name in
+                                         ("name", "expression", "value")):
+                return None
+            parameters.append([str(getattr(parameter, "name", "")),
+                               str(getattr(parameter, "expression", "")),
+                               repr(getattr(parameter, "value", None))])
+        return [sorted(bodies), sorted(occurrences, key=str), sorted(parameters),
+                getattr(getattr(design, "timeline", None), "count", None)]
+    except Exception:  # noqa: BLE001 - unreadable evidence is never assumed unchanged
+        return None
+
+
+def mesh_geometry_key(design: object, scope_bodies: list[object],
+                      face_members: dict[str, list[object]] | None = None) -> object:
+    """Complete model revisions plus the exact scope and face memberships."""
+    revision = design_revision_key(design, require_revisions=True)
+    if revision is None or not revision[0]:
+        return None
+    try:
         memberships = []
         for key, faces in sorted((face_members or {}).items()):
             tokens = [wglink_core._entity_token(face) for face in faces]
             if not all(tokens):
                 return None
             memberships.append([key, sorted(tokens)])
-        return [memberships, sorted(str(body.entityToken) for body in scope_bodies),
-                sorted(bodies), sorted(occurrences, key=str), sorted(parameters),
-                getattr(getattr(design, "timeline", None), "count", None)] if bodies else None
+        return [memberships, sorted(str(body.entityToken) for body in scope_bodies), *revision]
     except Exception:  # noqa: BLE001 - advisory evidence must be known, never guessed
         return None
 

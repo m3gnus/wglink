@@ -1753,21 +1753,6 @@ def _export_notes(report: dict[str, object]) -> list[str]:
     return notes
 
 
-def _transform_key(occurrence: object) -> object:
-    """An occurrence's placement, as plain numbers where Fusion offers them."""
-
-    for name in ("transform2", "transform"):
-        transform = getattr(occurrence, name, None)
-        if transform is None:
-            continue
-        as_array = getattr(transform, "asArray", None)
-        try:
-            return [round(float(value), 9) for value in as_array()] if callable(as_array) else str(transform)
-        except Exception:  # noqa: BLE001 - fall back to its text
-            return str(transform)
-    return None
-
-
 def _submission_key(operation: str, inputs: object) -> str:
     """What makes a second press the same request: document, scope and model state.
 
@@ -1785,23 +1770,11 @@ def _submission_key(operation: str, inputs: object) -> str:
     product = getattr(app, "activeProduct", None)
     selection = _send_selection(inputs)
     root = getattr(product, "rootComponent", None)
-    bodies, occurrences, parameters, marks = [], [], [], []
+    marks = []
+    revision = wglink_send.design_revision_key(product)
+    if revision is None:
+        return str(uuid.uuid4())
     try:
-        components = [root]
-        for occurrence in wglink_core._items(getattr(root, "allOccurrences", None)):
-            components.append(getattr(occurrence, "component", occurrence))
-            occurrences.append([str(getattr(occurrence, "fullPathName", getattr(occurrence, "name", ""))),
-                                _transform_key(occurrence),
-                                bool(getattr(occurrence, "isLightBulbOn", True))])
-        for component in components:
-            for body in wglink_core._items(getattr(component, "bRepBodies", None)):
-                bodies.append([str(getattr(body, "entityToken", "")),
-                               str(getattr(body, "revisionId", "")),
-                               bool(getattr(body, "isVisible", True))])
-        for parameter in wglink_core._items(getattr(product, "allParameters", None)):
-            parameters.append([str(getattr(parameter, "name", "")),
-                               str(getattr(parameter, "expression", "")),
-                               repr(getattr(parameter, "value", None))])
         find = getattr(product, "findAttributes", None)
         for attribute in wglink_core._items(find(wglink_core.ATTRIBUTE_GROUP, "") if callable(find) else None):
             owner = getattr(attribute, "parent", None)
@@ -1814,8 +1787,7 @@ def _submission_key(operation: str, inputs: object) -> str:
         _active_document_id(), str(getattr(document, "name", "")), operation,
         str(getattr(selection, "entityToken", selection)),
         _selected_name(inputs, "anchor_instance_id", ""),
-        getattr(getattr(product, "timeline", None), "count", None),
-        sorted(bodies), sorted(occurrences, key=str), sorted(parameters), sorted(marks), settings,
+        revision, sorted(marks), settings,
     ], default=str)
 
 
