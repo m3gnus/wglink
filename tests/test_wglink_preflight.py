@@ -59,6 +59,15 @@ def test_manifest_cases_shared_with_wg_ingress(case):
             assert word not in text
 
 
+@pytest.mark.parametrize("case", CASES["draft_cases"], ids=lambda case: case["name"])
+def test_draft_cases_shared_with_wg(case):
+    findings = protocol.preflight_findings(case["draft"])
+    assert [[finding["code"], finding["severity"]] for finding in findings] == case["expected"]
+    text = " ".join(protocol.finding_text(finding) for finding in findings)
+    assert all(repr(name) in text for name in case.get("message_names", ()))
+    assert not any(repr(name) in text for name in case.get("message_omits", ()))
+
+
 def test_every_rule_has_a_known_severity_and_the_ceiling_is_answered_by_its_hold():
     assert {severity for severity, _remedy in protocol.PREFLIGHT_RULES.values()} <= {
         protocol.PREFLIGHT_BLOCK, protocol.PREFLIGHT_ASK, protocol.PREFLIGHT_NOTE,

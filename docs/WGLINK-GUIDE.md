@@ -251,7 +251,7 @@ vendors byte for byte). Each finding is one of three kinds:
   driver is a FEM region's moving surface needs no source, in Sources & Mesh…
   and in Send alike.
 - **Asked on OK.** One pop-up lists them. A body that is not a closed solid
-  offers **Send anyway**. A Solve whose approximate count is over the solved
+  offers **Send anyway**, unless you classified it with Declare Body…. A Solve whose approximate count is over the solved
   triangle limit even for the smallest domain WG could use offers **Solve
   anyway** or **Change mesh resolution**, which opens Sources & Mesh…. Solve
   anyway travels with the request, so WG does not ask again; a WG that does

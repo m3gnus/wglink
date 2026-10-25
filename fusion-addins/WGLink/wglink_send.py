@@ -1432,9 +1432,16 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
         for item, _body in included_pairs
     ]
     # Fusion's own verdict, read once per survey: a body that is not a closed
-    # solid exports as a surface body.
+    # solid exports as a surface body. One the user declared (Declare Body…)
+    # is meant as it is, and the open_body rule does not ask about it.
+    declarations = {
+        str(candidate.get("object_id")): candidate.get("declaration")
+        for candidate in walk["candidates"]
+    }
     report["open_bodies"] = [
-        item["name"] for item in report["included"] if item["body_kind"] == "surface"
+        {"name": summary["name"], "declared": bool(declarations.get(str(item.get("object_id"))))}
+        for summary, (item, _body) in zip(report["included"], included_pairs)
+        if summary["body_kind"] == "surface"
     ]
     for record in records:
         instance_body = next(

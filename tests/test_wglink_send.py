@@ -630,6 +630,10 @@ def test_preflight_accepts_the_only_visible_surface_body_as_the_exterior_shell(
     assert report["scope_error"] is None
     assert report["included"] == [{"name": "Speaker/Shell", "body_kind": "surface"}]
     assert [source["role"] for source in report["sources"]] == ["HF"]
+    # Undeclared and open: Send asks once ("Send anyway?").
+    assert report["open_bodies"] == [{"name": "Speaker/Shell", "declared": False}]
+    codes = [f["code"] for f in send_module.wglink_protocol.preflight_findings(report)]
+    assert codes == ["open_body"]
 
 
 def test_one_visible_surface_and_one_hidden_solid_use_the_surface_as_the_exterior(
@@ -674,6 +678,10 @@ def test_two_visible_undeclared_surfaces_still_refuse(send_module, monkeypatch):
     assert cleared["scope_error"] is None
     assert cleared["included"] == [{"name": "Speaker/First shell", "body_kind": "surface"}]
     assert [source["role"] for source in cleared["sources"]] == ["HF"]
+    # Declared, so meant as an open shell: the open_body rule does not ask.
+    assert cleared["open_bodies"] == [{"name": "Speaker/First shell", "declared": True}]
+    codes = [f["code"] for f in send_module.wglink_protocol.preflight_findings(cleared)]
+    assert "open_body" not in codes
 
 
 @pytest.mark.parametrize("bad_visibility", ["raises", "non_bool"])
