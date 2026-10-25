@@ -87,13 +87,14 @@ def test_a_user_action_failure_reads_its_own_words_and_an_internal_one_never_doe
     assert user["headline"] == "Horn A changed after Fusion asked WG to solve it."
     assert user["detail"] == "Send it again from Fusion."
     internal = _record("couldNotFinish", phase="preparing",
-                       failure={"recorded": True, "message": "RuntimeError: gmsh crashed"})
+                       failure={"recorded": True, "message": "gmsh crashed"})
     text = protocol.request_status_text(protocol.validate_request_status(internal))
     assert "gmsh" not in text["headline"] and "recorded for the developers" in text["headline"]
 
 
 def test_a_missing_document_name_reads_as_this_model():
-    text = protocol.request_status_text(protocol.validate_request_status(_record("couldNotFinish", documentName=None)))
+    text = protocol.request_status_text(protocol.validate_request_status(
+        _record("couldNotFinish", documentName=None, failure={"recorded": True})))
     assert text["headline"].startswith("Waveguide Generator could not prepare this model.")
     assert protocol.request_status_text(protocol.validate_request_status(_record("queued", documentName="")))[
         "headline"].startswith("This model ·")
@@ -133,3 +134,59 @@ def test_the_forbidden_terms_match_whole_words_only():
     assert protocol.user_text_violations("The bundle was refused") == ["bundle", "refused"]
     assert protocol.user_text_violations("Gateway operational") == []
     assert protocol.user_text_violations("Source PASSIVE_CARDIOID") == ["PASSIVE_CARDIOID"]
+
+
+HOSTILE = [
+    {"prompt": {"options": 5}}, {"prompt": {"options": True}}, {"prompt": "hi"},
+    {"prompt": {"code": {"a": 1}, "nextStep": ["x"]}},
+    {"state": "solving", "progress": {"fraction": 10 ** 400}},
+    {"state": "solving", "progress": {"fraction": float("nan"), "frequency": {"done": 10 ** 400, "total": 1}}},
+    {"state": "solved", "result": {"jobId": "j", "runNumber": 10 ** 400,
+                                   "mesh": {"trianglesSolved": 5, "solvedFraction": 10 ** 400}}},
+    {"state": ["x"]}, {"state": "x" * 5000}, {"state": None}, {"seq": "1"}, {"seq": 10 ** 400},
+    {"documentName": "a\nb\x00c" + "d" * 5000}, {"documentName": 5},
+    {"state": "couldNotFinish", "failure": {"recorded": False, "message": {"a": 1}}},
+    {"state": "couldNotFinish", "failure": "x"}, {"requestId": ["req-1"]}, {"operationId": {"x": 1}},
+    {"job": {"jobId": 5}}, {"notice": ["fullModel"]}, {"cancelReason": {}},
+]
+
+
+@pytest.mark.parametrize("change", HOSTILE, ids=lambda change: ",".join(change))
+def test_hostile_records_never_raise_and_never_reach_a_user_raw(change):
+    valid = protocol.validate_request_status({**_record("needsYou"), **change})
+    text = protocol.request_status_text(valid or {})
+    assert text["headline"] and "\x00" not in text["headline"] and len(text["headline"]) < 700
+    assert protocol.request_status_terminal(valid or change) in {True, False}
+    assert protocol.request_status_terminal({"state": ["x"]}) is False
+    assert protocol.request_status_terminal("not a mapping") is False
+    assert protocol.request_status_text(None)["headline"]  # type: ignore[arg-type]
+
+
+def test_technical_words_from_wg_never_reach_the_user():
+    record = protocol.validate_request_status(_record(
+        "couldNotFinish", phase="preparing",
+        failure={"recorded": False, "message": "Traceback (most recent call last): KeyError 'x'",
+                 "nextStep": "Check the bundle manifest."}))
+    assert record["failure"] == {"recorded": False, "message": None, "nextStep": None}
+    text = protocol.request_status_text(record)
+    assert text["headline"] == "Waveguide Generator could not finish Horn A."
+    assert text["detail"] == "Open Waveguide Generator to see what to do."
+    assert "recorded" not in text["headline"]
+    held = protocol.validate_request_status(_record("needsYou", prompt={
+        "nextStep": "The ingest gate refused it.", "options": [{"id": "x", "label": "Retry operation"}]}))
+    assert held["prompt"]["nextStep"] is None and held["prompt"]["options"] == []
+
+
+def test_a_recorded_failure_never_carries_wgs_words():
+    record = protocol.validate_request_status(_record(
+        "couldNotFinish", failure={"recorded": True, "message": "Horn A changed."}))
+    assert record["failure"] == {"recorded": True}
+    assert protocol.request_status_text(record)["headline"] == protocol.could_not_prepare_text("Horn A")
+    assert protocol.could_not_prepare_text(None) == (
+        "Waveguide Generator could not prepare this model. This has been recorded for the developers.")
+
+
+def test_unknown_states_are_known_as_unknown():
+    assert protocol.request_status_known({"state": "solving"})
+    assert not protocol.request_status_known({"state": "somethingNewer"})
+    assert not protocol.request_status_known({"state": ["solving"]})
