@@ -18,7 +18,7 @@ ADDIN_DIR = Path(__file__).resolve().parents[1] / "fusion-addins" / "WGLink"
 
 
 def test_runner_runs_scenarios_over_ticks_and_records_failures(tmp_path, monkeypatch):
-    # The runner is stdlib-only, which is what lets scripts/fusion_dev_test.py import it.
+    # The runner and its filesystem writer require no Fusion imports.
     monkeypatch.syspath_prepend(str(ADDIN_DIR))
     dev_tests = importlib.import_module("wglink_dev_tests")
     log = []
@@ -60,19 +60,33 @@ def _started(monkeypatch, tmp_path, name, enabled):
     return module, app, panels
 
 
-def test_the_runner_starts_only_in_a_dev_sync_and_stops_with_the_add_in(monkeypatch, tmp_path):
+def test_the_runner_starts_only_in_a_dev_sync_and_rides_the_follow_up_event(monkeypatch, tmp_path):
     counts = []
     for enabled in (False, True):
         module, app, panels = _started(monkeypatch, tmp_path, f"WGLink_dev_tests_{enabled}", enabled)
         try:
             counts.append(panels.itemById(module.PANEL_ID).controls.count)
-            assert (module.DEV_TESTS_EVENT_ID in app.events) is enabled
-            watcher = module._dev_tests.get("watcher")
-            assert (watcher is not None and watcher.thread.is_alive()) is enabled
+            runner = module._dev_tests.get("runner")
+            assert (runner is not None) is enabled
+            # No event or thread of its own: one of WGLink's one-shot timers.
+            assert module.FOLLOWUP_EVENT_ID in app.events and not [event for event in app.events if "dev" in event]
+            polls = [timer for timer in module._timers if timer.function is module._poll_dev_tests]
+            assert bool(polls) is enabled
+            if enabled:
+                dev_tests = importlib.import_module(f"{module._registration_package_name}.wglink_dev_tests")
+                requests, results = dev_tests.folders(tmp_path)
+                dev_tests.write_json(requests / "n.json", {"id": "n", "scenario": "noop"})
+                fired = len(app.fired)
+                module._poll_dev_tests()  # what the timer does: queue a tick, raise the event
+                assert len(app.fired) == fired + 1 and runner.tick in module._followups
+                for _ in range(3):
+                    module._run_followups()
+                    module._poll_dev_tests()
+                assert json.loads((results / "n.json").read_text())["status"] == "passed"
         finally:
             module.stop(None)
-        assert module.DEV_TESTS_EVENT_ID not in app.events and module._dev_tests == {}
-        assert watcher is None or not watcher.thread.is_alive()
+        assert module._dev_tests == {}
+        assert all(not timer.is_alive() for timer in module._timers)
     assert counts[0] == counts[1]  # the runner adds no command to the panel
     # The repository checkout never carries the marker, so CI never starts it.
     fresh = _load_instance(monkeypatch, "WGLink_dev_tests_gate", _UI(_Panels(), _Definitions(reserve_ids=False)))
@@ -94,9 +108,11 @@ def test_reload_refreshes_the_scenarios_in_place(monkeypatch, tmp_path):
         result = json.loads((results / "r.json").read_text())
         assert result["status"] == "passed", result
         assert result["reloaded"] == ["wglink_mesh_dialog", "wglink_dev_tests"]
-        # A reloaded helper keeps its binding to the entry module's helpers.
-        assert module.wglink_mesh_dialog.host is not None
-        assert module.wglink_mesh_dialog.host.PANEL_NAME == module.PANEL_NAME
+        # Reload keeps ordinary module dependencies, without injecting a host
+        # or letting a helper reach into arbitrary entry-module globals.
+        assert not hasattr(module.wglink_mesh_dialog, "host")
+        state = module.wglink_mesh_dialog.MeshDialogState(module._mesh_dialog_services())
+        assert state.services.command_name == module.COMMANDS["source"][1]
         assert runner.scenarios is not old and set(runner.scenarios) == set(old)
     finally:
         module.stop(None)

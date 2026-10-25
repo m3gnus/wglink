@@ -1372,7 +1372,7 @@ def test_unsaved_adoption_question_explains_random_identity(
 
     ui = _UI(_Panels(), _Definitions(reserve_ids=False), dialog_result="yes")
     module = _load_instance(monkeypatch, "WGLink_adopt_yes", ui)
-    before = module._source_authoring_generation
+    before = module.wglink_send._source_authoring_generation
 
     assert module._confirm_source_adoption("LF", 2) is True
 
@@ -1384,7 +1384,7 @@ def test_unsaved_adoption_question_explains_random_identity(
     assert "may ask for its setup" in text
     assert "Save the document to keep source identities" in text
     # The heartbeat's cached source ids are about to change.
-    assert module._source_authoring_generation == before + 1
+    assert module.wglink_send._source_authoring_generation == before + 1
 
 
 def test_send_solve_summary_states_adoption_and_save_only_for_unsaved(monkeypatch) -> None:
@@ -1418,10 +1418,10 @@ def test_send_solve_summary_states_adoption_and_save_only_for_unsaved(monkeypatc
 def test_declining_the_adoption_question_changes_nothing(monkeypatch) -> None:
     ui = _UI(_Panels(), _Definitions(reserve_ids=False), dialog_result="no")
     module = _load_instance(monkeypatch, "WGLink_adopt_no", ui)
-    before = module._source_authoring_generation
+    before = module.wglink_send._source_authoring_generation
 
     assert module._confirm_source_adoption("HF", 1) is False
-    assert module._source_authoring_generation == before
+    assert module.wglink_send._source_authoring_generation == before
 
 
 def test_the_adoption_question_fails_closed_without_a_modal_api(monkeypatch) -> None:

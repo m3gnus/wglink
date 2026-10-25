@@ -58,6 +58,7 @@ def _load_registration_package() -> dict[str, types.ModuleType]:
         "wglink_launcher",
         "wglink_legacy_queue",
         "wglink_requests",
+        "wglink_dialog_inputs",
         "wglink_mesh_dialog",
     ):
         loaded[name] = importlib.import_module(f"{_registration_package_name}.{name}")
@@ -68,10 +69,24 @@ _registration_modules = _load_registration_package()
 wglink_activity = _registration_modules["wglink_activity"]
 wglink_workspace = _registration_modules["wglink_workspace"]
 wglink_mesh_dialog = _registration_modules["wglink_mesh_dialog"]
+wglink_dialog_inputs = _registration_modules["wglink_dialog_inputs"]
+# The input readers every dialog here shares (one owner: wglink_dialog_inputs).
+_input = wglink_dialog_inputs.item
+_command_inputs = wglink_dialog_inputs.command_inputs
+_input_value = wglink_dialog_inputs.value
+_selected_name = wglink_dialog_inputs.selected_name
+_selected_entities = wglink_dialog_inputs.selected_entities
+_add_selection_filters = wglink_dialog_inputs.add_selection_filters
+_mm_input = wglink_dialog_inputs.mm_input
+_mm_value = wglink_dialog_inputs.mm_value
 wglink_author = _registration_modules["wglink_author"]
 wglink_fem = _registration_modules["wglink_fem"]
 wglink_core = _registration_modules["wglink_core"]
 wglink_send = _registration_modules["wglink_send"]
+# Native body or face behind an occurrence proxy (one owner: wglink_send).
+_native = wglink_send._native_face
+# The Sources & Mesh source writer lives beside the other writers.
+_apply_source_faces = wglink_send.apply_source_faces
 wglink_mesh = wglink_send.wglink_mesh
 wglink_protocol = wglink_send.wglink_protocol
 wglink_inbox = _registration_modules["wglink_inbox"]
@@ -81,27 +96,6 @@ wglink_launcher = _registration_modules["wglink_launcher"]
 wglink_legacy_queue = _registration_modules["wglink_legacy_queue"]
 wglink_requests = _registration_modules["wglink_requests"]
 format_measurement_mm = _registration_modules["wglink_bundle"].format_measurement_mm
-
-
-class _ModuleGlobals:
-    """A live attribute view of this entry module's globals.
-
-    Helper modules that were split out of this file (``wglink_mesh_dialog``)
-    call its helpers through this view, so each helper keeps exactly one
-    owner here and a test's monkeypatch of this module is what they see.
-    """
-
-    def __getattr__(self, name: str) -> object:
-        try:
-            return globals()[name]
-        except KeyError:
-            raise AttributeError(name) from None
-
-    def __setattr__(self, name: str, value: object) -> None:
-        globals()[name] = value
-
-
-wglink_mesh_dialog.host = _ModuleGlobals()
 
 
 PANEL_ID = "hornlab_wglink_panel"
@@ -593,8 +587,7 @@ def _confirm_source_adoption(role: str, faces: int) -> bool:
     # answer rather than on the write over-invalidates when the write then
     # rolls back, which is the safe direction: a key that moves too often costs
     # one measurement, one that moves too rarely serves a stale identity.
-    global _source_authoring_generation
-    _source_authoring_generation += 1
+    wglink_send.note_source_authoring()
     return True
 
 
@@ -727,32 +720,6 @@ def _choose_bundle(title: str, source_kind: str) -> str | None:
     settings["last_bundle_folder"] = str(selected.parent)
     _save_settings(settings)
     return str(selected)
-
-
-def _input(command_inputs: object, name: str) -> object | None:
-    try:
-        return command_inputs.itemById(name)
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _command_inputs(inputs):
-    """Events for grouped inputs can supply only that group's collection."""
-    command = getattr(inputs, "command", None)
-    return command.commandInputs if command is not None else inputs
-
-
-def _input_value(command_inputs: object, name: str) -> object | None:
-    item = _input(command_inputs, name)
-    return item.value if item else None
-
-
-def _selected_name(command_inputs: object, name: str, default: str) -> str:
-    item = _input(command_inputs, name)
-    try:
-        return str(item.selectedItem.name)
-    except Exception:  # noqa: BLE001
-        return default
 
 
 def _document_link_choices() -> list[tuple[str, str]]:
@@ -1104,55 +1071,6 @@ def _sync_help(command_inputs: object, box_id: str, choice_id: str, text_of) -> 
             continue
 
 
-def _add_selection_filters(selection: object, *names: str) -> None:
-    """Apply what this Fusion knows, rather than failing the whole dialog.
-
-    A filter name an older Fusion does not recognise would otherwise raise
-    before the execute handler is attached, leaving a button that does nothing.
-    """
-
-    for name in names:
-        try:
-            selection.addSelectionFilter(name)
-        except Exception:  # noqa: BLE001
-            pass
-
-
-def _selected_entities(command_inputs: object, name: str) -> list[object]:
-    item = _input(command_inputs, name)
-    entities: list[object] = []
-    try:
-        for index in range(item.selectionCount):
-            entities.append(item.selection(index).entity)
-    except Exception:  # noqa: BLE001 - an empty selection is refused by the plan
-        pass
-    return entities
-
-
-def _face_descriptors(faces: list[object]) -> list[dict[str, object]]:
-    """Copy what the plan needs off live faces. Main thread only."""
-
-    descriptors = []
-    for index, face in enumerate(faces):
-        try:
-            area = float(face.area) * 100.0
-        except Exception:  # noqa: BLE001 - an unread area only drops the total
-            area = None
-        descriptors.append({
-            "index": index,
-            "current_role": wglink_send._face_role(face, strict=True),
-            "area_mm2": area,
-        })
-    return descriptors
-
-
-def _native(entity: object) -> object:
-    # An occurrence proxy exposes an empty attribute collection, so a
-    # declaration has to be written on the native body, which is also where the
-    # export reads it back from.
-    return getattr(entity, "nativeObject", None) or entity
-
-
 def _body_descriptors(bodies: list[object]) -> list[dict[str, object]]:
     """Copy what the plan needs off live bodies. Main thread only."""
 
@@ -1165,59 +1083,6 @@ def _body_descriptors(bodies: list[object]) -> list[dict[str, object]]:
             "body_kind": "solid" if bool(getattr(body, "isSolid", False)) else "surface",
         })
     return descriptors
-
-
-def _apply_source_faces(faces: list[object], role: str, *, app: object = None,
-                        design: object = None) -> dict[str, object]:
-    # A nested save passes its own design: every _design() lookup mints a new
-    # Fusion wrapper, and the outer transaction journals one design.
-    app = app if app is not None else _app()
-    design = design if design is not None else wglink_core._design(app)
-    action = "save WG source faces"
-    plan = wglink_author.plan_source_assignment(
-        wglink_send.read_for_edit(action, lambda: _face_descriptors(faces)), role)
-    def prepare(edit):
-        wglink_send._prepare_source_edit(edit, design, faces)
-        for face in faces:
-            edit.remember_appearance(face)
-        if plan.paint:
-            edit.remember_asset(design, plan.appearance_name)
-
-    def mutate(edit):
-        wglink_author.apply_face_appearance_plan(
-            faces, plan, lambda name: edit.named_appearance(app, design, name),
-            write_appearance=edit.paint
-        )
-        # The source identity is authored here, and whatever WG advertises, so a
-        # document is ready when WG starts reading identities. The preflight and the
-        # heartbeat never author one. Send authors one in exactly one case: a role
-        # group painted before source identities existed, where no face carries the
-        # attribute at all, and only after ``_confirm_source_adoption`` has asked --
-        # see ``wglink_send._adopt_painted_source``. Every selected face is stamped,
-        # including one that already carried the role: re-running this command on a
-        # source WGLink refused is how that source is reassigned. Clear takes the
-        # identity off every selected face, including one whose paint was already
-        # removed by hand, which is the only way to take such a stale face out.
-        global _source_authoring_generation
-        _source_authoring_generation += 1
-        summary = plan.summary
-        # The dialog owns paint/attribute rollback and the final failure message.
-        if plan.role is not None:
-            wglink_send.assign_source_identity(
-                design, [faces[index] for index in (*plan.paint, *plan.unchanged)], plan.role
-            )
-            removed = 0
-        else:
-            removed = wglink_send.clear_source_identity(design, faces)
-        if plan.role is None:
-            if removed and not plan.clear:
-                summary = (
-                    f"Removed a stale WG source identity from {removed} face(s) that no "
-                    "longer carried a WG source role."
-                )
-        return {"summary": summary}
-
-    return wglink_send.document_edit(action, prepare, mutate)
 
 
 def _apply_body_declaration(command_inputs: object) -> dict[str, object]:
@@ -2359,8 +2224,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 )
                 exported = True
                 if report.get("adopted_sources") and not report.get("save_source_identities"):
-                    global _source_authoring_generation
-                    _source_authoring_generation += 1
+                    wglink_send.note_source_authoring()
                 # One path for both: the return is published, then one request
                 # file hands it to WG. Send and Solve differ only in its kind.
                 solve = self.operation == "solve"
@@ -2572,8 +2436,10 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
 # the declaration is complete. Unlike that add-in nothing is meshed here: the
 # declaration is stored on the body and its faces, and WG meshes at Send.
 
-FEM_CLEAR_LABEL = "Clear the FEM region on this body"
-FEM_DECLARE_LABEL = "Declare or update the FEM region"
+FEM_REMOVE_LABEL = "Remove the FEM region from this body"
+FEM_REMOVE_NOTICE = "Save will remove this FEM region and its surface groups."
+# Everything a removal makes irrelevant; disabled while the box is ticked.
+FEM_DECLARATION_INPUTS = ("fem_name", "fem_size", "fem_loss", "fem_groups")
 
 
 class FemDialogState:
@@ -2591,30 +2457,12 @@ def _fem_input_id(prefix: str, group_id: int) -> str:
     return f"fem_{prefix}_{group_id}"
 
 
-def _mm_input(value_mm: float) -> object:
-    # Fusion value inputs hold internal units (cm) whatever unit they display.
-    return adsk.core.ValueInput.createByReal(float(value_mm) / wglink_fem.CM_TO_MM)
-
-
-def _mm_value(command_inputs: object, input_id: str) -> float | None:
-    item = _input(command_inputs, input_id)
-    try:
-        return float(item.value) * wglink_fem.CM_TO_MM
-    except Exception:  # noqa: BLE001 - an unreadable value is refused by the plan
-        return None
-
-
 def _build_fem_dialog(inputs: object, state: FemDialogState) -> None:
     body = inputs.addSelectionInput(
         "fem_body", "Air body", "Select one closed solid body of air."
     )
     _add_selection_filters(body, "SolidBodies")
     body.setSelectionLimits(1, 1)
-    action = inputs.addDropDownCommandInput(
-        "fem_action", "Action", adsk.core.DropDownStyles.TextListDropDownStyle
-    )
-    action.listItems.add(FEM_DECLARE_LABEL, True)
-    action.listItems.add(FEM_CLEAR_LABEL, False)
     inputs.addStringValueInput("fem_name", "Region name", "")
     inputs.addValueInput(
         "fem_size", "Mesh size", "mm", _mm_input(wglink_fem.DEFAULT_REGION_SIZE_MM)
@@ -2642,6 +2490,7 @@ def _build_fem_dialog(inputs: object, state: FemDialogState) -> None:
     )
     remove.isFullWidth = True
     remove.isEnabled = False
+    inputs.addBoolValueInput("fem_remove", FEM_REMOVE_LABEL, True, "", False)
     inputs.addTextBoxCommandInput(
         "fem_validation", "", "<b>Select one solid body of air.</b>", 2, True
     )
@@ -2877,7 +2726,7 @@ def _plan_fem_region(inputs: object, state: FemDialogState) -> tuple[object, "wg
 
 
 def _fem_clearing(inputs: object) -> bool:
-    return _selected_name(inputs, "fem_action", FEM_DECLARE_LABEL) == FEM_CLEAR_LABEL
+    return bool(_input_value(inputs, "fem_remove"))
 
 
 def _fem_validation_error(inputs: object, state: FemDialogState) -> str | None:
@@ -2894,10 +2743,16 @@ def _fem_validation_error(inputs: object, state: FemDialogState) -> str | None:
 
 def _sync_fem_validation(inputs: object, state: FemDialogState) -> bool:
     error = _fem_validation_error(inputs, state)
+    removing = _fem_clearing(inputs)
+    for input_id in FEM_DECLARATION_INPUTS:
+        item = _input(inputs, input_id)
+        if item is not None and getattr(item, "isEnabled", True) == removing:
+            item.isEnabled = not removing
     box = _input(inputs, "fem_validation")
     if box is not None:
         box.formattedText = (
-            f"<b>Fix before OK:</b> {html.escape(error)}" if error else "<b>Ready.</b>"
+            f"<b>Fix before OK:</b> {html.escape(error)}" if error
+            else f"<b>{html.escape(FEM_REMOVE_NOTICE)}</b>" if removing else "<b>Ready.</b>"
         )
     return error is None
 
@@ -3042,7 +2897,20 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
 # -- Sources & Mesh ----------------------------------------------------------
 
 # The dialog itself lives in wglink_mesh_dialog; it calls back into this
-# module's helpers through ``wglink_mesh_dialog.host``.
+# shared input and writer modules; explicit services provide entry-specific reporting.
+
+
+def _mesh_dialog_services() -> object:
+    """What Sources & Mesh… borrows from this module: reporting and WG's capabilities."""
+
+    return wglink_mesh_dialog.MeshDialogServices(
+        report_error=lambda action, exc: _report_error(action, f"{PANEL_NAME} error", exc),
+        log=lambda text: _log(text),
+        active_document_id=lambda: _active_document_id(),
+        source_identity_enabled=lambda: _source_identity_enabled(),
+        automatic_domain_enabled=lambda: _manifest_feature_enabled(wglink_inbox.AUTOMATIC_DOMAIN),
+        command_name=COMMANDS["source"][1],
+    )
 
 
 def _initialize_authoring_dialog(command, operation):
@@ -3050,13 +2918,14 @@ def _initialize_authoring_dialog(command, operation):
     execute = CommandExecuteHandler(operation)
     if operation == "source":
         dialog = wglink_mesh_dialog
-        state = dialog.MeshDialogState()
+        state = dialog.MeshDialogState(_mesh_dialog_services())
         execute.mesh_state = state
         build = dialog._build_mesh_dialog
         handlers = ((command.activate, dialog.MeshDialogActivateHandler(state)),
-                    (command.destroy, dialog.MeshDialogDestroyHandler()),
+                    (command.destroy, dialog.MeshDialogDestroyHandler(state)),
                     (command.inputChanged, dialog.MeshInputChangedHandler(state)),
-                    (command.validateInputs, dialog.MeshValidateInputsHandler(state)))
+                    (command.validateInputs, dialog.MeshValidateInputsHandler(state)),
+                    (command.executePreview, dialog.MeshPreviewHandler(state)))
     else:
         state = FemDialogState()
         execute.fem_state = state
@@ -3064,8 +2933,8 @@ def _initialize_authoring_dialog(command, operation):
         handlers = ((command.activate, FemDialogActivateHandler(state)),
                     (command.inputChanged, FemInputChangedHandler(state)),
                     (command.validateInputs, FemValidateInputsHandler(state)))
-    # The live Command, for scripted dev checks (wglink_dev_tests) that drive
-    # this dialog through its own handlers.
+    # The dialog state names its command: whoever holds only the state (the
+    # handlers, a scripted check) reaches the live inputs through it.
     state.command = command
     # Keep events inert during construction too: Fusion may dispatch them while
     # inputs are being added, or while the outer reporter displays an error.
@@ -3269,9 +3138,6 @@ GEOMETRY_STATE_DUTY_CYCLE = 12.0
 GEOMETRY_STATE_MAX_WAIT_SECONDS = GEOMETRY_STATE_MAX_AGE_SECONDS
 
 
-# Bumped by Sources & Mesh:: a stamp is an attribute write, which moves neither
-# the timeline nor a body revision, and the heartbeat's source ids depend on it.
-_source_authoring_generation = 0
 
 
 def _geometry_change_key(design: object, records: dict) -> tuple:
@@ -3289,7 +3155,7 @@ def _geometry_change_key(design: object, records: dict) -> tuple:
     automatic_domain = _manifest_feature_enabled(wglink_inbox.AUTOMATIC_DOMAIN)
     document_up = _manifest_feature_enabled(wglink_inbox.DOCUMENT_UP)
     parts: list[object] = [
-        _source_authoring_generation,
+        wglink_send._source_authoring_generation,
         _source_identity_enabled(),
         automatic_domain,
         document_up,
@@ -5292,7 +5158,7 @@ def _stop_watch(app: object) -> None:
     global _watch_event, _watch_handler, _watch_stop, _watch_thread
     global _handoff_attempted_id, _return_request_attempted_id, _request_trace
     global _claims_swept, _wg_outdated_noticed
-    _stop_dev_tests(app)
+    _stop_dev_tests()
     _stop_followups(app)
     _deferred_file_claims.clear()
     if _watch_stop is not None:
@@ -5357,7 +5223,6 @@ def _manage_dropdown(panel: object) -> object | None:
 
 
 DEV_TESTS_MODULE = "wglink_dev_tests"
-DEV_TESTS_EVENT_ID = f"hornlab_wglink_dev_tests_{_watch_session_id}"
 _dev_tests: dict[str, object] = {}
 
 
@@ -5369,15 +5234,13 @@ def _dev_tests_enabled() -> bool:
     ).is_file()
 
 
-class DevTestsEventHandler(adsk.core.CustomEventHandler):
-    def notify(self, _args: object) -> None:
-        runner = _dev_tests.get("runner")
-        if runner is not None:
-            runner.tick()  # records its own errors; never raises
-
-
 def _start_dev_tests(app: object, ui: object) -> None:
-    """Start the terminal-driven test runner in a dev sync; never blocks start-up."""
+    """Dev sync only: the terminal-driven test runner. Never blocks start-up.
+
+    It rides the follow-up event and its one-shot timers: a timer looks for
+    requests and, when there is work, queues one runner tick to run on the
+    main thread; stop() cancels the timers with every other one.
+    """
 
     if not _dev_tests_enabled():
         return
@@ -5392,36 +5255,33 @@ def _start_dev_tests(app: object, ui: object) -> None:
             package=_registration_package_name, handlers=_handlers, wglink=globals(),
             log=_log, runner=None,
         )
-        runner = dev_tests.Runner(ipc, dev_tests.scenarios(context), _log)
-        context.runner = runner
-        event = app.registerCustomEvent(DEV_TESTS_EVENT_ID)
-        if event is None:
-            return
-        handler = DevTestsEventHandler()
-        event.add(handler)
-        watcher = dev_tests.Watcher(app, DEV_TESTS_EVENT_ID, runner)
-        _dev_tests.update(runner=runner, event=event, handler=handler, watcher=watcher)
-        watcher.thread.start()
+        context.runner = dev_tests.Runner(ipc, dev_tests.scenarios(context), _log)
+        _dev_tests["runner"] = context.runner
+        _start_timer(dev_tests.TICK_SECONDS, _poll_dev_tests)
         _log(f"[{PANEL_NAME}] dev test runner watching {dev_tests.folders(ipc)[0]}")
     except Exception as exc:  # noqa: BLE001 - a dev-only runner must not stop the add-in
         _log(f"[{PANEL_NAME}] the dev test runner did not start: {exc}\n{traceback.format_exc()}")
 
 
-def _stop_dev_tests(app: object) -> None:
-    watcher = _dev_tests.get("watcher")
-    if watcher is not None:
-        watcher.stop()
-    event, handler = _dev_tests.get("event"), _dev_tests.get("handler")
-    if event is not None and handler is not None:
+def _poll_dev_tests() -> None:
+    """Timer thread: queue a main-thread tick when the runner has work, then re-arm."""
+
+    runner = _dev_tests.get("runner")
+    if runner is None:
+        return
+    if runner.pending():
+        with _followups_lock:
+            if runner.tick not in _followups:
+                _followups.append(runner.tick)
         try:
-            event.remove(handler)
-        except Exception:  # noqa: BLE001
-            pass
-    if event is not None and app:
-        try:
-            app.unregisterCustomEvent(DEV_TESTS_EVENT_ID)
-        except Exception:  # noqa: BLE001
-            pass
+            _raise_followup_event()
+        except Exception:  # noqa: BLE001 - a torn-down event: the add-in is stopping
+            return
+    _start_timer(1.0, _poll_dev_tests)
+
+
+def _stop_dev_tests() -> None:
+    # stop() cancels the poll timer with the others; forget the runner.
     _dev_tests.clear()
 
 
@@ -5513,9 +5373,9 @@ def _build_owner(app: object, ui: object) -> None:
                     _controls.append(manage)
             target = manage.controls if manage is not None else _panel.controls
             _controls.append(target.addCommand(definition))
-        _start_dev_tests(app, ui)
         if not _start_watch(app):
             raise RuntimeError("Fusion refused the Waveguide Generator add-in's owner event")
+        _start_dev_tests(app, ui)
         if not _activate_ipc_lease():
             raise RuntimeError("The Waveguide Generator add-in's IPC owner lease was lost during startup")
         _owned = True

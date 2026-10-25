@@ -43,7 +43,7 @@ def _air(module):
 def _inputs(module, air, faces, **overrides):
     items = {
         "fem_body": _SelectionInput([air]),
-        "fem_action": _chosen(module.FEM_DECLARE_LABEL),
+        "fem_remove": _value(False),
         "fem_name": _value("Rear chamber"),
         "fem_size": _value(0.8),  # Fusion holds centimetres: 8 mm
         "fem_loss": _chosen("0.02"),
@@ -256,12 +256,29 @@ def test_the_command_executes_and_clearing_takes_it_all_back_off(fixture):
     assert ("WGLink", "fem_region") in air.attributes.values
 
     report = module._apply_fem_region(
-        _inputs(module, air, faces, fem_action=_chosen(module.FEM_CLEAR_LABEL)),
+        _inputs(module, air, faces, fem_remove=_value(True)),
         _state(module),
     )
     assert report["summary"] == "Cleared the FEM region and its surface groups."
     assert air.attributes.values == {}
     assert all(face.attributes.values == {} for face in faces)
+
+
+def test_remove_region_checkbox_disables_declaration_fields_and_explains_save(fixture):
+    module = fixture.module
+    air, faces = _air(module)
+    inputs = _inputs(module, air, faces, fem_remove=_value(True),
+                     fem_groups=_value(None), fem_validation=types.SimpleNamespace(formattedText=""))
+    state = _state(module, 1, 2)
+    assert module._sync_fem_validation(inputs, state)
+    assert module.FEM_REMOVE_NOTICE in inputs.itemById("fem_validation").formattedText
+    assert all(not inputs.itemById(name).isEnabled for name in module.FEM_DECLARATION_INPUTS)
+    # The body remains selectable; changing our mind restores the declaration.
+    assert getattr(inputs.itemById("fem_body"), "isEnabled", True)
+    inputs.itemById("fem_remove").value = False
+    assert module._sync_fem_validation(inputs, state)
+    assert all(inputs.itemById(name).isEnabled for name in module.FEM_DECLARATION_INPUTS)
+    assert module.FEM_REMOVE_NOTICE not in inputs.itemById("fem_validation").formattedText
 
 
 @pytest.mark.parametrize("accept", [True, False])

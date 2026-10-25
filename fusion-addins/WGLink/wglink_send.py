@@ -9,6 +9,7 @@ editing the open design.
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -72,6 +73,31 @@ else:
 DECLARATION_ATTRIBUTE = "return_declaration"
 # Attribute/appearance writes need not move Fusion's timeline or body revision.
 _mesh_authoring_generation = 0
+# Bumped by every source authoring (a stamp is an attribute write, which moves
+# neither the timeline nor a body revision); the heartbeat's source ids depend
+# on it. One owner, beside the mesh counter.
+_source_authoring_generation = 0
+
+
+def note_source_authoring() -> None:
+    global _source_authoring_generation
+    _source_authoring_generation += 1
+
+
+@contextmanager
+def generations_unchanged():
+    """For an edit Fusion rolls back (a command preview): it authored nothing.
+
+    The writers bump the authoring counters as they go; a preview runs them,
+    and Fusion then undoes the edit, so the counters go back too.
+    """
+
+    global _source_authoring_generation, _mesh_authoring_generation
+    saved = (_source_authoring_generation, _mesh_authoring_generation)
+    try:
+        yield
+    finally:
+        _source_authoring_generation, _mesh_authoring_generation = saved
 # The two managed roles that name a final exterior body. Every other managed
 # role is a helper WGLink built on the way there; wglink_return skips those, so
 # nothing here may mark one as a body the export depends on.
@@ -3526,6 +3552,76 @@ def _check_group_instance_selection(design: object, selections: list[tuple[objec
             )
 
 
+def _face_descriptors(faces: list[object]) -> list[dict[str, object]]:
+    """Copy what the plan needs off live faces. Main thread only."""
+
+    descriptors = []
+    for index, face in enumerate(faces):
+        try:
+            area = float(face.area) * 100.0
+        except Exception:  # noqa: BLE001 - an unread area only drops the total
+            area = None
+        descriptors.append({
+            "index": index,
+            "current_role": _face_role(face, strict=True),
+            "area_mm2": area,
+        })
+    return descriptors
+
+
+def apply_source_faces(faces: list[object], role: str | None, *, app: object = None,
+                       design: object = None) -> dict[str, object]:
+    """Paint ``faces`` as ``role`` (or clear them) and stamp their source identity."""
+    # A nested save passes its own design: every _design() lookup mints a new
+    # Fusion wrapper, and the outer transaction journals one design.
+    app = app if app is not None else adsk.core.Application.get()
+    design = design if design is not None else wglink_core._design(app)
+    action = "save WG source faces"
+    plan = wglink_author.plan_source_assignment(
+        read_for_edit(action, lambda: _face_descriptors(faces)), role)
+    def prepare(edit):
+        _prepare_source_edit(edit, design, faces)
+        for face in faces:
+            edit.remember_appearance(face)
+        if plan.paint:
+            edit.remember_asset(design, plan.appearance_name)
+
+    def mutate(edit):
+        wglink_author.apply_face_appearance_plan(
+            faces, plan, lambda name: edit.named_appearance(app, design, name),
+            write_appearance=edit.paint
+        )
+        # The source identity is authored here, and whatever WG advertises, so a
+        # document is ready when WG starts reading identities. The preflight and the
+        # heartbeat never author one. Send authors one in exactly one case: a role
+        # group painted before source identities existed, where no face carries the
+        # attribute at all, and only after ``_confirm_source_adoption`` has asked --
+        # see ``_adopt_painted_source``. Every selected face is stamped,
+        # including one that already carried the role: re-running this command on a
+        # source WGLink refused is how that source is reassigned. Clear takes the
+        # identity off every selected face, including one whose paint was already
+        # removed by hand, which is the only way to take such a stale face out.
+        note_source_authoring()
+        summary = plan.summary
+        # The dialog owns paint/attribute rollback and the final failure message.
+        if plan.role is not None:
+            assign_source_identity(
+                design, [faces[index] for index in (*plan.paint, *plan.unchanged)], plan.role
+            )
+            removed = 0
+        else:
+            removed = clear_source_identity(design, faces)
+        if plan.role is None:
+            if removed and not plan.clear:
+                summary = (
+                    f"Removed a stale WG source identity from {removed} face(s) that no "
+                    "longer carried a WG source role."
+                )
+        return {"summary": summary}
+
+    return document_edit(action, prepare, mutate)
+
+
 def paint_surface_group(
     app: object, design: object, entities: list[object], group_id: str | None,
     *, source_faces: list[object] = (),
@@ -5192,6 +5288,19 @@ def send(
     }
 
 
+def design_occurrences(design: object) -> list[object]:
+    """Every placement under the root, hidden and nested ones included."""
+    return wglink_core._items(getattr(getattr(design, "rootComponent", None), "allOccurrences", None))
+
+
+def design_bodies(design: object) -> list[object]:
+    """The B-Rep bodies of the root and of each placed component, in model order."""
+    root = getattr(design, "rootComponent", None)
+    components = [root, *(getattr(occurrence, "component", occurrence) for occurrence in design_occurrences(design))]
+    return [body for component in components
+            for body in wglink_core._items(getattr(component, "bRepBodies", None))]
+
+
 def design_revision_key(design: object, *, require_revisions: bool = False) -> object:
     """One model snapshot for repeat presses and request-bound mesh learning.
 
@@ -5203,13 +5312,11 @@ def design_revision_key(design: object, *, require_revisions: bool = False) -> o
         root = getattr(design, "rootComponent", None)
         if require_revisions and root is None:
             return None
-        components = [root]
         occurrences, bodies, parameters = [], [], []
-        for occurrence in wglink_core._items(getattr(root, "allOccurrences", None)):
+        for occurrence in design_occurrences(design):
             if require_revisions and any(not hasattr(occurrence, name) for name in
                                          ("component", "fullPathName", "isLightBulbOn")):
                 return None
-            components.append(getattr(occurrence, "component", occurrence))
             transform = getattr(occurrence, "transform2", None)
             if transform is None:
                 transform = getattr(occurrence, "transform", None)
@@ -5219,12 +5326,11 @@ def design_revision_key(design: object, *, require_revisions: bool = False) -> o
             placement = list(as_array()) if callable(as_array) else str(transform) if transform is not None else None
             occurrences.append([str(getattr(occurrence, "fullPathName", getattr(occurrence, "name", ""))),
                                 placement, bool(getattr(occurrence, "isLightBulbOn", True))])
-        for component in components:
-            for body in wglink_core._items(getattr(component, "bRepBodies", None)):
-                token, revision = getattr(body, "entityToken", ""), getattr(body, "revisionId", "")
-                if require_revisions and (not token or not revision or not hasattr(body, "isVisible")):
-                    return None
-                bodies.append([str(token), str(revision), bool(getattr(body, "isVisible", True))])
+        for body in design_bodies(design):
+            token, revision = getattr(body, "entityToken", ""), getattr(body, "revisionId", "")
+            if require_revisions and (not token or not revision or not hasattr(body, "isVisible")):
+                return None
+            bodies.append([str(token), str(revision), bool(getattr(body, "isVisible", True))])
         for parameter in wglink_core._items(getattr(design, "allParameters", None)):
             if require_revisions and any(not hasattr(parameter, name) for name in
                                          ("name", "expression", "value")):

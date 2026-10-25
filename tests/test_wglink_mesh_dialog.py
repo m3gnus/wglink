@@ -9,7 +9,7 @@ import pytest
 from test_wglink_activation_boundary import _boundary
 from test_wglink_fem_dialog import _building_inputs
 from test_wglink_mesh_settings import AppearanceFace, FailingMeshAttributes
-from test_wglink_send import Attributes, Collection, body, component, face
+from test_wglink_send import Attributes, Collection, body, component
 
 
 @pytest.fixture
@@ -61,7 +61,7 @@ def scene(monkeypatch, tmp_path):
 def build(scene, *, activate=True):
     module = scene.module
     inputs, items = _building_inputs(module, phase="commandCreated")
-    state = module.wglink_mesh_dialog.MeshDialogState()
+    state = module.wglink_mesh_dialog.MeshDialogState(module._mesh_dialog_services())
     module.wglink_mesh_dialog._build_mesh_dialog(inputs, state)
     if activate:
         inputs.activate()
@@ -137,7 +137,7 @@ def test_live_picks_on_a_fixed_driver_row_save_and_reopen(scene):
     assert reopened[f"mesh_source_count_{MF}"].formattedText == "not used"
 
 
-def test_row_buttons_and_row_edits_retarget_the_one_picker(scene):
+def test_row_buttons_and_row_clicks_retarget_the_one_picker_and_edits_do_not(scene):
     module = scene.module
     inputs, items, state = build(scene)
     inputs.command.onInputChanged = module.wglink_mesh_dialog.MeshInputChangedHandler(state).notify
@@ -145,12 +145,12 @@ def test_row_buttons_and_row_edits_retarget_the_one_picker(scene):
     inputs.click("mesh_add_group_Fine")
     back = next(reversed(state.groups))
     assert state.target == ("group", back) and picker.hasFocus and picker._entities == []
-    assert items[f"mesh_group_name_{back}"].value == "Fine zone 1"
+    assert items[f"mesh_group_name_{back}"].value == "Fine 1"
     items[f"mesh_group_name_{back}"].value = "Back"
     assert inputs.pick(scene.faces[1])
     inputs.click("mesh_add_group_Coarse")
     side = next(reversed(state.groups))
-    assert items[f"mesh_group_name_{side}"].value == "Coarse zone 1"
+    assert items[f"mesh_group_name_{side}"].value == "Coarse 1"
     assert items[f"mesh_group_size_{side}"].value == 4
     assert state.target == ("group", side) and picker._entities == []
     items[f"mesh_group_name_{side}"].value = "Side"
@@ -158,10 +158,18 @@ def test_row_buttons_and_row_edits_retarget_the_one_picker(scene):
     inputs.click(f"mesh_pick_group_{back}")
     assert picker._entities == [scene.faces[1]] and picker.hasFocus
     assert items["mesh_groups_table"].selectedRow == 0 and items["mesh_sources_table"].selectedRow == -1
-    # Editing a row's size makes that row the target too.
+    # Typing a size changes only the value: the picker keeps its row and focus.
     items[f"mesh_group_size_{side}"].value = 3
     inputs.click(f"mesh_group_size_{side}")
+    assert state.target == ("group", back) and picker.hasFocus
+    # A click on a row (Fusion moves the table's selectedRow) targets that row.
+    items["mesh_groups_table"].selectedRow = 1
+    inputs.click("mesh_groups_table")
     assert state.target == ("group", side) and picker._entities == [scene.faces[2]]
+    items["mesh_sources_table"].selectedRow = 1
+    inputs.click("mesh_sources_table")
+    assert state.target == ("source", MF) and items["mesh_groups_table"].selectedRow == -1
+    inputs.click(f"mesh_pick_group_{side}")
     module.wglink_mesh_dialog.MeshDialogActivateHandler(state).notify(types.SimpleNamespace(command=inputs.command))
     assert state.target == ("group", side)  # Orbit/Pan activation must not move the target.
     assert faces_of(state, "group", back) == [scene.faces[1]]
@@ -182,7 +190,8 @@ def _dialog_command(inputs):
     initial, minimum = [], []
     command = types.SimpleNamespace(commandInputs=inputs, parentCommandDefinition=types.SimpleNamespace(name="Sources & Mesh…"),
         setDialogInitialSize=lambda *size: initial.append(size), setDialogMinimumSize=lambda *size: minimum.append(size),
-        **{name: Event() for name in ("activate", "destroy", "inputChanged", "validateInputs", "execute")})
+        **{name: Event() for name in ("activate", "destroy", "inputChanged", "validateInputs", "execute",
+                                      "executePreview")})
     return command, initial, minimum
 
 
@@ -199,8 +208,9 @@ def test_command_lifecycle_title_save_size_and_first_promoted_button(scene):
     assert command.okButtonText == "Save" and not command.isExecutedWhenPreEmpted
     assert initial == [(660, 720)] and minimum == [(420, 420)]
     assert all(getattr(command, name).handlers for name in ("activate", "destroy", "inputChanged", "validateInputs", "execute"))
-    assert [items[key].name for key in ("mesh_sources", "mesh_walls", "mesh_groups", "mesh_advanced", "mesh_estimate_section", "mesh_validation_section")] == [
-        "Drivers", "Walls", "Size zones", "Advanced", "Estimate", "Validation"]
+    assert [items[key].name for key in ("mesh_sources", "mesh_walls", "mesh_groups", "mesh_advanced", "mesh_estimate_section")] == [
+        "Drivers", "Walls", "Size zones", "Advanced", "Estimate"]
+    assert list(items).index("mesh_validation") < list(items).index("mesh_sources")  # in view, above the tables
     assert items["mesh_advanced"].isExpanded is False
     assert items["mesh_faces"].selectionCount == 0  # invalid in commandCreated
     command.activate.handlers[0].notify(types.SimpleNamespace(command=command))
@@ -281,8 +291,8 @@ def test_defaults_filters_copy_and_restore_runs_once(scene):
     assert items["mesh_wall"].value == 2.5
     assert items["mesh_grading"].value == 10
     assert items["mesh_symmetry"].selectedItem.name == "Automatic"
-    assert items["mesh_wall"].tooltip == "Mesh size for every surface that is not a source or in a surface group."
-    assert items["mesh_grading"].tooltip == "Distance over which the mesh grows from each source's size to the wall size."
+    assert items["mesh_wall"].tooltip == "Mesh size for every surface that is not a driver and not in a size zone."
+    assert items["mesh_grading"].tooltip == "How far from each driver the mesh grows from the driver's size to the wall size."
     assert items["mesh_symmetry"].tooltip == "Off solves the whole model: slower, more memory."
     picker = items["mesh_faces"]
     assert picker.filters == ["Faces", "SolidBodies", "SurfaceBodies"]
@@ -290,7 +300,7 @@ def test_defaults_filters_copy_and_restore_runs_once(scene):
     assert not hasattr(picker, "isUseCurrentSelections")
     assert items["mesh_reset"].isFullWidth
     assert [item.text for item in items["mesh_groups_table"].toolbar] == [
-        "+ Fine zone (15 mm)", "+ Coarse zone (40 mm)"]
+        "+ Fine size zone (15 mm)", "+ Coarse size zone (40 mm)"]
     assert not [key for key in items if "preset" in key or key in ("mesh_add_source", "mesh_add_group")]
     assert "mesh_remove_source_1" not in items  # drivers are fixed rows
     unpick(scene, inputs, items, state, scene.faces[0])
@@ -361,23 +371,23 @@ def test_a_face_picked_for_another_row_moves_and_a_body_keeps_other_rows_faces(s
     back = add_zone(scene, inputs, items, state)
     items[f"mesh_group_name_{back}"].value = "Back"
     assert not module.wglink_mesh_dialog._sync_mesh_dialog(inputs, state)
-    assert "Zone &#x27;Back&#x27;: select at least one face." in items["mesh_validation"].formattedText
+    assert "Size zone &#x27;Back&#x27;: pick at least one face." in items["mesh_validation"].formattedText
     pick(scene, inputs, items, state, scene.cabinet)  # a whole body: the HF face stays HF
     assert faces_of(state, "group", back) == scene.faces[1:]
     assert faces_of(state, "source", HF) == [scene.faces[0]]
     assert items["mesh_faces"]._entities == scene.faces[1:]  # faces, not the body
-    assert state.notice == "1 face of that body already in other rows stayed there."
+    assert state.notice == "1 face of that body stayed in other rows."
     assert items["mesh_notice"].formattedText == html.escape(state.notice)
     assert module.wglink_mesh_dialog._sync_mesh_dialog(inputs, state)
     side = add_zone(scene, inputs, items, state)
     items[f"mesh_group_name_{side}"].value = "Side"
     pick(scene, inputs, items, state, scene.faces[1])
-    assert state.notice == "Moved 1 face from Zone 'Back' to Zone 'Side'."
+    assert state.notice == "Moved 1 face from Size zone 'Back' to Size zone 'Side'."
     assert faces_of(state, "group", back) == [scene.faces[2]]
     assert items[f"mesh_group_count_{back}"].formattedText == "1 face"
     target(scene, inputs, items, state, "source", HF)
     pick(scene, inputs, items, state, scene.faces[2])
-    assert state.notice == "Moved 1 face from Zone 'Back' to HF – high-frequency driver."
+    assert state.notice == "Moved 1 face from Size zone 'Back' to HF – high-frequency driver."
     assert faces_of(state, "source", HF) == [scene.faces[0], scene.faces[2]]
     assert not module.wglink_mesh_dialog._sync_mesh_dialog(inputs, state)  # Back is now empty
     target(scene, inputs, items, state, "group", back)
@@ -391,7 +401,7 @@ def test_a_face_picked_for_another_row_moves_and_a_body_keeps_other_rows_faces(s
     for zone in list(state.groups):
         change(scene, inputs, items, state, f"mesh_remove_group_{zone}")
     assert not module.wglink_mesh_dialog._sync_mesh_dialog(inputs, state)
-    assert "This model has no source to drive it." in items["mesh_validation"].formattedText
+    assert "This model has no driver yet." in items["mesh_validation"].formattedText
 
 
 def test_warnings_are_advisory_and_estimate_is_live_approximate_and_amber(scene, monkeypatch):
@@ -417,7 +427,6 @@ def test_warnings_are_advisory_and_estimate_is_live_approximate_and_amber(scene,
 
 
 def test_reset_changes_sizes_only_and_preserves_groups_without_editing_document(scene):
-    module = scene.module
     inputs, items, state = build(scene)
     items["mesh_wall"].value = 4
     items["mesh_grading"].value = 3
@@ -446,7 +455,7 @@ def test_linked_sources_are_read_only_and_keep_their_faces(scene, monkeypatch):
     inputs, items, state = build(scene)
     row = next(row for row, record in state.sources.items() if record.get("instance_id"))
     assert row == 5 and faces_of(state, "source", HF) == []
-    assert items[f"mesh_source_label_{row}"].formattedText == "HF – high-frequency driver (from the WG design)"
+    assert items[f"mesh_source_label_{row}"].formattedText == "HF – high-frequency driver (from the Waveguide Generator design)"
     assert not items[f"mesh_source_size_{row}"].isEnabled
     assert f"mesh_pick_source_{row}" not in items
     assert items[f"mesh_source_count_{row}"].formattedText == "1 face"
@@ -456,7 +465,7 @@ def test_linked_sources_are_read_only_and_keep_their_faces(scene, monkeypatch):
     pick(scene, inputs, items, state, scene.faces[0])  # the target is HF, an editable row
     assert faces_of(state, "source", row) == [scene.faces[0]]
     assert faces_of(state, "source", HF) == [] and items["mesh_faces"]._entities == []
-    assert state.notice == "HF – high-frequency driver (from the WG design) keeps its faces; change them in WG."
+    assert state.notice == "HF – high-frequency driver (from the Waveguide Generator design) keeps its faces; change them in Waveguide Generator."
 
 
 def test_custom_size_and_clearing_a_driver_and_restoring_guard(scene):
@@ -590,7 +599,7 @@ def test_first_activate_clears_preselection_and_reports_failed_saved_faces(scene
         command=picker.parentCommand))
     assert picker.selectionCount == 0 and state.target == ("source", HF)
     text = items["mesh_validation"].formattedText
-    assert "HF – high-frequency driver: 2 saved faces could not be selected (hidden or changed). Reselect them." in text
+    assert "HF – high-frequency driver: 2 saved faces are hidden or changed. Show the body and reopen Sources &amp; Mesh…, or clear this row." in text
     assert not scene.module.wglink_mesh_dialog._sync_mesh_dialog(inputs, state)
     for member in scene.faces[:2]:
         member.selectable = True
@@ -608,7 +617,7 @@ def test_orphan_paint_recovers_as_editable_group_and_save_can_clear_or_keep_it(s
         module.wglink_send._mesh_snapshot(scene.design, [], [scene.cabinet], set())
     inputs, items, state = build(scene)
     zone = next(iter(state.groups))
-    assert items[f"mesh_group_name_{zone}"].value == f"Recovered {paint_id.strip() or 'surface group'}"
+    assert items[f"mesh_group_name_{zone}"].value == f"Recovered {paint_id.strip()}".strip()
     assert items[f"mesh_group_size_{zone}"].value == 1.5
     assert faces_of(state, "group", zone) == [scene.faces[1]]
     if not keep:
@@ -741,7 +750,9 @@ def test_any_zone_can_be_removed_and_reset_preserves_membership_names_and_symmet
     assert list(state.groups) == [first, last] and state.group_order == [first, last]
     assert f"mesh_group_name_{middle}" not in items and table.rowCount == 2
     assert table.cells[(1, 0)] is items[f"mesh_group_name_{last}"]  # rows below shift up
-    assert state.target == ("source", HF)  # the removed zone was the target
+    # The removed zone was the target: its neighbour takes over, and the notice says why.
+    assert state.target == ("group", last) and table.selectedRow == 1
+    assert state.notice == "Removed Size zone 'Fine 2'."
     target(scene, inputs, items, state, "group", first)
     items[f"mesh_group_name_{first}"].value = "Back"
     pick(scene, inputs, items, state, scene.faces[1])
@@ -769,10 +780,10 @@ def test_validation_names_rows_refuses_duplicate_names_and_separates_warnings(sc
     items[f"mesh_group_size_{rows[0]}"].value = 0
     assert not module.wglink_mesh_dialog._sync_mesh_dialog(inputs, state)
     text = html.unescape(items["mesh_validation"].formattedText)
-    assert "Zone 'Back': size must be greater than 0." in text
-    assert "Zone 'back': duplicate group name with Zone 'Back'." in text
+    assert "Size zone 'Back': size must be greater than 0." in text
+    assert "Size zone 'back': the same name as Size zone 'Back'." in text
     assert text.index("Fix before saving:") < text.index("Warnings:") < text.index("coarser than the walls")
-    with pytest.raises(module.wglink_author.AuthorError, match="duplicate group name"):
+    with pytest.raises(module.wglink_author.AuthorError, match="the same name as"):
         module.wglink_mesh_dialog._apply_mesh_dialog(inputs, state)
     assert scene.design.rootComponent.attributes.values == {}
 
@@ -950,7 +961,7 @@ def test_a_fem_driven_model_saves_sources_and_mesh_without_a_source(scene):
     inputs, items, state = build(scene)
     unpick(scene, inputs, items, state, scene.faces[0])
     assert not module.wglink_mesh_dialog._sync_mesh_dialog(inputs, state)
-    assert "This model has no source to drive it." in items["mesh_validation"].formattedText
+    assert "This model has no driver yet." in items["mesh_validation"].formattedText
     state.fem_driven = True
     assert module.wglink_mesh_dialog._sync_mesh_dialog(inputs, state)
     assert "no source" not in items["mesh_validation"].formattedText
@@ -1028,37 +1039,46 @@ def test_a_repeated_pick_report_keeps_the_move_notice(scene):
     inputs, items, state = build(scene)
     add_zone(scene, inputs, items, state)
     pick(scene, inputs, items, state, scene.faces[0])
-    assert state.notice == "Moved 1 face from HF – high-frequency driver to Zone 'Fine zone 1'."
+    assert state.notice == "Moved 1 face from HF – high-frequency driver to Size zone 'Fine 1'."
     change(scene, inputs, items, state, "mesh_faces")  # Fusion reports the same selection again
     assert state.notice.startswith("Moved 1 face")
     pick(scene, inputs, items, state, scene.faces[1])  # a new, plain pick clears it
     assert state.notice == ""
 
 
-def test_the_preview_paints_through_save_and_never_keeps_a_result(scene):
+def test_preview_repaints_after_fusion_rollback_without_survey_or_settings_writes(scene, monkeypatch):
     module = scene.module
     dialog = module.wglink_mesh_dialog
-    inputs, items = _building_inputs(module, phase="commandCreated")
-    events = []
-    command = types.SimpleNamespace(commandInputs=inputs, executePreview=types.SimpleNamespace(add=events.append))
-    state = dialog.MeshDialogState()
-    state.command = command
-    dialog._build_mesh_dialog(inputs, state)
-    [preview] = events
-    assert preview in module._handlers
+    inputs, items = _building_inputs(module)
+    command, _initial, _minimum = _dialog_command(inputs)
+    module.CommandCreatedHandler("source").notify(types.SimpleNamespace(command=command))
+    [preview] = command.executePreview.handlers
+    assert isinstance(preview, dialog.MeshPreviewHandler) and preview in module._handlers
+    state = preview.state
     args = types.SimpleNamespace(command=command, isValidResult=True)
     preview.notify(args)  # before activation: nothing to show yet
     assert args.isValidResult is False and scene.faces[1].override is None
     inputs.activate()
-    dialog.MeshDialogActivateHandler(state).notify(types.SimpleNamespace(command=command))
+    command.activate.handlers[0].notify(types.SimpleNamespace(command=command))
     target(scene, inputs, items, state, "source", MF)
     pick(scene, inputs, items, state, scene.faces[1])
+    generations = (module.wglink_send._source_authoring_generation, module.wglink_send._mesh_authoring_generation)
+    causes = []
+    monkeypatch.setattr(module.wglink_activity, "because", lambda cause: causes.append(cause) or __import__("contextlib").nullcontext())
+    monkeypatch.setattr(module.wglink_send, "preflight_scope",
+                        lambda *a, **k: pytest.fail("a colour preview must not survey the model"))
+    monkeypatch.setattr(module.wglink_send, "save_mesh_settings",
+                        lambda *a, **k: pytest.fail("a colour preview must not publish mesh settings"))
     preview.notify(args)
     # Fusion rolls this back before Save or Cancel; here it shows Save's colour.
     assert scene.faces[1].appearance.name == "MF" and args.isValidResult is False
-    target(scene, inputs, items, state, "source", HF)
-    unpick(scene, inputs, items, state, scene.faces[0])
-    target(scene, inputs, items, state, "source", MF)
-    unpick(scene, inputs, items, state, scene.faces[1])
-    preview.notify(args)  # nothing drives the model: no colours, no error box
-    assert state.preview_failure and scene.ui.messages == []
+    assert causes == [module.wglink_activity.command_cause("source")]
+    assert (module.wglink_send._source_authoring_generation, module.wglink_send._mesh_authoring_generation) == generations
+    # Fusion rolls back the previous preview before every callback, even when
+    # only a size/name changed. The next callback must restore the same colour.
+    scene.faces[1].appearance = None
+    items[f"mesh_source_size_{MF}"].value = 2
+    preview.notify(args)
+    assert scene.faces[1].appearance.name == "MF"
+    assert state.preview_failure is None
+    assert (module.wglink_send._source_authoring_generation, module.wglink_send._mesh_authoring_generation) == generations

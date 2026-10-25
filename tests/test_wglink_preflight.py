@@ -153,16 +153,29 @@ def test_authoring_rules_let_a_fem_driven_model_save_without_a_source():
     assert [f["code"] for f in protocol.mesh_authoring_findings([], mesh)] == ["no_drive"]
     assert protocol.mesh_authoring_findings([], mesh, fem_driven=True) == []
     rows = [
-        {"kind": "source", "label": "Source 1 (HF)", "role": "HF", "size_mm": 6.0, "face_keys": {"a"}},
-        {"kind": "source", "label": "Source 2 (HF)", "role": "HF", "size_mm": 6.0, "face_keys": {"a"}},
-        {"kind": "group", "label": "Group 3 (unnamed)", "name": "", "size_mm": 15.0, "face_keys": ()},
+        {"kind": "source", "label": "HF – high-frequency driver", "size_mm": 6.0, "face_keys": {"a"}},
+        {"kind": "source", "label": "MF – mid-frequency driver", "size_mm": 6.0, "face_keys": (),
+         "missing_saved_faces": 2},
+        {"kind": "group", "label": "Size zone 'unnamed'", "name": "", "size_mm": 15.0, "face_keys": ()},
+        {"kind": "group", "label": "Size zone 'Back'", "name": "Back", "size_mm": 15.0, "face_keys": {"b"}},
+        {"kind": "group", "label": "Size zone 'back'", "name": "back", "size_mm": 15.0, "face_keys": {"c"}},
     ]
     assert [(f["code"], f["message"]) for f in protocol.mesh_authoring_findings(rows, mesh)] == [
-        ("source_role_duplicate", "Source 2 (HF): same role as Source 1 (HF). Use one source per role."),
-        ("face_in_two_rows", "Source 2 (HF): a face is also in Source 1 (HF). A face cannot be in two sources."),
-        ("group_without_faces", "Group 3 (unnamed): select at least one face."),
-        ("group_unnamed", "Group 3 (unnamed): give this surface group a name."),
+        # Saved faces that are hidden say what to do, not "pick at least one face".
+        ("saved_faces_unselected", "MF – mid-frequency driver: 2 saved faces are hidden or changed. "
+                                   "Show the body and reopen Sources & Mesh…, or clear this row."),
+        ("group_without_faces", "Size zone 'unnamed': pick at least one face."),
+        ("group_unnamed", "Size zone 'unnamed': give this size zone a name."),
+        ("group_name_duplicate", "Size zone 'back': the same name as Size zone 'Back'. "
+                                 "Give each size zone its own name."),
     ]
+
+
+def test_driver_labels_cover_every_role_in_display_order():
+    assert [role for role, _label in protocol.DRIVER_LABELS] == ["HF", "MF", "LF", "PASSIVE_CARDIOID"]
+    assert {role for role, _label in protocol.DRIVER_LABELS} == set(protocol.SOURCE_ROLES)
+    assert protocol.driver_label("PORT_EXIT") == protocol.driver_label("PASSIVE_CARDIOID") == "Port or passive opening"
+    assert protocol.canonical_source_role("PORT_EXIT") == "PASSIVE_CARDIOID"
 
 
 def test_acknowledged_holds_are_canonical_and_known():

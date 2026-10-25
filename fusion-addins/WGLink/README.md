@@ -82,26 +82,27 @@ handoff the add-in applies on its own — so the dropdown is maintenance,
 authoring-remedy, and recovery UI rather than the normal workflow. Audit and
 Relink remain full head-less APIs but are not panel commands.
 
-- **Sources & Mesh…** saves sources, mesh sizes and surface groups in the
-  Fusion document. Reopening restores the values and painted face selections.
-  Sources have a role (`HF`, `MF`, `LF` or `PASSIVE_CARDIOID`), faces and a mesh
-  size. Use **Add Source** or the **Remove** button in any source row to change the list. Sources
-  from a linked WG design are read-only.
+- **Sources & Mesh…** saves driver faces, mesh sizes and size zones in the
+  Fusion document. Reopening restores the values and face selections. Fixed
+  HF, MF, LF and Port or passive opening rows share one face picker. Select a
+  row or its **Pick faces** button, then pick faces in the model. An unused
+  driver row stays empty; its **✕** button clears it. Drivers from a linked
+  Waveguide Generator design are read-only.
 
-  **Walls** sets the size of surfaces outside sources and groups. **Surface
-  Groups** can refine or coarsen selected faces or bodies with **Fine 15 mm**,
-  **Coarse 40 mm** or a custom size. The add-in paints their membership. Removing
-  a group restores each face’s saved appearance, including body inheritance.
-  Any painted group missing from the saved settings appears as a recoverable group;
-  keep it with Save or remove its row to clear it. **Advanced** contains grading distance,
+  **Walls** sets the size of surfaces outside drivers and size zones. Add a
+  **Fine 15 mm** or **Coarse 40 mm** size zone, then give it faces or whole bodies
+  and adjust its size. A face picked for another row moves there. Removing a
+  size zone restores each face's saved appearance, including body inheritance.
+  A painted zone missing its settings appears as a recovered row; keep it with
+  Save or remove its row to clear it. **Advanced** contains grading distance,
   Symmetry **Automatic / Off**, and **Reset to defaults**. Defaults are HF 6,
   MF 15, LF/passive 25, walls 25 and grading distance 100 mm. Reset changes
-  sizes only; it preserves group names, membership and symmetry.
+  sizes only; it preserves names, membership and symmetry.
 
-  **Save** validates the complete settings before editing. Overlapping groups,
-  source/group overlap, empty groups, duplicate group names and nonpositive sizes
-  block Save. Saved faces that cannot be selected are reported by row and count;
-  unhide or reselect them before saving. A source
+  **Save** validates the complete settings before editing. Empty size zones,
+  duplicate zone names and nonpositive sizes block Save. Saved faces that cannot
+  be selected are reported by row and count; show the body and reopen, or clear
+  the affected row. A driver
   coarser than its walls and an approximate triangle estimate above 22,000 are
   advisory warnings, separated from errors under **Warnings**. The estimate is
   for the part WG solves. Automatic assumes quarter symmetry and also shows the

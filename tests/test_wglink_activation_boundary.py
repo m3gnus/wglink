@@ -397,7 +397,7 @@ def _source_command(fixture, monkeypatch) -> None:
         return found
     fixture.design.findAttributes = find
     inputs, items = _building_inputs(module)
-    state = module.wglink_mesh_dialog.MeshDialogState()
+    state = module.wglink_mesh_dialog.MeshDialogState(module._mesh_dialog_services())
     with module.wglink_activity.because(module.wglink_activity.command_cause("source")):
         module.wglink_mesh_dialog._build_mesh_dialog(inputs, state)
         module.wglink_mesh_dialog.MeshDialogActivateHandler(state).notify(types.SimpleNamespace(
