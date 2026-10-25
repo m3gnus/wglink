@@ -121,3 +121,39 @@ know is kept at most 30 days. A finished, unreadable or invalid status keeps the
 14 days. A receipt still waiting for its first status, and a status whose receipt is
 gone, are kept 14 days; a staging file 24 hours. The folder holds at most 500 requests,
 the oldest finished ones going first.
+
+## Fusion request history and opening a request
+
+`RequestTracker` owns the followed request and its persisted list. The add-in
+alone writes `<ipc>/.fusion-request-history.json`, atomically through
+`wglink_status.write_status_record`: `{schema:1, entries:[...]}`. Each entry
+keeps the request's document identity/name, Send/Solve kind, submission time,
+capabilities at submission, local phase, receipt and validated WG status (which
+includes its state, update time, job/run and mesh information when available).
+There is no second request owner. The earlier `.fusion-request-status.json`
+restart record is imported once and removed only after the history is durable.
+
+History retains the newest 50 entries. Finished entries expire after 30 days;
+unfinished entries remain within that cap and read **Check in WG** after 30
+days. They also read calmly when their previously observed status is missing.
+Restart reads all unfinished entries without submitting any request. A document
+activation resets the palette to **This document**; **All documents** changes
+only the list filter. **Clear finished** removes only terminal entries. Polling
+updates history for other documents too; a new needs-you state opens the palette.
+An unclaimed request withdrawn because a later press replaced it stays in history
+as cancelled/replaced.
+
+WG advertises `showRequest: 1` only while its delivery consumer runs. Pressing
+Open/Show results writes `.wg-show-requests/<requestId>.json` with
+`{schemaVersion:1, requestId, jobId?, at}` using the same atomic writer. Repeated
+presses for one request replace its pending pointer. WG resolves the current job
+of the request, publishes one `cadShowRequest` jobs-channel event containing
+`operationId` and, when available, `jobId`, then deletes that press's file. A
+newer press is left for the next pass. A headless backend keeps the file until
+a jobs-channel subscriber can hear it, so desktop startup cannot lose the choice.
+
+The add-in uses the existing installed-backend admission and application-front
+launcher. WG versions without the capability receive no show file and the
+palette says **Switch to Waveguide Generator**. WG's existing Fusion display
+owner handles the event; completed runs use its guarded `?job=` selection path.
+Later navigation, model selection, document loads and edits still win.

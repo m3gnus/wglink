@@ -1,4 +1,4 @@
-"""The one Send or Solve the add-in follows, and what its palette says about it.
+"""The followed Send or Solve, its bounded history, and the palette's words.
 
 A request is plain data (``new_request``): what was pressed, for which
 document, what WG advertised when it was submitted, the latest answer WG
@@ -18,13 +18,15 @@ worded here. Every string a user can read passes
 No state is a dead end. A request still under way always offers a way on
 (Open Waveguide Generator, and Send or Solve again where the add-in cannot
 tell what WG has), and one WG stops reporting on reads as quiet rather than
-busy for ever. Following stops on its own, and a record too old to matter is
-not resumed.
+busy for ever. History survives a restart without resubmission; an older
+unfinished entry offers a calm way to check in WG.
 """
 
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timezone
+import math
 import threading
 import time
 from pathlib import Path
@@ -40,8 +42,9 @@ else:
 
 #: The add-in's own record of the request it follows, in the WGLink folder,
 #: so a restart resumes following it without submitting anything again.
-RECORD_FILENAME = ".fusion-request-status.json"
-RECORD_SCHEMA = 1
+LEGACY_RECORD_FILENAME = ".fusion-request-status.json"
+RECORD_FILENAME = wglink_protocol.REQUEST_HISTORY_FILENAME
+RECORD_SCHEMA = wglink_protocol.REQUEST_HISTORY_SCHEMA_VERSION
 
 SEND = wglink_inbox.KIND_RECEIVE_SNAPSHOT
 SOLVE = wglink_inbox.KIND_PREPARE_AND_SOLVE
@@ -78,12 +81,12 @@ QUIET_SECONDS = 5 * WG_STATUS_RHYTHM_SECONDS
 QUIET_WITHOUT_WG_SECONDS = 2 * WG_STATUS_RHYTHM_SECONDS
 #: With no news for this long, the add-in stops looking. The palette keeps
 #: its last words and its ways on.
-FOLLOW_LIMIT_SECONDS = 24 * 3600.0
+FOLLOW_LIMIT_SECONDS = wglink_protocol.REQUEST_HISTORY_DAYS * 24 * 3600.0
 #: WG's "Try again" moves a request that could not finish back to preparing:
 #: it is looked at, slowly, for this long after it stopped.
 RETRY_WATCH_SECONDS = 3600.0
-#: A record whose last news is older than this is not resumed at start-up.
-RECORD_MAX_AGE_SECONDS = 2 * 24 * 3600.0
+#: Finished history expires after this; older unfinished rows read Check in WG.
+RECORD_MAX_AGE_SECONDS = wglink_protocol.REQUEST_HISTORY_DAYS * 24 * 3600.0
 
 APP_NAME = wglink_protocol.APP_NAME
 _OPEN_WG = wglink_protocol.REQUEST_STATUS_OPEN_WG
@@ -208,7 +211,7 @@ def poll(request: Mapping[str, Any], ipc: Path, *, now: float | None = None) -> 
 
 
 def _advance(request: dict[str, Any], ipc: Path, now: float) -> None:
-    if not following(request, now):
+    if terminal(request) and not following(request, now):
         return
     request_id = str(request.get("requestId"))
     kind = request.get("kind")
@@ -224,6 +227,7 @@ def _advance(request: dict[str, Any], ipc: Path, now: float) -> None:
         # one is news from WG.
         if status is not None and status["seq"] >= held_seq:
             request["status"] = status
+            request.pop("missingStatus", None)
             heard = status["seq"] > held_seq
     if capabilities.get("acknowledgement") and request.get("receipt") is None:
         receipt = wglink_inbox.read_acknowledgement(
@@ -236,6 +240,7 @@ def _advance(request: dict[str, Any], ipc: Path, now: float) -> None:
         _advance_local(request, ipc, now)
         heard = heard or request.get("local") != before
     if heard:
+        request.pop("missingStatus", None)
         request["heardAt"] = now
     request["wgStopped"] = wglink_inbox.wg_stopped(ipc)
     request["quiet"] = _quiet(request, now)
@@ -345,7 +350,7 @@ def terminal(request: Mapping[str, Any]) -> bool:
 def following(request: Mapping[str, Any], now: float | None = None) -> bool:
     """Whether the request is still worth looking at.
 
-    Not while exporting, not once nothing was sent, and not after a day
+    Not while exporting, not once nothing was sent, and not after 30 days
     without news. A finished request is not, except one WG could not finish,
     for an hour: WG's "Try again" moves it back to preparing.
     """
@@ -420,8 +425,11 @@ def _view(request: Mapping[str, Any], now: float) -> dict[str, Any]:
     busy = False
     record = _wg_record(request)
     # Quiet once looked at, or by age alone: a request no longer looked at
-    # (a day without news) still reads as quiet, never as busy.
-    if request.get("quiet") or is_quiet(request, now):
+    # (30 days without news) still reads as quiet, never as busy.
+    if not terminal(request) and (now - _pressed(request) > RECORD_MAX_AGE_SECONDS or request.get("missingStatus")):
+        headline = wglink_protocol.REQUEST_HISTORY_TEXT["check"]
+        detail = wglink_protocol.REQUEST_HISTORY_TEXT["missing"]
+    elif request.get("quiet") or is_quiet(request, now):
         headline = f"{APP_NAME} has not reported on {inner} for a while."
         detail = f"Open {APP_NAME} to check it, or {verb.lower()} it again."
         actions.append(again)
@@ -510,45 +518,100 @@ def _name(value: object) -> str | None:
 # -- the add-in's own record ----------------------------------------------------
 
 
-def save(ipc: Path, request: Mapping[str, Any]) -> Path:
-    """Write the followed request atomically (``wglink_status``'s one writer)."""
-
-    return wglink_status.write_status_record(Path(ipc), RECORD_FILENAME, dict(request))
+def _pressed(request: Mapping[str, Any]) -> float:
+    return float(request.get("submittedAt") or request.get("pressedAt") or 0)
 
 
-def load(ipc: Path, *, now: float | None = None) -> dict[str, Any] | None:
-    """The request a previous session was following, or None.
+def bounded(entries: list[dict[str, Any]], *, now: float | None = None) -> list[dict[str, Any]]:
+    moment = time.time() if now is None else float(now)
+    by_id = {entry["requestId"]: entry for entry in entries
+             if not terminal(entry) or moment - _pressed(entry) <= RECORD_MAX_AGE_SECONDS}
+    return sorted(by_id.values(), key=_pressed, reverse=True)[:wglink_protocol.REQUEST_HISTORY_LIMIT]
 
-    None too for a record whose last news is older than
-    ``RECORD_MAX_AGE_SECONDS``. A request whose export never finished cannot
-    have reached WG: it reads as not sent. Nothing is ever submitted again
-    from here.
-    """
 
-    found = wglink_inbox._read_json(Path(ipc) / RECORD_FILENAME)
+def _read_entry(found: object) -> dict[str, Any] | None:
     if (not isinstance(found, dict) or found.get("schema") != RECORD_SCHEMA
             or not isinstance(found.get("requestId"), str)
-            or found.get("local") not in _LOCAL
-            or not isinstance(found.get("capabilities"), dict)):
+            or not wglink_protocol._STATUS_ID.fullmatch(found["requestId"])
+            or found.get("local") not in _LOCAL or not isinstance(found.get("capabilities"), dict)):
         return None
-    moment = time.time() if now is None else float(now)
-    heard = found.get("heardAt") or found.get("submittedAt") or found.get("pressedAt")
-    if not isinstance(heard, (int, float)) or moment - float(heard) > RECORD_MAX_AGE_SECONDS:
+    found = copy.deepcopy(found)
+    for field in ("pressedAt", "submittedAt", "heardAt"):
+        value = found.get(field)
+        if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
+            return None
+    if not found.get("pressedAt"):
         return None
-    found["heardAt"] = float(heard)
+    found["heardAt"] = float(found.get("heardAt") or _pressed(found))
     if found.get("local") == EXPORTING:
         found["local"] = NOT_SENT
     if found.get("status") is not None:
-        found["status"] = wglink_protocol.validate_request_status(
-            found["status"], request_id=found["requestId"])
+        found["status"] = wglink_protocol.validate_request_status(found["status"], request_id=found["requestId"])
     if not isinstance(found.get("notes"), list):
         found["notes"] = []
     found["quiet"] = bool(found.get("quiet"))
     return found
 
 
+def load_history(ipc: Path, *, now: float | None = None) -> list[dict[str, Any]]:
+    """Recover history, importing the old restart record once. Never resubmit."""
+    root = Path(ipc)
+    record = wglink_inbox._read_json(root / RECORD_FILENAME)
+    entries = record.get("entries", []) if isinstance(record, dict) and record.get("schema") == 1 else []
+    entries = entries if isinstance(entries, list) else []
+    legacy = root / LEGACY_RECORD_FILENAME
+    old = _read_entry(wglink_inbox._read_json(legacy))
+    if old is not None and not any(isinstance(e, dict) and e.get("requestId") == old["requestId"] for e in entries):
+        entries.append(old)
+    found = bounded([entry for value in entries if (entry := _read_entry(value)) is not None], now=now)
+    if legacy.exists():
+        # Only discard the old restart record after the durable replacement.
+        save(root, {"schema": 1, "entries": found})
+        legacy.unlink()
+    return found
+
+
+def save(ipc: Path, request: Mapping[str, Any]) -> Path:
+    """Write the tracker's history with the add-in's one atomic writer."""
+    if "entries" in request:
+        payload = dict(request)
+    else:
+        entries = load_history(ipc)
+        entries = [e for e in entries if e["requestId"] != request["requestId"]]
+        payload = {"schema": 1, "entries": bounded([dict(request), *entries])}
+    return wglink_status.write_status_record(Path(ipc), RECORD_FILENAME, payload)
+
+
+def load(ipc: Path, *, now: float | None = None) -> dict[str, Any] | None:
+    entries = load_history(ipc, now=now)
+    return entries[0] if entries else None
+
+
+def can_show(ipc: Path) -> bool:
+    capabilities = wglink_inbox._read_json(Path(ipc) / wglink_inbox.CAPABILITIES_FILENAME) or {}
+    return (type(capabilities.get(wglink_protocol.SHOW_REQUEST_CAPABILITY)) is int
+            and capabilities[wglink_protocol.SHOW_REQUEST_CAPABILITY] == 1)
+
+
+def show_request(ipc: Path, request: Mapping[str, Any]) -> Path | None:
+    """One pending pointer per request. An older WG gets no file."""
+    if not can_show(ipc):
+        return None
+    job = diagnostics(request).get("jobId")
+    record = wglink_protocol.validate_show_request({
+        "schemaVersion": wglink_protocol.SHOW_REQUEST_SCHEMA_VERSION,
+        "requestId": request.get("requestId"),
+        "at": datetime.now(timezone.utc).isoformat(), **({"jobId": job} if job else {}),
+    })
+    if record is None:
+        return None
+    folder = Path(ipc) / wglink_protocol.SHOW_REQUESTS_DIRECTORY
+    folder.mkdir(exist_ok=True)
+    return wglink_status.write_status_record(folder, record["requestId"] + ".json", record)
+
+
 class RequestTracker:
-    """The one request the palette follows; shared by the main thread and the poll.
+    """One followed request and its bounded history, shared by main and poll.
 
     Plain data under a lock. ``replace`` takes an update only for the request
     it holds, so a late answer for an earlier request never changes a newer
@@ -560,6 +623,9 @@ class RequestTracker:
         self._lock = threading.Lock()
         self._request: dict[str, Any] | None = None
         self.visible = False
+        self._entries: list[dict[str, Any]] = []
+        self.document_id: str | None = None
+        self.all_documents = False
 
     def current(self) -> dict[str, Any] | None:
         with self._lock:
@@ -569,8 +635,12 @@ class RequestTracker:
               save: Callable[[dict[str, Any]], object] | None = None) -> None:
         with self._lock:
             self._request = copy.deepcopy(dict(request)) if request is not None else None
+            if self._request is None:
+                self._entries = []
+            else:
+                self._entries = bounded([self._request, *[e for e in self._entries if e["requestId"] != request["requestId"]]], now=_pressed(self._request))
             if save is not None and self._request is not None:
-                save(copy.deepcopy(self._request))
+                save(self._payload())
 
     def replace(self, request: Mapping[str, Any],
                 save: Callable[[dict[str, Any]], object] | None = None
@@ -582,21 +652,52 @@ class RequestTracker:
             if previous is None or previous.get("requestId") != request.get("requestId"):
                 return previous, False
             self._request = copy.deepcopy(dict(request))
+            self._entries = [copy.deepcopy(self._request) if e["requestId"] == request["requestId"] else e for e in self._entries]
             if save is not None:
-                save(copy.deepcopy(self._request))
+                save(self._payload())
             return previous, True
 
-    def poll_interval(self, now: float | None = None) -> float | None:
-        """Seconds to the next look, or None when there is nothing to look at."""
+    def _payload(self) -> dict[str, Any]:
+        return {"schema": RECORD_SCHEMA, "entries": copy.deepcopy(self._entries)}
 
-        request = self.current()
+    def restore(self, entries: list[dict[str, Any]]) -> None:
+        with self._lock:
+            self._entries = copy.deepcopy(entries)
+            self._request = copy.deepcopy(entries[0]) if entries else None
+
+    def entries(self, *, filtered: bool = False) -> list[dict[str, Any]]:
+        with self._lock:
+            return copy.deepcopy([e for e in self._entries if not filtered or self.all_documents
+                                  or (self.document_id is not None and e.get("documentId") == self.document_id)])
+
+    def get(self, request_id: str) -> dict[str, Any] | None:
+        return next((e for e in self.entries() if e["requestId"] == request_id), None)
+
+    def update_entry(self, previous: Mapping[str, Any], updated: Mapping[str, Any], save: Callable) -> bool:
+        with self._lock:
+            for index, entry in enumerate(self._entries):
+                if entry == previous:
+                    self._entries[index] = copy.deepcopy(dict(updated))
+                    if self._request and self._request["requestId"] == entry["requestId"]:
+                        self._request = copy.deepcopy(dict(updated))
+                    save(self._payload())
+                    return True
+            return False
+
+    def clear_finished(self, save: Callable) -> None:
+        with self._lock:
+            self._entries = [e for e in self._entries if not terminal(e)]
+            if self._request and terminal(self._request):
+                self._request = copy.deepcopy(self._entries[0]) if self._entries else None
+            save(self._payload())
+
+    def poll_interval(self, now: float | None = None) -> float | None:
         moment = time.time() if now is None else float(now)
-        if request is None or not following(request, moment):
+        entries = [e for e in self.entries() if following(e, moment)]
+        if not entries:
             return None
-        silent = moment - float(request.get("heardAt") or moment)
-        if request.get("quiet") or terminal(request) or silent >= QUIET_SECONDS:
-            return POLL_QUIET_SECONDS
-        return POLL_VISIBLE_SECONDS if self.visible else POLL_HIDDEN_SECONDS
+        quiet = all(e.get("quiet") or terminal(e) or _silent(e, moment) >= QUIET_SECONDS for e in entries)
+        return POLL_QUIET_SECONDS if quiet else POLL_VISIBLE_SECONDS if self.visible else POLL_HIDDEN_SECONDS
 
 
 __all__ = [
@@ -606,5 +707,5 @@ __all__ = [
     "RequestTracker", "SEND", "SEND_AGAIN_ID", "SOLVE", "SUBMITTED", "TAKEN",
     "TAKEN_UNCONFIRMED", "UNCONFIRMED", "diagnostics", "following", "load", "new_request",
     "not_sent", "outcome", "poll", "repeat_question", "request_path", "save", "submitted",
-    "terminal", "view", "withdraw",
+    "terminal", "view", "withdraw", "load_history", "bounded", "can_show", "show_request",
 ]

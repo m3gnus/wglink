@@ -736,12 +736,14 @@ def test_wgs_try_again_after_could_not_finish_is_seen_for_an_hour(tmp_path: Path
     assert tracker.poll_interval(now=700.0 + wglink_requests.RETRY_WATCH_SECONDS + 1) is None
 
 
-def test_an_old_record_is_not_resumed(tmp_path: Path) -> None:
+def test_an_old_unfinished_record_is_retained_calmly(tmp_path: Path) -> None:
     request = _submitted(tmp_path)
     wglink_requests.save(tmp_path, request)
 
     assert wglink_requests.load(tmp_path, now=2.0)["requestId"] == "req-1"
-    assert wglink_requests.load(tmp_path, now=2.0 + wglink_requests.RECORD_MAX_AGE_SECONDS) is None
+    old = wglink_requests.load(tmp_path, now=2.0 + wglink_requests.RECORD_MAX_AGE_SECONDS)
+    assert old["requestId"] == "req-1"
+    assert wglink_requests.view(old, now=2.0 + wglink_requests.RECORD_MAX_AGE_SECONDS)["headline"] == "Check in WG"
 
 
 def test_a_quiet_request_resumes_at_start_up_without_opening_the_palette(

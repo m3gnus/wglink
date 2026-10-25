@@ -1402,7 +1402,17 @@ def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[s
     if confirmed and wglink_requests.replaces(superseded, followed):
         # The same press for the same document, now safely in WG's inbox,
         # replaces a request WG has not picked up yet: take that one back.
-        wglink_requests.withdraw(ipc, superseded)
+        if wglink_requests.withdraw(ipc, superseded):
+            held = _requests.get(str(superseded.get("requestId")))
+            if held is not None:
+                replaced = dict(held)
+                replaced["status"] = wglink_protocol.validate_request_status({
+                    "contract": wglink_protocol.REQUEST_STATUS_CONTRACT,
+                    "schemaVersion": wglink_protocol.REQUEST_STATUS_SCHEMA_VERSION,
+                    "requestId": held["requestId"], "kind": held["kind"], "seq": 0,
+                    "documentName": held.get("documentName"), "state": "cancelled", "cancelReason": "replaced",
+                })
+                _requests.update_entry(held, replaced, _save_followed)
     _arm_request_poll()
     return request_id
 
@@ -1802,12 +1812,27 @@ def _take_force_new_request(operation: str) -> bool:
 
 def _request_view() -> dict[str, object]:
     request = _requests.current()
+    _requests.document_id = _active_document_id()
     if request is None:
         found = {"headline": "No Send or Solve yet.", "detail": None, "notes": [],
                  "options": [], "actions": [], "busy": False, "progress": None,
                  "terminal": True, "diagnostics": {}}
     else:
         found = wglink_requests.view(request)
+    ipc = wglink_workspace.ipc_folder()
+    show_supported = ipc is not None and wglink_requests.can_show(ipc)
+    rows = []
+    for entry in _requests.entries(filtered=True):
+        row = wglink_requests.view(entry)
+        for action in row["actions"]:
+            if action["id"] in _OPEN_WG_ACTIONS and not show_supported:
+                action["label"] = wglink_protocol.REQUEST_HISTORY_TEXT["switch"]
+        if entry.get("documentId") != _active_document_id():
+            row["actions"] = [action for action in row["actions"] if action["id"] in _OPEN_WG_ACTIONS]
+        rows.append({**row, "requestId": entry["requestId"], "documentName": entry.get("documentName"),
+                     "kindLabel": "Solve" if entry.get("kind") == wglink_requests.SOLVE else "Send",
+                     "submittedAt": entry.get("submittedAt") or entry.get("pressedAt")})
+    found.update(historyNotes=[_requests_hint] if _requests_hint else [], entries=rows, allDocuments=_requests.all_documents, labels=wglink_protocol.REQUEST_HISTORY_TEXT)
     if _requests_hint:
         found["notes"] = list(found.get("notes") or []) + [_requests_hint]
     return found
@@ -1830,7 +1855,8 @@ class RequestsPaletteHTMLHandler(getattr(adsk.core, "HTMLEventHandler", object))
             elif action == "action":
                 data = json.loads(str(getattr(args, "data", "") or "{}"))
                 action_id = str(data.get("id") or "") if isinstance(data, dict) else ""
-                _schedule_followup(lambda: _request_action(action_id))
+                request_id = str(data.get("requestId") or "") if isinstance(data, dict) else ""
+                _schedule_followup(lambda: _request_action(action_id, request_id))
         except Exception:  # noqa: BLE001 - a palette message must not raise into Fusion
             _log(f"[{PANEL_NAME}] request palette\n{traceback.format_exc()}")
 
@@ -1943,22 +1969,60 @@ _OPEN_WG_ACTIONS = {wglink_protocol.REQUEST_STATUS_OPEN_WG["id"],
                     wglink_protocol.REQUEST_STATUS_SHOW_RESULTS["id"]}
 
 
-def _request_action(action_id: str) -> None:
+def _request_action(action_id: str, request_id: str = "") -> None:
     """A palette button, as a follow-up on the main thread."""
 
     global _requests_hint, _force_new_request
+    request = _requests.get(request_id) if request_id else _requests.current()
+    if action_id == "thisDocument" or action_id == "allDocuments":
+        _requests.all_documents = action_id == "allDocuments"
+        _show_request_palette()
+        return
+    if action_id == "clearFinished":
+        _requests.clear_finished(_save_followed)
+        _show_request_palette()
+        return
+    if request is None:
+        return
     if action_id in _OPEN_WG_ACTIONS:
-        if not wglink_launcher.bring_wg_forward():
-            _requests_hint = f"Switch to {PANEL_NAME}."
-            _show_request_palette()
-    elif action_id == wglink_protocol.REQUEST_STATUS_OPEN_SOURCES_MESH["id"]:
+        _open_history_request(request)
+        return
+    if request.get("documentId") != _active_document_id():
+        return
+    if action_id == wglink_protocol.REQUEST_STATUS_OPEN_SOURCES_MESH["id"]:
         _open_sources_and_mesh()
     elif action_id == wglink_requests.SEND_AGAIN_ID:
-        request = _requests.current() or {}
         operation = "solve" if request.get("kind") == wglink_requests.SOLVE else "send"
         _force_new_request = (operation, time.monotonic() + FORCE_NEW_REQUEST_SECONDS)
         if not _execute_command(operation):
             _force_new_request = None
+
+
+def _open_history_request(request: dict[str, object]) -> None:
+    """Admit the existing backend, then ask the one display owner to show it."""
+    ipc, data_dir = wglink_workspace.ipc_folder(), wglink_workspace.data_dir()
+
+    def ready(error: str | None = None) -> None:
+        global _requests_hint
+        try:
+            written = ipc is not None and wglink_requests.show_request(ipc, request) is not None
+            raised = wglink_launcher.bring_wg_forward()
+            _requests_hint = None if written and raised and error is None else wglink_protocol.REQUEST_HISTORY_TEXT["switch"] + "."
+        except (OSError, ValueError):
+            _requests_hint = wglink_protocol.REQUEST_HISTORY_TEXT["switch"] + "."
+        _show_request_palette()
+
+    argv = (wglink_launcher.launcher_argv(ipc) if ipc is not None else None)
+    if argv is None:
+        argv = wglink_launcher.installed_marker_argv(Path(__file__).parent)
+    if ipc is None or data_dir is None or argv is None:
+        ready()
+        return
+    try:
+        _backend_admission.request(ipc, data_dir, argv, wglink_workspace.launcher_data_dir(),
+                                   ready, _schedule_followup)
+    except wglink_launcher.LauncherError:
+        ready("unavailable")
 
 
 def _execute_command(operation: str) -> bool:
@@ -2023,27 +2087,29 @@ def _poll_requests_due() -> None:
 
 def _poll_requests_once() -> None:
     ipc = wglink_workspace.ipc_folder()
-    current = _requests.current()
-    if ipc is None or current is None:
+    if ipc is None:
         return
-    wglink_activity.record(wglink_activity.PICKUP_CHECK)
-    updated = wglink_requests.poll(current, ipc)
-    if updated == current:
-        return
-    problem = None
-    try:
-        previous, taken = _requests.replace(updated, save=lambda found: wglink_requests.save(ipc, found))
-    except (OSError, ValueError, TypeError) as exc:
-        previous, taken = current, True  # held, not recorded
-        problem = f"could not record the request being followed: {exc}"
-    if not taken:
-        return  # a newer request replaced this one meanwhile
-    with _followups_lock:
-        if _timers_closed:
-            return  # stopped while looking: nothing follows a stop()
-        _followups.append(wglink_activity.carrying(
-            lambda: _request_changed(previous, updated, problem)))
-    _raise_followup_event()
+    for current in _requests.entries():
+        if not wglink_requests.following(current):
+            continue
+        wglink_activity.record(wglink_activity.PICKUP_CHECK)
+        updated = wglink_requests.poll(current, ipc)
+        if updated == current:
+            continue
+        problem = None
+        try:
+            taken = _requests.update_entry(current, updated, _save_followed)
+        except (OSError, ValueError, TypeError) as exc:
+            taken = True
+            problem = f"could not record request history: {exc}"
+        if not taken:
+            continue
+        with _followups_lock:
+            if _timers_closed:
+                return
+            _followups.append(wglink_activity.carrying(
+                lambda before=current, after=updated, issue=problem: _request_changed(before, after, issue)))
+        _raise_followup_event()
 
 
 def _request_changed(previous: dict[str, object] | None, updated: dict[str, object],
@@ -2053,8 +2119,8 @@ def _request_changed(previous: dict[str, object] | None, updated: dict[str, obje
     global _requests_hint
     if problem:
         _log(f"[{PANEL_NAME}] {problem}")
-    if (_requests.current() or {}).get("requestId") != updated.get("requestId"):
-        return  # a later request, or a stop(), came between the look and now
+    if _requests.get(str(updated.get("requestId"))) is None:
+        return  # cleared or stopped between the look and now
     before = wglink_requests.outcome(previous) if previous else None
     after = wglink_requests.outcome(updated)
     if before != after:
@@ -2077,25 +2143,50 @@ def _request_not_sent() -> None:
 def _recover_request() -> None:
     """Follow the request a previous session was following. Never submits it again.
 
-    A record too old to matter is not resumed (``wglink_requests.load``), and
-    the palette opens by itself only for a request that is still moving.
+    All unfinished entries are checked; the palette opens by itself only
+    for a request that is still moving.
     """
 
     ipc = wglink_workspace.ipc_folder()
     if ipc is None:
         return
     try:
-        found = wglink_requests.load(ipc)
-    except Exception:  # noqa: BLE001 - a lost record costs only the palette line
-        _log(f"[{PANEL_NAME}] could not read the request being followed\n{traceback.format_exc()}")
+        entries = wglink_requests.load_history(ipc)
+        for index, entry in enumerate(entries):
+            if not wglink_requests.terminal(entry):
+                updated = wglink_requests.poll(entry, ipc)
+                status = wglink_inbox.read_request_status(ipc, entry["requestId"], kind=entry.get("kind"),
+                                                         manifest_sha256=entry.get("manifestSha256"))
+                waited = time.time() - float(entry.get("submittedAt") or entry["pressedAt"])
+                updated["missingStatus"] = bool(
+                    (entry.get("capabilities") or {}).get("requestStatus") and status is None
+                    and (entry.get("status") is not None or waited > wglink_inbox.SOLVE_PICKUP_NOTICE_SECONDS)
+                )
+                entries[index] = updated
+        _requests.restore(entries)
+        _requests.document_id = _active_document_id()
+        _requests.all_documents = False
+        if entries:
+            _save_followed({"schema": 1, "entries": entries})
+    except Exception:  # noqa: BLE001 - history never stops add-in startup
+        _log(f"[{PANEL_NAME}] could not read request history\n{traceback.format_exc()}")
         return
-    if found is None:
-        return
-    _requests.begin(found)
-    if wglink_requests.following(found):
-        if not wglink_requests.terminal(found) and not wglink_requests.is_quiet(found):
-            _show_request_palette(open_it=True)
+    if any(wglink_requests.following(e) and not wglink_requests.terminal(e)
+           and not wglink_requests.is_quiet(e) and not e.get("missingStatus") for e in entries):
+        _show_request_palette(open_it=True)
+    if _requests.poll_interval() is not None:
         _arm_request_poll(0.0)
+
+
+class RequestsDocumentHandler(getattr(adsk.core, "DocumentEventHandler", object)):
+    def notify(self, _args: object) -> None:
+        _requests.document_id = _active_document_id()
+        _requests.all_documents = False
+        _show_request_palette()
+
+
+_request_document_event = None
+_request_document_handler = None
 
 
 class CommandExecuteHandler(adsk.core.CommandEventHandler):
@@ -5558,7 +5649,11 @@ def _start_followups(app: object) -> bool:
     """
 
     global _followup_event, _followup_handler, _backend_admission, _followup_app, _timers_closed
-    global _request_poll_armed
+    global _request_poll_armed, _request_document_event, _request_document_handler
+    _request_document_event = getattr(app, "documentActivated", None)
+    if _request_document_event is not None:
+        _request_document_handler = RequestsDocumentHandler()
+        _request_document_event.add(_request_document_handler)
     _backend_admission = wglink_launcher.BackendAdmission()
     with _timers_lock:
         _timers_closed = False
@@ -5576,6 +5671,10 @@ def _start_followups(app: object) -> bool:
 def _stop_followups(app: object) -> None:
     global _followup_event, _followup_handler, _backend_progress, _followup_app
     global _request_poll_armed, _force_new_request, _requests_hint, _timers_closed
+    global _request_document_event, _request_document_handler
+    if _request_document_event is not None and _request_document_handler is not None:
+        _request_document_event.remove(_request_document_handler)
+    _request_document_event = _request_document_handler = None
     _backend_admission.close()
     _hide_export_progress(_backend_progress)
     _backend_progress = None
