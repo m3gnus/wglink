@@ -426,6 +426,8 @@ def _building_inputs(module, *, phase="running"):
             if key in self.readonly:
                 raise AttributeError(f"{key} is read-only in Fusion")
             super().__setattr__(key, value)
+            if key == "formattedText" and getattr(command, "text_change_events", False):
+                changed(self)
 
         def deleteMe(self):
             for member in list(items.values()):

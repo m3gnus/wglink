@@ -137,7 +137,7 @@ def test_live_picks_on_a_fixed_driver_row_save_and_reopen(scene):
     assert reopened[f"mesh_source_count_{MF}"].formattedText == "not used"
 
 
-def test_row_buttons_and_row_clicks_retarget_the_one_picker_and_edits_do_not(scene):
+def test_row_buttons_and_row_clicks_retarget_and_edits_keep_keyboard_focus(scene):
     module = scene.module
     inputs, items, state = build(scene)
     inputs.command.onInputChanged = module.wglink_mesh_dialog.MeshInputChangedHandler(state).notify
@@ -158,10 +158,12 @@ def test_row_buttons_and_row_clicks_retarget_the_one_picker_and_edits_do_not(sce
     inputs.click(f"mesh_pick_group_{back}")
     assert picker._entities == [scene.faces[1]] and picker.hasFocus
     assert items["mesh_groups_table"].selectedRow == 0 and items["mesh_sources_table"].selectedRow == -1
-    # Typing a size changes only the value: the picker keeps its row and focus.
+    # A genuine cell edit targets its row, while keeping keyboard focus there.
     items[f"mesh_group_size_{side}"].value = 3
+    inputs.command.focused = items[f"mesh_group_size_{side}"]
     inputs.click(f"mesh_group_size_{side}")
-    assert state.target == ("group", back) and picker.hasFocus
+    assert state.target == ("group", side)
+    assert inputs.command.focused is items[f"mesh_group_size_{side}"]
     # A click on a row (Fusion moves the table's selectedRow) targets that row.
     items["mesh_groups_table"].selectedRow = 1
     inputs.click("mesh_groups_table")
@@ -185,14 +187,13 @@ def test_row_buttons_and_row_clicks_retarget_the_one_picker_and_edits_do_not(sce
     ("source", "label"), ("source", "count"), ("source", "size"),
     ("group", "name"), ("group", "count"), ("group", "size"),
 ])
-def test_native_child_cell_events_target_the_highlighted_row(scene, kind, field):
+def test_native_child_cell_events_target_the_row_before_selected_row_changes(scene, kind, field):
     inputs, items, state = build(scene)
     zone = add_zone(scene, inputs, items, state)
     target(scene, inputs, items, state, "source", HF)
     row = MF if kind == "source" else zone
     table = items["mesh_sources_table" if kind == "source" else "mesh_groups_table"]
-    order = list(state.sources) if kind == "source" else state.group_order
-    table.selectedRow = order.index(row)
+    assert table.selectedRow == (0 if kind == "source" else -1)
     cell = items[f"mesh_{kind}_{field}_{row}"]
     inputs.command.focused = cell
     # Real Fusion emits the child id (observed for label/count), not a table event.
@@ -205,9 +206,31 @@ def test_native_child_cell_events_target_the_highlighted_row(scene, kind, field)
         assert inputs.command.focused is cell  # typing must keep keyboard focus
     else:
         assert items["mesh_faces"].hasFocus
-    # Programmatic refresh of another row's count cannot take the picker back.
-    change(scene, inputs, items, state, f"mesh_source_count_{HF}")
-    assert state.target == (kind, row)
+
+
+def test_rendered_count_setter_events_cannot_take_the_picker_target(scene):
+    module = scene.module
+    dialog = module.wglink_mesh_dialog
+    inputs, items, state = build(scene)
+    target(scene, inputs, items, state, "source", MF)
+    events = []
+    handler = dialog.MeshInputChangedHandler(state)
+    def on_changed(args):
+        events.append((args.input.id, state.restoring))
+        handler.notify(args)
+    inputs.command.onInputChanged = on_changed
+    inputs.command.text_change_events = True
+    # Force a real formattedText setter on another row during a validation render.
+    state.shown.pop(f"mesh_source_count_{HF}")
+    dialog._sync_mesh_dialog(inputs, state)
+    assert (f"mesh_source_count_{HF}", True) in events
+    assert state.target == ("source", MF)
+    assert items["mesh_sources_table"].selectedRow == 1
+    assert state.restoring is False
+    # A nested render must preserve an outer restoration guard too.
+    state.restoring = True
+    dialog._sync_mesh_dialog(inputs, state)
+    assert state.restoring is True
 
 
 def _dialog_command(inputs):

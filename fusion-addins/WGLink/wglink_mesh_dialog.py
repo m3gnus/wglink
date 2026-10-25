@@ -196,7 +196,7 @@ def _table_rows(state, kind):
 
 
 def _set_target(inputs, state, kind, row_id, *, notice="", focus_picker=True):
-    """Point the one picker at a row: clear it, load that row's faces, focus it.
+    """Point the one picker at a row, optionally giving it focus.
 
     The notice of an earlier action ends here, unless the retarget is itself
     what the notice reports.
@@ -235,18 +235,17 @@ def _selected_row_changed(inputs, state, kind, row_id, *, focus_picker=True):
 def _row_cell_changed(inputs, state, input_id):
     """Fusion reports the clicked table cell, not its TableCommandInput id.
 
-    Match the table's selected row too: programmatic count/label updates and
-    edits to another row's value must not silently move the face picker.
+    The event can arrive before ``selectedRow`` changes. The stable child id
+    owns the target; our own display updates run under ``state.restoring``.
     """
-    for kind, fields, table_id in (("source", ("label", "count", "size"), DRIVERS_TABLE),
-                                    ("group", ("name", "count", "size"), ZONES_TABLE)):
+    for kind, fields in (("source", ("label", "count", "size")),
+                         ("group", ("name", "count", "size"))):
         for field in fields:
             prefix = f"mesh_{kind}_{field}_"
             if not input_id.startswith(prefix):
                 continue
             row_id = int(input_id[len(prefix):])
-            rows = _table_rows(state, kind)
-            if row_id in rows and inputs.itemById(table_id).selectedRow == rows.index(row_id):
+            if row_id in _rows(state, kind):
                 _selected_row_changed(inputs, state, kind, row_id,
                                       focus_picker=field not in ("name", "size"))
             return True
@@ -567,6 +566,15 @@ def _show(inputs, state, input_id, text):
 
 
 def _sync_mesh_dialog(inputs, state):
+    """Render under the same guard as programmatic picker/table restoration."""
+    restoring, state.restoring = state.restoring, True
+    try:
+        return _render_mesh_dialog(inputs, state)
+    finally:
+        state.restoring = restoring
+
+
+def _render_mesh_dialog(inputs, state):
     for kind in ("source", "group"):
         for row_id, record in _rows(state, kind).items():
             _show(inputs, state, f"mesh_{kind}_count_{row_id}",
@@ -783,7 +791,7 @@ class MeshInputChangedHandler(adsk.core.InputChangedEventHandler):
                             wglink_protocol.default_source_size_mm(source["role"]))
                 for row in state.groups:
                     inputs.itemById(f"mesh_group_size_{row}").value = to_internal(wglink_protocol.MESH_PRESETS["Fine"])
-            # A typed name or size changes only its value: the picker keeps its row and focus.
+            # Cell edits may retarget the picker, but retain their keyboard focus.
             _sync_mesh_dialog(inputs, state)
         except Exception as exc:
             self.state.services.report_error("Updating Sources & Mesh…", exc)
