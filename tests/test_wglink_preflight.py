@@ -68,6 +68,32 @@ def test_draft_cases_shared_with_wg(case):
     assert not any(repr(name) in text for name in case.get("message_omits", ()))
 
 
+def test_every_preflight_word_passes_the_shared_user_text_guard():
+    """One guard for user words (user_text_violations), the request-status contract's."""
+    texts = [protocol.PREFLIGHT_UNAVAILABLE_MESSAGE, protocol.NO_DRIVE_MESSAGE,
+             protocol.CEILING_REMEDY_IN_SOURCES_AND_MESH]
+    texts += [remedy for _severity, remedy in protocol.PREFLIGHT_RULES.values() if remedy]
+    drafts = [case["draft"] for case in CASES["draft_cases"]]
+    drafts.append({"kind": "solve", "sources": [{"role": "HF", "face_count": 0}, {"role": "HF"}],
+                   "surface_groups": [{"name": " "}, {"name": "Back"}, {"name": "back"}],
+                   "groups_out_of_scope": ["Side"], "open_bodies": [{"name": "Shell"}],
+                   "triangles_least": 30000})
+    drafts.append({"sources": []})
+    for draft in drafts:
+        texts += [protocol.finding_text(f) for f in protocol.preflight_findings(draft)]
+    texts += [protocol.finding_text(protocol.ceiling_finding(30000, symmetry=symmetry, in_sources_and_mesh=inside))
+              for symmetry in ("auto", "off") for inside in (False, True)]
+    mesh = {"wall_size_mm": 0, "grading_distance_mm": 100.0}
+    rows = [{"kind": "source", "label": "Source 1 (HF)", "role": "HF", "size_mm": 6.0, "face_keys": {"a"},
+             "missing_saved_faces": 2},
+            {"kind": "source", "label": "Source 2 (HF)", "role": "HF", "size_mm": 6.0, "face_keys": {"a"}},
+            {"kind": "group", "label": "Group 3 (unnamed)", "name": "", "size_mm": 15.0, "face_keys": {"a"}}]
+    texts += [protocol.finding_text(f) for f in protocol.mesh_authoring_findings(rows, mesh)]
+    assert len(texts) > 20
+    for text in texts:
+        assert protocol.user_text_violations(text, names=["Shell", "Side", "Back", "back"]) == [], text
+
+
 def test_every_rule_has_a_known_severity_and_the_ceiling_is_answered_by_its_hold():
     assert {severity for severity, _remedy in protocol.PREFLIGHT_RULES.values()} <= {
         protocol.PREFLIGHT_BLOCK, protocol.PREFLIGHT_ASK, protocol.PREFLIGHT_NOTE,
@@ -91,7 +117,7 @@ def test_the_ceiling_is_asked_only_for_a_solve_whose_most_reduced_count_is_over(
 
 def test_the_ceiling_words_follow_symmetry_and_the_dialog_they_are_shown_in():
     auto = protocol.ceiling_finding(30000)
-    assert auto["message"].startswith("Even if WG can use symmetry")
+    assert auto["message"].startswith("Even if Waveguide Generator can use symmetry")
     off = protocol.ceiling_finding(30000, symmetry="off")
     assert off["message"].startswith("This model meshes to about 30,000")
     assert "symmetry" not in protocol.finding_text(off)

@@ -202,3 +202,18 @@ def test_a_document_name_is_never_mistaken_for_internal_detail(name):
     assert protocol.request_status_text(record)["headline"].startswith(name)
     assert protocol.user_text_violations(f"{name} is ready", names=[name]) == []
     assert protocol.user_text_violations(f"{name}: the gate refused it", names=[name]) == ["gate", "refused"]
+
+
+def test_a_return_the_preflight_rules_block_says_what_to_change():
+    words = "2 sources share the role HF. Use one source per role."
+    blocked = protocol.validate_request_status(
+        _record("refused", failure={"recorded": False, "message": words}), request_id="req-1")
+    text = protocol.request_status_text(blocked)
+    assert text["headline"] == "Waveguide Generator could not take Horn A."
+    assert text["detail"] == words
+    plain = protocol.request_status_text(protocol.validate_request_status(_record("refused"), request_id="req-1"))
+    assert plain["detail"] is None
+    # Words that read as internal detail are dropped, never shown.
+    leaky = protocol.validate_request_status(
+        _record("refused", failure={"recorded": False, "message": "The manifest was refused."}), request_id="req-1")
+    assert protocol.request_status_text(leaky)["detail"] is None
