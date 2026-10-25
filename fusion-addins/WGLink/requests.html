@@ -48,8 +48,10 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}
     });
     (view.entries || []).forEach(function (entry) {
       var row = document.createElement("section"), title = document.createElement("p");
-      title.textContent = (view.labels || {}).rowTitle.replace("{document}", entry.documentName || view.labels.unnamedDocument)
-        .replace("{kind}", entry.kindLabel).replace("{time}", new Date(entry.submittedAt * 1000).toLocaleString());
+      var fields = {document: entry.documentName || view.labels.unnamedDocument,
+        kind: entry.kindLabel, time: new Date(entry.submittedAt * 1000).toLocaleString()};
+      title.textContent = (view.labels || {}).rowTitle.replace(/\{(document|kind|time)\}/g,
+        function (_, key) { return fields[key]; });
       row.appendChild(title);
       [entry.headline, entry.detail].concat(entry.options || [], entry.notes || []).forEach(function (text) {
         if (text) { var p = document.createElement("p"); p.textContent = text; row.appendChild(p); }

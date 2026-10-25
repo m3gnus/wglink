@@ -1412,7 +1412,10 @@ def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[s
                     "requestId": held["requestId"], "kind": held["kind"], "seq": 0,
                     "documentName": held.get("documentName"), "state": "cancelled", "cancelReason": "replaced",
                 })
-                _requests.update_entry(held, replaced, _save_followed)
+                try:
+                    _requests.update_entry(held, replaced, _save_followed)
+                except Exception:  # noqa: BLE001 - delivery succeeded; history is best effort
+                    _log(f"[{PANEL_NAME}] could not record the replaced request\n{traceback.format_exc()}")
     _arm_request_poll()
     return request_id
 
@@ -2048,7 +2051,7 @@ def _follow(request: dict[str, object]) -> None:
 
     try:
         _requests.begin(request, save=_save_followed)
-    except (OSError, ValueError, TypeError):
+    except Exception:  # noqa: BLE001 - history must never fail a successful press
         _log(f"[{PANEL_NAME}] could not record the request being followed\n{traceback.format_exc()}")
 
 
@@ -2154,7 +2157,11 @@ def _recover_request() -> None:
     if ipc is None:
         return
     try:
-        entries = wglink_requests.load_history(ipc)
+        def corrupt_history() -> None:
+            global _requests_hint
+            _requests_hint = wglink_protocol.REQUEST_HISTORY_TEXT["historyCorrupt"]
+        _requests_hint = None
+        entries = wglink_requests.load_history(ipc, on_corrupt=corrupt_history)
         _requests.restore(entries)  # retain what was read before polling or Fusion calls
         for index, entry in enumerate(entries):
             if not wglink_requests.terminal(entry):
@@ -2172,15 +2179,18 @@ def _recover_request() -> None:
         _requests.all_documents = False
         if entries:
             _save_followed({"schema": 1, "entries": entries})
-    except Exception:  # noqa: BLE001 - history never stops add-in startup
+    except wglink_requests.HistoryUnavailable:
         _requests_hint = wglink_protocol.REQUEST_HISTORY_TEXT["historyUnavailable"]
         _log(f"[{PANEL_NAME}] could not read request history\n{traceback.format_exc()}")
-        return
+    except Exception:  # noqa: BLE001 - recovery never stops add-in startup
+        _requests_hint = wglink_protocol.REQUEST_HISTORY_TEXT["historyCheck"]
+        _log(f"[{PANEL_NAME}] could not finish request recovery\n{traceback.format_exc()}")
+    finally:
+        _arm_request_poll(0.0)
+    entries = _requests.entries()
     if any(wglink_requests.following(e) and not wglink_requests.terminal(e)
            and not wglink_requests.is_quiet(e) and not e.get("missingStatus") for e in entries):
         _show_request_palette(open_it=True)
-    if _requests.poll_interval() is not None:
-        _arm_request_poll(0.0)
 
 
 class RequestsDocumentHandler(getattr(adsk.core, "DocumentEventHandler", object)):

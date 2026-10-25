@@ -558,26 +558,37 @@ def _read_entry(found: object) -> dict[str, Any] | None:
 
 
 class HistoryUnavailable(ValueError):
-    """Keep an unreadable or newer history intact until it can be understood."""
+    """Keep a valid JSON history with an unknown schema intact."""
 
 
-def _history_entries(ipc: Path) -> list[dict[str, Any]]:
+def _corrupt_history(ipc: Path, on_corrupt: Callable[[], None] | None) -> list[dict[str, Any]]:
+    path = Path(ipc) / RECORD_FILENAME
+    path.rename(path.with_name(path.name + ".corrupt-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")))
+    logging.getLogger(__name__).warning("Corrupt request history was set aside; starting fresh")
+    if on_corrupt is not None:
+        on_corrupt()
+    return []
+
+
+def _history_entries(ipc: Path, on_corrupt: Callable[[], None] | None = None) -> list[dict[str, Any]]:
     try:
         record = json.loads((Path(ipc) / RECORD_FILENAME).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return []
-    except Exception as exc:
-        raise HistoryUnavailable(wglink_protocol.REQUEST_HISTORY_TEXT["historyUnavailable"]) from exc
-    if (not isinstance(record, dict) or type(record.get("schema")) is not int
-            or record["schema"] != RECORD_SCHEMA or not isinstance(record.get("entries"), list)):
+    except (ValueError, UnicodeError, RecursionError):
+        return _corrupt_history(ipc, on_corrupt)
+    if isinstance(record, dict) and type(record.get("schema")) is int and record["schema"] != RECORD_SCHEMA:
         raise HistoryUnavailable(wglink_protocol.REQUEST_HISTORY_TEXT["historyUnavailable"])
+    if (not isinstance(record, dict) or type(record.get("schema")) is not int
+            or not isinstance(record.get("entries"), list)):
+        return _corrupt_history(ipc, on_corrupt)
     return [entry for value in record["entries"] if (entry := _read_entry(value)) is not None]
 
 
-def load_history(ipc: Path, *, now: float | None = None) -> list[dict[str, Any]]:
+def load_history(ipc: Path, *, now: float | None = None, on_corrupt: Callable[[], None] | None = None) -> list[dict[str, Any]]:
     """Recover all readable entries before best-effort legacy migration. Never resubmit."""
     root = Path(ipc)
-    entries = _history_entries(root)
+    entries = _history_entries(root, on_corrupt)
     legacy = root / LEGACY_RECORD_FILENAME
     try:
         old = _read_entry(wglink_inbox._read_json(legacy))
@@ -598,7 +609,9 @@ def load_history(ipc: Path, *, now: float | None = None) -> list[dict[str, Any]]
 
 def save(ipc: Path, request: Mapping[str, Any]) -> Path:
     """Write with the one atomic writer; incomplete recovery merges instead of truncating."""
-    disk = _history_entries(ipc)  # unknown schemas and unreadable files remain read-only
+    disk = _history_entries(ipc)  # only valid JSON with an unknown schema stays read-only
+    if request.get("clearFinished", False):
+        disk = [e for e in disk if not terminal(e)]
     if "entries" in request:
         entries = list(request["entries"])
         if request.get("mergeDisk", False):
@@ -742,7 +755,7 @@ class RequestTracker:
             self._entries = [e for e in self._entries if not terminal(e)]
             if self._request and terminal(self._request):
                 self._request = copy.deepcopy(self._entries[0]) if self._entries else None
-            save({**self._payload(), "removedIds": removed})
+            save({**self._payload(), "removedIds": removed, "clearFinished": True})
 
     def poll_interval(self, now: float | None = None) -> float | None:
         moment = time.time() if now is None else float(now)

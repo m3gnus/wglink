@@ -160,14 +160,22 @@ Later navigation, model selection, document loads and edits still win.
 
 History recovery restores readable entries before checking WG or Fusion. Legacy
 record deletion is best effort and logged. A session whose recovery was incomplete
-merges its next write with disk. Unknown or unreadable history stays read-only,
-with the shared calm explanation. Requests made before the first document save
+merges its next write with disk. Valid JSON with an unknown schema stays
+read-only, with the shared calm explanation. Requests made before the first document save
 are remapped from the root component's local identity to its saved identity.
 Polling persists all changes in one write per tick; the list is not a live region.
 
-Explicit history selection remains selected across socket snapshots and automatic
-Fusion arrivals until the person navigates, edits, selects another model/document,
-or sends a new model. Navigation pointers expire after two minutes. WG retains
+Explicit history selection remains selected across socket snapshots and older
+Fusion arrivals. A CAD Solve created after the explicit show releases it, except
+for the shown request's own retry chain. Navigation, edits, a new model/document
+choice or a new Send also releases it. New Send returns remain eligible for
+discovery even when the receipt arrives first. Navigation pointers expire after two minutes. WG retains
 the latest pointer for replay to a newly connected window, and its socket client
 holds the pointer until the display owner mounts. Unavailable requests use the
 shared history text, never a raw job lookup error.
+
+History recovery keeps valid JSON with an unknown schema unchanged and read-only.
+Malformed, empty or structurally damaged history is renamed with a `.corrupt-<timestamp>` suffix and new
+history starts fresh, with a calm notice in Requests. A recovery or history-write
+failure after reading entries keeps those entries in memory and still arms status
+polling. Clear finished also removes terminal disk entries when recovery is incomplete.

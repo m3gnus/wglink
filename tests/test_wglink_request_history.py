@@ -6,6 +6,8 @@ from pathlib import Path
 import sys
 import time
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "fusion-addins" / "WGLink"))
 import wglink_protocol as protocol
 import wglink_requests as requests
@@ -185,7 +187,6 @@ def test_save_after_incomplete_recovery_merges_disk(tmp_path):
 
 
 def test_unknown_schema_is_read_only_and_explained(tmp_path, monkeypatch):
-    import pytest
     path = tmp_path / requests.RECORD_FILENAME
     original = json.dumps({"schema": 2, "entries": [entry("future")]})
     path.write_text(original)
@@ -282,3 +283,82 @@ def test_palette_does_not_announce_whole_list_or_own_punctuation():
     assert 'id="history" role="status"' not in page
     assert 'aria-live' not in page
     assert 'view.labels || {}).rowTitle' in page
+
+
+@pytest.mark.parametrize("content", ["", "bad-json", "[" * 2000, "\xff", '{"schema":1,"entries":null}', "null", "[]", "{}"])
+def test_corrupt_history_is_set_aside_and_new_requests_can_be_saved(tmp_path, content):
+    path = tmp_path / requests.RECORD_FILENAME
+    original = content.encode("latin1")
+    path.write_bytes(original)
+    notice = []
+    assert requests.load_history(tmp_path, on_corrupt=lambda: notice.append(True)) == []
+    assert notice == [True] and not path.exists()
+    backups = list(tmp_path.glob(requests.RECORD_FILENAME + ".corrupt-*"))
+    assert len(backups) == 1 and backups[0].read_bytes() == original
+    requests.save(tmp_path, entry("fresh"))
+    assert [e["requestId"] for e in requests.load_history(tmp_path)] == ["fresh"]
+
+
+def test_clear_finished_removes_unrecovered_disk_entries(tmp_path):
+    requests.save(tmp_path, {"entries": [entry("done", state="solved"), entry("live")]})
+    tracker = requests.RequestTracker()
+    tracker.begin(entry("new"))
+    tracker.clear_finished(lambda payload: requests.save(tmp_path, payload))
+    assert {e["requestId"] for e in requests.load_history(tmp_path)} == {"live", "new"}
+
+
+def test_recovery_poll_failure_keeps_read_history_and_arms_poll(monkeypatch, tmp_path):
+    fixture = _following(monkeypatch, tmp_path, "WGLink_recover_poll_failure")
+    module = fixture.module
+    original = module._requests.entries()
+    module._requests.begin(None)
+    armed = []
+    monkeypatch.setattr(module, "_arm_request_poll", lambda delay=None: armed.append(delay))
+    monkeypatch.setattr(module.wglink_requests, "poll", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("poll")))
+    module._recover_request()
+    assert module._requests.entries() == original
+    assert armed == [0.0]
+    assert module._requests_hint == protocol.REQUEST_HISTORY_TEXT["historyCheck"]
+
+
+def test_replaced_history_save_failure_never_fails_press_or_skips_poll(monkeypatch, tmp_path):
+    fixture = _following(monkeypatch, tmp_path, "WGLink_replaced_save_failure")
+    module = fixture.module
+    previous = module._requests.current()
+    assert previous
+    monkeypatch.setattr(module.wglink_requests, "replaces", lambda *a: True)
+    monkeypatch.setattr(module.wglink_requests, "withdraw", lambda *a: True)
+    monkeypatch.setattr(module, "_save_followed", lambda *a: (_ for _ in ()).throw(RuntimeError("save")))
+    armed = []
+    monkeypatch.setattr(module, "_arm_request_poll", lambda delay=None: armed.append(delay))
+    rid = module._submit_to_wg({"bundle_path": str(fixture.bundle), "return_id": "wgr_1"}, requests.SOLVE, superseded=previous)
+    assert rid and module._requests.current()["requestId"] == rid
+    assert armed == [None]
+
+
+def test_history_row_template_keeps_literal_document_names(tmp_path):
+    import re
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to exercise the palette renderer")
+    page = (Path(requests.__file__).parent / "requests.html").read_text()
+    script = re.search(r"<script>(.*?)</script>", page, re.S).group(1)
+    harness = r'''
+const assert = require('node:assert/strict');
+function element() { return { children: [], dataset: {}, appendChild(x) { this.children.push(x); },
+  addEventListener() {}, setAttribute() {} }; }
+const ids = { filters: element(), history: element(), diagnostics: element() };
+global.document = { activeElement: null, getElementById(id) { return ids[id]; }, createElement: element };
+global.window = { addEventListener() {} }; global.location = { hash: '' };
+'''
+    after = r'''
+const name = "Horn $' $& {kind} {time} {document}";
+const view = { labels: { rowTitle: '{document} / {kind} / {time}' }, entries: [
+  { documentName: name, kindLabel: 'Solve', submittedAt: 0 }
+] };
+window.fusionJavaScriptHandler.handle('status', JSON.stringify(view));
+assert.equal(ids.history.children[0].children[0].textContent, name + ' / Solve / ' + new Date(0).toLocaleString());
+'''
+    subprocess.run([node, "-e", harness + script + after], check=True, capture_output=True, text=True)
