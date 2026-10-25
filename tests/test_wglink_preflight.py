@@ -174,7 +174,7 @@ def test_authoring_rules_let_a_fem_driven_model_save_without_a_source():
 def test_driver_labels_cover_every_role_in_display_order():
     assert [role for role, _label in protocol.DRIVER_LABELS] == ["HF", "MF", "LF", "PASSIVE_CARDIOID"]
     assert {role for role, _label in protocol.DRIVER_LABELS} == set(protocol.SOURCE_ROLES)
-    assert protocol.driver_label("PORT_EXIT") == protocol.driver_label("PASSIVE_CARDIOID") == "Passive radiator"
+    assert protocol.driver_label("PORT_EXIT") == protocol.driver_label("PASSIVE_CARDIOID") == "Port or passive opening"
     assert protocol.canonical_source_role("PORT_EXIT") == "PASSIVE_CARDIOID"
 
 

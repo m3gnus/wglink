@@ -41,7 +41,7 @@ DRIVER_LABELS = (
     ("HF", "HF – high-frequency driver"),
     ("MF", "MF – mid-frequency driver"),
     ("LF", "LF – low-frequency driver"),
-    ("PASSIVE_CARDIOID", "Passive radiator"),
+    ("PASSIVE_CARDIOID", "Port or passive opening"),
 )
 
 

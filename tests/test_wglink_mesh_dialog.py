@@ -369,7 +369,7 @@ def test_defaults_filters_copy_and_restore_runs_once(scene):
     inputs, items, state = build(scene)
     assert [items[f"mesh_source_label_{row}"].formattedText for row in (HF, MF, LF, PORT)] == [
         "HF – high-frequency driver", "MF – mid-frequency driver",
-        "LF – low-frequency driver", "Passive radiator"]
+        "LF – low-frequency driver", "Port or passive opening"]
     assert [items[f"mesh_source_size_{row}"].value for row in (HF, MF, LF, PORT)] == [.6, 1.5, 2.5, 2.5]
     assert items["mesh_wall"].value == 2.5
     assert items["mesh_grading"].value == 10
