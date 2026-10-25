@@ -1812,9 +1812,10 @@ def _take_force_new_request(operation: str) -> bool:
 
 def _request_view() -> dict[str, object]:
     request = _requests.current()
-    _requests.document_id = _active_document_id()
+    document_id = _active_document_id()
+    _requests.document_id = document_id
     if request is None:
-        found = {"headline": "No Send or Solve yet.", "detail": None, "notes": [],
+        found = {"headline": wglink_protocol.REQUEST_HISTORY_TEXT["empty"], "detail": None, "notes": [],
                  "options": [], "actions": [], "busy": False, "progress": None,
                  "terminal": True, "diagnostics": {}}
     else:
@@ -1827,10 +1828,10 @@ def _request_view() -> dict[str, object]:
         for action in row["actions"]:
             if action["id"] in _OPEN_WG_ACTIONS and not show_supported:
                 action["label"] = wglink_protocol.REQUEST_HISTORY_TEXT["switch"]
-        if entry.get("documentId") != _active_document_id():
+        if entry.get("documentId") != document_id:
             row["actions"] = [action for action in row["actions"] if action["id"] in _OPEN_WG_ACTIONS]
-        rows.append({**row, "requestId": entry["requestId"], "documentName": entry.get("documentName"),
-                     "kindLabel": "Solve" if entry.get("kind") == wglink_requests.SOLVE else "Send",
+        rows.append({**row, "requestId": entry["requestId"], "documentName": entry.get("documentName") or wglink_protocol.REQUEST_HISTORY_TEXT["unnamedDocument"],
+                     "kindLabel": wglink_protocol.REQUEST_HISTORY_TEXT["solve" if entry.get("kind") == wglink_requests.SOLVE else "send"],
                      "submittedAt": entry.get("submittedAt") or entry.get("pressedAt")})
     found.update(historyNotes=[_requests_hint] if _requests_hint else [], entries=rows, allDocuments=_requests.all_documents, labels=wglink_protocol.REQUEST_HISTORY_TEXT)
     if _requests_hint:
@@ -2089,27 +2090,28 @@ def _poll_requests_once() -> None:
     ipc = wglink_workspace.ipc_folder()
     if ipc is None:
         return
+    changes = []
     for current in _requests.entries():
         if not wglink_requests.following(current):
             continue
         wglink_activity.record(wglink_activity.PICKUP_CHECK)
         updated = wglink_requests.poll(current, ipc)
-        if updated == current:
-            continue
-        problem = None
-        try:
-            taken = _requests.update_entry(current, updated, _save_followed)
-        except (OSError, ValueError, TypeError) as exc:
-            taken = True
-            problem = f"could not record request history: {exc}"
-        if not taken:
-            continue
-        with _followups_lock:
-            if _timers_closed:
-                return
+        if updated != current and _requests.update_entry(current, updated):
+            changes.append((current, updated))
+    if not changes:
+        return
+    problem = None
+    try:
+        _requests.save(_save_followed)
+    except (OSError, ValueError, TypeError) as exc:
+        problem = f"could not record request history: {exc}"
+    with _followups_lock:
+        if _timers_closed:
+            return
+        for current, updated in changes:
             _followups.append(wglink_activity.carrying(
                 lambda before=current, after=updated, issue=problem: _request_changed(before, after, issue)))
-        _raise_followup_event()
+    _raise_followup_event()
 
 
 def _request_changed(previous: dict[str, object] | None, updated: dict[str, object],
@@ -2147,11 +2149,13 @@ def _recover_request() -> None:
     for a request that is still moving.
     """
 
+    global _requests_hint
     ipc = wglink_workspace.ipc_folder()
     if ipc is None:
         return
     try:
         entries = wglink_requests.load_history(ipc)
+        _requests.restore(entries)  # retain what was read before polling or Fusion calls
         for index, entry in enumerate(entries):
             if not wglink_requests.terminal(entry):
                 updated = wglink_requests.poll(entry, ipc)
@@ -2169,6 +2173,7 @@ def _recover_request() -> None:
         if entries:
             _save_followed({"schema": 1, "entries": entries})
     except Exception:  # noqa: BLE001 - history never stops add-in startup
+        _requests_hint = wglink_protocol.REQUEST_HISTORY_TEXT["historyUnavailable"]
         _log(f"[{PANEL_NAME}] could not read request history\n{traceback.format_exc()}")
         return
     if any(wglink_requests.following(e) and not wglink_requests.terminal(e)
@@ -2180,9 +2185,12 @@ def _recover_request() -> None:
 
 class RequestsDocumentHandler(getattr(adsk.core, "DocumentEventHandler", object)):
     def notify(self, _args: object) -> None:
-        _requests.document_id = _active_document_id()
-        _requests.all_documents = False
-        _show_request_palette()
+        try:
+            _requests.document_id = _active_document_id()
+            _requests.all_documents = False
+            _show_request_palette()
+        except Exception:  # noqa: BLE001 - never raise into Fusion
+            _log(f"[{PANEL_NAME}] request document change\n{traceback.format_exc()}")
 
 
 _request_document_event = None
@@ -4395,19 +4403,25 @@ def _active_document_id() -> str | None:
     document = getattr(app, "activeDocument", None) if app else None
     if document is None:
         return None
+    native_id = ""
     try:
         native_id = str(document.dataFile.id or "").strip()
-        if native_id:
-            return f"fusion:{native_id}"
     except Exception:  # noqa: BLE001 - unsaved local document
         pass
     try:
         token = str(app.activeProduct.rootComponent.entityToken or "").strip()
     except Exception:  # noqa: BLE001 - a product with no root component
         token = ""
-    if not token:
-        return None
-    return "local:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+    local_id = "local:" + hashlib.sha256(token.encode("utf-8")).hexdigest() if token else None
+    if native_id:
+        saved_id = f"fusion:{native_id}"
+        if local_id:
+            try:
+                _requests.remap_document(local_id, saved_id, _save_followed)
+            except Exception:  # noqa: BLE001 - identity remains usable if persistence fails
+                _log(f"[{PANEL_NAME}] could not record saved document identity\n{traceback.format_exc()}")
+        return saved_id
+    return local_id
 
 
 def _fresh_geometry_state() -> dict[str, object] | None:
@@ -5673,7 +5687,10 @@ def _stop_followups(app: object) -> None:
     global _request_poll_armed, _force_new_request, _requests_hint, _timers_closed
     global _request_document_event, _request_document_handler
     if _request_document_event is not None and _request_document_handler is not None:
-        _request_document_event.remove(_request_document_handler)
+        try:
+            _request_document_event.remove(_request_document_handler)
+        except Exception:  # noqa: BLE001 - teardown must continue
+            _log(f"[{PANEL_NAME}] request document handler removal\n{traceback.format_exc()}")
     _request_document_event = _request_document_handler = None
     _backend_admission.close()
     _hide_export_progress(_backend_progress)

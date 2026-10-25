@@ -157,3 +157,17 @@ launcher. WG versions without the capability receive no show file and the
 palette says **Switch to Waveguide Generator**. WG's existing Fusion display
 owner handles the event; completed runs use its guarded `?job=` selection path.
 Later navigation, model selection, document loads and edits still win.
+
+History recovery restores readable entries before checking WG or Fusion. Legacy
+record deletion is best effort and logged. A session whose recovery was incomplete
+merges its next write with disk. Unknown or unreadable history stays read-only,
+with the shared calm explanation. Requests made before the first document save
+are remapped from the root component's local identity to its saved identity.
+Polling persists all changes in one write per tick; the list is not a live region.
+
+Explicit history selection remains selected across socket snapshots and automatic
+Fusion arrivals until the person navigates, edits, selects another model/document,
+or sends a new model. Navigation pointers expire after two minutes. WG retains
+the latest pointer for replay to a newly connected window, and its socket client
+holds the pointer until the display owner mounts. Unavailable requests use the
+shared history text, never a raw job lookup error.

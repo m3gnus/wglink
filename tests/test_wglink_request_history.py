@@ -42,7 +42,8 @@ def test_history_bound_expiry_and_stale_nonterminal(tmp_path):
 
 def test_tracker_filter_clear_and_history_update_keep_current_owner(tmp_path):
     tracker = requests.RequestTracker()
-    save = lambda record: requests.save(tmp_path, record)
+    def save(record):
+        return requests.save(tmp_path, record)
     tracker.begin(entry("one", "a"), save)
     tracker.begin(entry("two", "b", state="solved"), save)
     tracker.document_id = "a"
@@ -66,9 +67,7 @@ def test_restart_imports_old_record_once_after_durable_history(tmp_path, monkeyp
     def fail(*args):
         raise OSError("disk")
     monkeypatch.setattr(requests.wglink_status, "write_status_record", fail)
-    import pytest
-    with pytest.raises(OSError):
-        requests.load_history(tmp_path)
+    assert len(requests.load_history(tmp_path)) == 1
     assert old.exists()
     monkeypatch.setattr(requests.wglink_status, "write_status_record", real_write)
     assert len(requests.load_history(tmp_path)) == 1
@@ -159,3 +158,127 @@ def test_corrupt_history_entries_do_not_hide_valid_history(tmp_path):
     path.write_text(json.dumps({"schema": 1, "entries": [None, {**valid, "pressedAt": "yesterday"},
                                                           {**valid, "requestId": "../outside"}, valid]}))
     assert [e["requestId"] for e in requests.load_history(tmp_path)] == ["request-1"]
+
+
+def test_failed_legacy_delete_never_truncates_history(tmp_path, monkeypatch, caplog):
+    history = [entry(f"req-{i}", state="solved") for i in range(5)]
+    requests.save(tmp_path, {"schema": 1, "entries": history})
+    (tmp_path / requests.LEGACY_RECORD_FILENAME).write_text(json.dumps(entry("legacy")))
+    real = Path.unlink
+    def unlink(path, *args, **kwargs):
+        if path.name == requests.LEGACY_RECORD_FILENAME:
+            raise PermissionError("in use")
+        return real(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    tracker = requests.RequestTracker()
+    tracker.restore(requests.load_history(tmp_path))
+    tracker.begin(entry("new"), save=lambda payload: requests.save(tmp_path, payload))
+    assert {e["requestId"] for e in requests.load_history(tmp_path)} == {"legacy", "new", *[f"req-{i}" for i in range(5)]}
+    assert "Could not finish legacy" in caplog.text
+
+
+def test_save_after_incomplete_recovery_merges_disk(tmp_path):
+    requests.save(tmp_path, {"schema": 1, "entries": [entry("old")]})
+    tracker = requests.RequestTracker()  # recovery failed before restore
+    tracker.begin(entry("new"), save=lambda payload: requests.save(tmp_path, payload))
+    assert {e["requestId"] for e in requests.load_history(tmp_path)} == {"old", "new"}
+
+
+def test_unknown_schema_is_read_only_and_explained(tmp_path, monkeypatch):
+    import pytest
+    path = tmp_path / requests.RECORD_FILENAME
+    original = json.dumps({"schema": 2, "entries": [entry("future")]})
+    path.write_text(original)
+    with pytest.raises(requests.HistoryUnavailable, match="kept unchanged"):
+        requests.load_history(tmp_path)
+    with pytest.raises(requests.HistoryUnavailable):
+        requests.save(tmp_path, {"schema": 1, "entries": [entry("new")]})
+    assert path.read_text() == original
+
+
+def test_recovery_retains_read_entries_before_poll_failure(monkeypatch, tmp_path):
+    fixture = _following(monkeypatch, tmp_path, "WGLink_recovery_failure")
+    module = fixture.module
+    original = module._requests.entries()
+    module._requests.begin(None)
+    monkeypatch.setattr(module.wglink_inbox, "read_request_status", lambda *a, **kw: (_ for _ in ()).throw(OSError("disk")))
+    module._recover_request()
+    assert len(module._requests.entries()) == len(original)
+    module._follow(entry("new"))
+    assert len(requests.load_history(fixture.ipc)) == len(original) + 1
+
+
+def test_document_handler_and_removal_never_escape_fusion(monkeypatch, tmp_path):
+    fixture = _following(monkeypatch, tmp_path, "WGLink_document_handler")
+    module = fixture.module
+    monkeypatch.setattr(module, "_active_document_id", lambda: (_ for _ in ()).throw(RuntimeError("Fusion")))
+    module.RequestsDocumentHandler().notify(None)
+    class BrokenEvent:
+        def remove(self, handler):
+            raise RuntimeError("Fusion teardown")
+    module._request_document_event = BrokenEvent()
+    module._request_document_handler = object()
+    module._stop_followups(fixture.app)
+    assert module._timers_closed and module._followup_event is None
+    assert module._request_document_event is None
+
+
+def test_unsaved_history_remains_in_this_document_after_save(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    fixture = _following(monkeypatch, tmp_path, "WGLink_saved_identity")
+    module = fixture.module
+    product = SimpleNamespace(rootComponent=SimpleNamespace(entityToken="stable-root"))
+    document = SimpleNamespace(dataFile=None)
+    monkeypatch.setattr(module, "_app", lambda: SimpleNamespace(activeDocument=document, activeProduct=product))
+    local_id = module._active_document_id()
+    module._follow(entry("before-save", local_id))
+    document.dataFile = SimpleNamespace(id="saved-document")
+    view = module._request_view()
+    assert module._requests.get("before-save")["documentId"] == "fusion:saved-document"
+    assert "before-save" in {row["requestId"] for row in view["entries"]}
+    assert next(e for e in requests.load_history(fixture.ipc) if e["requestId"] == "before-save")["documentId"] == "fusion:saved-document"
+
+
+def test_render_computes_identity_once_and_uses_shared_words(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+    fixture = _following(monkeypatch, tmp_path, "WGLink_render_identity")
+    module = fixture.module
+    module._requests.all_documents = True
+    module._follow({**entry("unnamed"), "documentName": None})
+    identity = Mock(return_value="doc-1")
+    monkeypatch.setattr(module, "_active_document_id", identity)
+    shown = module._request_view()
+    identity.assert_called_once()
+    unnamed = next(e for e in shown["entries"] if e["requestId"] == "unnamed")
+    assert unnamed["documentName"] == protocol.REQUEST_HISTORY_TEXT["unnamedDocument"]
+    assert unnamed["kindLabel"] == protocol.REQUEST_HISTORY_TEXT["solve"]
+    for row in shown["entries"]:
+        for text in [row["headline"], row["detail"], row["documentName"], row["kindLabel"], *row["notes"], *row["options"], *[a["label"] for a in row["actions"]]]:
+            if text:
+                assert not protocol.user_text_violations(text)
+
+
+def test_poll_batches_history_write_once_for_multiple_changes(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+    fixture = _following(monkeypatch, tmp_path, "WGLink_poll_batch")
+    module = fixture.module
+    module._follow(entry("second"))
+    monkeypatch.setattr(module.wglink_requests, "poll", lambda current, ipc: {**current, "heardAt": time.time() + 1})
+    save = Mock()
+    monkeypatch.setattr(module, "_save_followed", save)
+    module._poll_requests_once()
+    save.assert_called_once()
+    assert len(save.call_args.args[0]["entries"]) == 2
+
+
+def test_exporting_and_not_sent_never_advance_from_absent_inbox(tmp_path):
+    for local in (requests.EXPORTING, requests.NOT_SENT):
+        request = {**entry(), "local": local}
+        assert requests.poll(request, tmp_path) == request
+
+
+def test_palette_does_not_announce_whole_list_or_own_punctuation():
+    page = (Path(__file__).resolve().parents[1] / "fusion-addins/WGLink/requests.html").read_text()
+    assert 'id="history" role="status"' not in page
+    assert 'aria-live' not in page
+    assert 'view.labels || {}).rowTitle' in page

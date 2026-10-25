@@ -27,6 +27,8 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 import math
+import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -211,6 +213,8 @@ def poll(request: Mapping[str, Any], ipc: Path, *, now: float | None = None) -> 
 
 
 def _advance(request: dict[str, Any], ipc: Path, now: float) -> None:
+    if request.get("local") in (EXPORTING, NOT_SENT):
+        return
     if terminal(request) and not following(request, now):
         return
     request_id = str(request.get("requestId"))
@@ -553,32 +557,56 @@ def _read_entry(found: object) -> dict[str, Any] | None:
     return found
 
 
+class HistoryUnavailable(ValueError):
+    """Keep an unreadable or newer history intact until it can be understood."""
+
+
+def _history_entries(ipc: Path) -> list[dict[str, Any]]:
+    try:
+        record = json.loads((Path(ipc) / RECORD_FILENAME).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except Exception as exc:
+        raise HistoryUnavailable(wglink_protocol.REQUEST_HISTORY_TEXT["historyUnavailable"]) from exc
+    if (not isinstance(record, dict) or type(record.get("schema")) is not int
+            or record["schema"] != RECORD_SCHEMA or not isinstance(record.get("entries"), list)):
+        raise HistoryUnavailable(wglink_protocol.REQUEST_HISTORY_TEXT["historyUnavailable"])
+    return [entry for value in record["entries"] if (entry := _read_entry(value)) is not None]
+
+
 def load_history(ipc: Path, *, now: float | None = None) -> list[dict[str, Any]]:
-    """Recover history, importing the old restart record once. Never resubmit."""
+    """Recover all readable entries before best-effort legacy migration. Never resubmit."""
     root = Path(ipc)
-    record = wglink_inbox._read_json(root / RECORD_FILENAME)
-    entries = record.get("entries", []) if isinstance(record, dict) and record.get("schema") == 1 else []
-    entries = entries if isinstance(entries, list) else []
+    entries = _history_entries(root)
     legacy = root / LEGACY_RECORD_FILENAME
-    old = _read_entry(wglink_inbox._read_json(legacy))
-    if old is not None and not any(isinstance(e, dict) and e.get("requestId") == old["requestId"] for e in entries):
-        entries.append(old)
-    found = bounded([entry for value in entries if (entry := _read_entry(value)) is not None], now=now)
-    if legacy.exists():
-        # Only discard the old restart record after the durable replacement.
-        save(root, {"schema": 1, "entries": found})
-        legacy.unlink()
+    try:
+        old = _read_entry(wglink_inbox._read_json(legacy))
+        if old is not None and not any(e["requestId"] == old["requestId"] for e in entries):
+            entries.append(old)
+    except Exception:
+        logging.getLogger(__name__).warning("Could not read legacy request history", exc_info=True)
+    found = bounded(entries, now=now)
+    try:
+        if legacy.exists():
+            # Migration must never hide entries that were already recovered.
+            save(root, {"schema": RECORD_SCHEMA, "entries": found})
+            legacy.unlink()
+    except Exception:
+        logging.getLogger(__name__).warning("Could not finish legacy request history migration", exc_info=True)
     return found
 
 
 def save(ipc: Path, request: Mapping[str, Any]) -> Path:
-    """Write the tracker's history with the add-in's one atomic writer."""
+    """Write with the one atomic writer; incomplete recovery merges instead of truncating."""
+    disk = _history_entries(ipc)  # unknown schemas and unreadable files remain read-only
     if "entries" in request:
-        payload = dict(request)
+        entries = list(request["entries"])
+        if request.get("mergeDisk", False):
+            ids = {e["requestId"] for e in entries} | set(request.get("removedIds", []))
+            entries += [e for e in disk if e["requestId"] not in ids]
     else:
-        entries = load_history(ipc)
-        entries = [e for e in entries if e["requestId"] != request["requestId"]]
-        payload = {"schema": 1, "entries": bounded([dict(request), *entries])}
+        entries = [dict(request), *[e for e in disk if e["requestId"] != request["requestId"]]]
+    payload = {"schema": RECORD_SCHEMA, "entries": bounded(entries)}
     return wglink_status.write_status_record(Path(ipc), RECORD_FILENAME, payload)
 
 
@@ -628,6 +656,7 @@ class RequestTracker:
         self._entries: list[dict[str, Any]] = []
         self.document_id: str | None = None
         self.all_documents = False
+        self._recovered = False
 
     def current(self) -> dict[str, Any] | None:
         with self._lock:
@@ -639,6 +668,7 @@ class RequestTracker:
             self._request = copy.deepcopy(dict(request)) if request is not None else None
             if self._request is None:
                 self._entries = []
+                self._recovered = False
             else:
                 self._entries = bounded([self._request, *[e for e in self._entries if e["requestId"] != request["requestId"]]], now=_pressed(self._request))
             if save is not None and self._request is not None:
@@ -660,11 +690,13 @@ class RequestTracker:
             return previous, True
 
     def _payload(self) -> dict[str, Any]:
-        return {"schema": RECORD_SCHEMA, "entries": copy.deepcopy(self._entries)}
+        return {"schema": RECORD_SCHEMA, "entries": copy.deepcopy(self._entries),
+                "mergeDisk": not self._recovered}
 
     def restore(self, entries: list[dict[str, Any]]) -> None:
         with self._lock:
             self._entries = copy.deepcopy(entries)
+            self._recovered = True
             self._request = copy.deepcopy(entries[0]) if entries else None
 
     def entries(self, *, filtered: bool = False) -> list[dict[str, Any]]:
@@ -675,23 +707,42 @@ class RequestTracker:
     def get(self, request_id: str) -> dict[str, Any] | None:
         return next((e for e in self.entries() if e["requestId"] == request_id), None)
 
-    def update_entry(self, previous: Mapping[str, Any], updated: Mapping[str, Any], save: Callable) -> bool:
+    def update_entry(self, previous: Mapping[str, Any], updated: Mapping[str, Any], save: Callable | None = None) -> bool:
         with self._lock:
             for index, entry in enumerate(self._entries):
                 if entry == previous:
                     self._entries[index] = copy.deepcopy(dict(updated))
                     if self._request and self._request["requestId"] == entry["requestId"]:
                         self._request = copy.deepcopy(dict(updated))
-                    save(self._payload())
+                    if save is not None:
+                        save(self._payload())
                     return True
             return False
 
+    def save(self, save: Callable) -> None:
+        with self._lock:
+            save(self._payload())
+
+    def remap_document(self, local_id: str, saved_id: str, save: Callable) -> None:
+        """Keep pre-save requests with this document, durably, under the same lock."""
+        with self._lock:
+            changed = False
+            for entry in self._entries:
+                if entry.get("documentId") == local_id:
+                    entry["documentId"] = saved_id
+                    changed = True
+            if self._request and self._request.get("documentId") == local_id:
+                self._request["documentId"] = saved_id
+            if changed:
+                save(self._payload())
+
     def clear_finished(self, save: Callable) -> None:
         with self._lock:
+            removed = [e["requestId"] for e in self._entries if terminal(e)]
             self._entries = [e for e in self._entries if not terminal(e)]
             if self._request and terminal(self._request):
                 self._request = copy.deepcopy(self._entries[0]) if self._entries else None
-            save(self._payload())
+            save({**self._payload(), "removedIds": removed})
 
     def poll_interval(self, now: float | None = None) -> float | None:
         moment = time.time() if now is None else float(now)
