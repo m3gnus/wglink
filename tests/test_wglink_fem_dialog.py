@@ -190,7 +190,7 @@ def test_withdrawn_capability_refuses_open_and_execute_then_hides_on_restart(fix
         execute.fem_state = _state(module, 1, 2)
         execute.notify(args)
         assert len(fixture.ui.messages) == 2
-        assert all(module.wglink_fem.UNAVAILABLE_MESSAGE in text
+        assert all("does not offer FEM regions" in text
                    for _title, text in fixture.ui.messages)
         assert air.attributes.values == {}
         assert all(face.attributes.values == {} for face in faces)
@@ -812,14 +812,14 @@ def test_failed_restoration_blocks_save_and_reselection_retries(fixture, stage):
     inputs, items, state = _live_fem_dialog(module)
     assert inputs.pick(air)
     assert state.loaded_body is None and not state.restoring
-    assert "Could not load the saved FEM region" in items["fem_validation"].formattedText
-    assert "Reselect the air body to retry before saving" in state.restoration_error
+    assert "The saved FEM region could not be read" in items["fem_validation"].formattedText
+    assert "Reselect the air body before saving" in state.restoration_error
     # A subsequent edit/validation must not accept the partially restored rows.
     inputs.click("fem_name")
     validation = types.SimpleNamespace(inputs=inputs, areInputsValid=True)
     module.FemValidateInputsHandler(state).notify(validation)
     assert not validation.areInputsValid
-    with pytest.raises(module.wglink_author.AuthorError, match="Could not load"):
+    with pytest.raises(module.wglink_author.AuthorError, match="saved FEM region could not be read"):
         module._apply_fem_region(inputs, state)
     # Execute repeats the refusal, even if the UI allowed an OK click.
     execute = module.CommandExecuteHandler("fem")

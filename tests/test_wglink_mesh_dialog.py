@@ -348,7 +348,7 @@ def test_failed_construction_keeps_handlers_and_refuses_save_once(
     module.CommandCreatedHandler(operation).notify(types.SimpleNamespace(command=command))
     assert items  # Construction reached the strict input fake.
     assert len(scene.ui.messages) == 1
-    assert "dialog construction failed" in scene.ui.messages[0][1]
+    assert "dialog construction failed" in "\n".join(scene.ui.text_palette.written)
     execute = command.execute.handlers[0]
     assert getattr(execute, state_attr).construction_failed
 
@@ -369,7 +369,7 @@ def test_defaults_filters_copy_and_restore_runs_once(scene):
     inputs, items, state = build(scene)
     assert [items[f"mesh_source_label_{row}"].formattedText for row in (HF, MF, LF, PORT)] == [
         "HF – high-frequency driver", "MF – mid-frequency driver",
-        "LF – low-frequency driver", "Port or passive opening"]
+        "LF – low-frequency driver", "Passive radiator"]
     assert [items[f"mesh_source_size_{row}"].value for row in (HF, MF, LF, PORT)] == [.6, 1.5, 2.5, 2.5]
     assert items["mesh_wall"].value == 2.5
     assert items["mesh_grading"].value == 10
@@ -760,8 +760,8 @@ def test_failed_settings_read_blocks_save_preserves_metadata_and_reopen_retries(
     module.CommandCreatedHandler("source").notify(types.SimpleNamespace(command=command))
     assert len(scene.ui.messages) == 1
     message = scene.ui.messages[0][1]
-    assert "Could not read the saved mesh settings from this document" in message
-    assert "Close and reopen Sources & Mesh… to retry before saving" in message
+    assert "The saved mesh settings could not be used" in message
+    assert "Open Sources & Mesh… and save them again" in message
     failed = command.execute.handlers[0].mesh_state
     assert failed.construction_failed and not failed.restoring
     assert not failed.groups  # No reconstructed names or sizes after a failed read.

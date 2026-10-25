@@ -545,7 +545,7 @@ def test_send_preflight_states_that_an_old_wg_is_incompatible(
     module._sync_preflight(_dialog_inputs(preflight=box))
 
     assert surveyed == []
-    assert "newer Waveguide Generator" in box.formattedText
+    assert "needs updating" in box.formattedText
 
 
 def test_send_refuses_when_wg_has_no_selected_workspace(monkeypatch) -> None:
@@ -964,7 +964,7 @@ def test_send_shows_and_closes_progress_around_the_slow_export(
     )
 
     assert observed == [
-        (1, "Exporting STEP and validating the return bundle…"),
+        (1, "Exporting STEP and checking this model…"),
     ]
     dialog = ui.progress_dialogs[0]
     assert dialog.isCancelButtonShown is False
@@ -1259,7 +1259,7 @@ def test_the_send_dialog_states_the_export_before_ok(monkeypatch) -> None:
     module._sync_preflight(_dialog_inputs(preflight=box))
 
     assert "1 solid" in box.formattedText
-    assert "unlinked (Fusion-first) return" in box.formattedText
+    assert "this model was created in Fusion" in box.formattedText
     # The missing source is stated before OK.
     assert box.formattedText.count("<b>⚠") == 1
 
@@ -1353,14 +1353,14 @@ def test_an_unexpected_failure_shows_one_line_and_logs_the_traceback(
     try:
         raise RuntimeError("Fusion refused the appearance")
     except RuntimeError as exc:
-        module._report_error("Sources & Mesh…", "Waveguide Generator error", exc)
+        module._report_error("Sources & Mesh…", "Waveguide Generator", exc)
 
     (title, text), = ui.messages
-    assert title == "Waveguide Generator error"
-    assert text.startswith("Sources & Mesh… hit an unexpected error: ")
-    assert "Fusion refused the appearance" in text
+    assert title == "Waveguide Generator"
+    assert text == "Waveguide Generator could not save settings for this model. This has been recorded."
+    assert "Fusion refused the appearance" in "\n".join(ui.text_palette.written)
     assert "Traceback" not in text
-    assert "Text Commands" in text
+    assert "Text Commands" not in text
     logged, = ui.text_palette.written
     assert "Traceback" in logged and "RuntimeError" in logged
 
@@ -1378,9 +1378,9 @@ def test_unsaved_adoption_question_explains_random_identity(
 
     (title, text), = ui.messages
     assert "adopt LF source" in title
-    assert "2 face(s) painted LF" in text
-    assert "carry no WG source identity" in text
-    assert "unsaved document has no stable lineage" in text
+    assert "2 face(s) marked LF" in text
+    assert "have no saved driver setup" in text
+    assert "document has not been saved yet" in text
     assert "may ask for its setup" in text
     assert "Save the document to keep source identities" in text
     # The heartbeat's cached source ids are about to change.
@@ -1509,7 +1509,7 @@ def test_the_link_chooser_appears_only_with_several_links(monkeypatch) -> None:
         {"instance_id": "wgi_two", "design_name": "asro68"},
     ])
     # The label carries the design name; _command_options recovers the id.
-    assert build() == ["Tritonia · wgi_one", "asro68 · wgi_two"]
+    assert build() == ["Tritonia · Link 1", "asro68 · Link 2"]
 
 
 def test_the_chosen_link_label_resolves_back_to_its_instance_id(monkeypatch) -> None:
@@ -1518,9 +1518,14 @@ def test_the_chosen_link_label_resolves_back_to_its_instance_id(monkeypatch) -> 
         "WGLink_link_choice_options",
         _UI(_Panels(), _Definitions(reserve_ids=False)),
     )
+    monkeypatch.setattr(module, "_document_links", lambda: [
+        {"instance_id": "wgi_one", "design_name": "Tritonia"},
+        {"instance_id": "wgi_two", "design_name": "asro68"},
+    ])
+    module._document_link_choices()
     inputs = types.SimpleNamespace(
         itemById=lambda name: types.SimpleNamespace(
-            selectedItem=types.SimpleNamespace(name="asro68 · wgi_two"),
+            selectedItem=types.SimpleNamespace(name="asro68 · Link 2"),
         ) if name == "instance_choice" else None,
     )
 
@@ -2456,17 +2461,17 @@ def test_a_cached_token_does_not_authorize_an_edited_managed_body(
     if channel == "return":
         effects = _pending_return(fixture, monkeypatch, tmp_path)
         assert module._apply_pending_return_request(snapshot) == module.HANDLED
-        expected_title = "Waveguide Generator return to WG refused"
+        expected_title = "Waveguide Generator"
         fragment = "changed after WG displayed its status"
     else:
         effects = _pending_update(fixture, monkeypatch, tmp_path)
         assert module._apply_pending_handoff(snapshot) == module.HANDLED
-        expected_title = "Waveguide Generator automatic update refused"
+        expected_title = "Waveguide Generator"
         fragment = "changed after WG prepared this update"
 
     assert effects == []
     assert [title for title, _text in fixture.ui.messages] == [expected_title]
-    assert fragment in fixture.ui.messages[0][1]
+    assert fragment in "\n".join(fixture.ui.text_palette.written)
 
 
 @pytest.mark.parametrize("channel", ["return", "update"])
@@ -2761,15 +2766,15 @@ def test_a_guard_that_cannot_measure_refuses_the_operation(
     if channel == "return":
         effects = _pending_return(fixture, monkeypatch, tmp_path)
         assert module._apply_pending_return_request(snapshot) == module.HANDLED
-        expected_title = "Waveguide Generator return to WG refused"
+        expected_title = "Waveguide Generator"
     else:
         effects = _pending_update(fixture, monkeypatch, tmp_path)
         assert module._apply_pending_handoff(snapshot) == module.HANDLED
-        expected_title = "Waveguide Generator automatic update refused"
+        expected_title = "Waveguide Generator"
 
     assert effects == []
     assert [title for title, _text in fixture.ui.messages] == [expected_title]
-    assert "could not measure this Fusion document" in fixture.ui.messages[0][1]
+    assert "could not measure this Fusion document" in "\n".join(fixture.ui.text_palette.written)
 
 
 def test_a_forced_measurement_is_published_as_current(monkeypatch) -> None:
@@ -4107,7 +4112,7 @@ def test_a_handoff_without_an_exact_instance_never_updates_a_linked_design(
 
     assert mutations == []
     assert not marker.exists()
-    assert [title for title, _text in ui.messages] == ["Waveguide Generator automatic insert refused"]
+    assert [title for title, _text in ui.messages] == ["Waveguide Generator"]
     assert "already linked in the active Fusion document" in ui.messages[0][1]
 
 
@@ -4307,7 +4312,7 @@ def test_a_duplicate_pending_update_refuses_missing_stale_or_ambiguous_identity(
     # and try again" sends the user to a control that cannot unblock this.
     assert not marker.exists()
     assert len(ui.messages) == 1
-    assert message_fragment in ui.messages[0][1]
+    assert message_fragment in "\n".join(ui.text_palette.written)
     assert module._HANDOFF_RETRY_HINT in ui.messages[0][1]
 
 
@@ -4340,9 +4345,8 @@ def test_a_targeted_return_refuses_if_the_active_document_changed(
 
     assert sent == []
     assert ui.messages == [(
-        "Waveguide Generator return to WG refused",
-        "The active Fusion document changed after WG requested the model. "
-        "Reopen CAD Link and try again."
+        "Waveguide Generator",
+        "This model changed after WG checked it. Refresh CAD Link in WG, then try again."
         f"\n\n{module._RETURN_RETRY_HINT}",
     )]
 
@@ -4390,8 +4394,8 @@ def test_a_refused_return_request_is_attempted_once_until_its_id_changes(
 
     assert attempts == ["request-a", "request-b"]
     assert [title for title, _text in ui.messages] == [
-        "Waveguide Generator return to WG refused",
-        "Waveguide Generator return to WG refused",
+        "Waveguide Generator",
+        "Waveguide Generator",
     ]
 
 
@@ -4489,8 +4493,8 @@ def test_a_refused_automatic_insert_is_not_retried_every_tick(
     assert attempts == [str(bundle)]
     assert not marker.exists()
     assert ui.messages == [(
-        "Waveguide Generator automatic insert refused",
-        f"bad bundle\n\n{module._HANDOFF_RETRY_HINT}",
+        "Waveguide Generator",
+        f"Waveguide Generator could not use this model. This has been recorded.\n\n{module._HANDOFF_RETRY_HINT}",
     )]
 
 
@@ -4595,7 +4599,7 @@ def test_a_refused_handoff_does_not_starve_a_pending_return_request(
     # told about it exactly once -- that suppression is the correct half.
     assert not marker.exists()
     assert [title for title, _text in ui.messages] == [
-        "Waveguide Generator automatic insert refused",
+        "Waveguide Generator",
     ]
 
 
@@ -4630,8 +4634,8 @@ def test_a_start_that_fails_partway_rolls_back_panel_and_lease(
 
     assert calls["n"] == 2
     assert module._owned is False
-    assert ui.messages and ui.messages[0][0] == "Waveguide Generator add-in start error"
-    assert "Starting the Waveguide Generator add-in" in ui.messages[0][1]
+    assert ui.messages and ui.messages[0][0] == "Waveguide Generator"
+    assert "This has been recorded" in ui.messages[0][1]
     assert panels.itemById(module.PANEL_ID) is None
     assert not [definition for definition in definitions.items.values() if definition.isValid]
     assert module._ipc_lease_snapshot()["owner"] is None
@@ -4665,8 +4669,8 @@ def test_the_link_chooser_shows_the_users_label_before_wgs_design_name(
     # The label is how the user recognises their own link; WG's design name is
     # the fallback for every link made before the label existed.
     assert module._document_link_choices() == [
-        ("Left waveguide · wgi_one", "wgi_one"),
-        ("260308Tritonia-M · wgi_two", "wgi_two"),
+        ("Left waveguide · Link 1", "wgi_one"),
+        ("260308Tritonia-M · Link 2", "wgi_two"),
     ]
 
 
@@ -4703,7 +4707,7 @@ def test_the_insert_dialog_offers_an_optional_link_name(monkeypatch) -> None:
     # The field must say what it does NOT change, or a user reasonably reads it
     # as renaming the wg_<name>_* parameters their features already reference.
     assert "Leave empty" in help_text
-    assert "parameters keep the bundle" in help_text
+    assert "parameters keep the WG design" in help_text
 
 
 def test_a_typed_link_name_reaches_the_headless_insert_options(monkeypatch) -> None:
@@ -4950,7 +4954,7 @@ def test_insert_destination_is_rechecked_immediately_before_the_first_write(
 
     assert writes == []
     assert module._request_trace["outcome"] == "refused"
-    assert "destination" in ui.messages[0][1].lower()
+    assert "destination" in "\n".join(ui.text_palette.written).lower()
 
 
 def test_an_insert_for_the_active_destination_keeps_working(
@@ -5160,7 +5164,7 @@ def test_a_return_request_from_an_old_wg_is_refused_before_export(
     assert module._apply_pending_return_request() == module.HANDLED
 
     assert sent == []
-    assert "newer Waveguide Generator" in ui.messages[0][1]
+    assert "needs updating" in ui.messages[0][1]
 
 
 def test_a_return_wg_asked_for_declares_source_identity_when_wg_reads_it(
@@ -5412,8 +5416,8 @@ def test_an_update_without_a_baseline_never_changes_the_model(
     assert module._apply_pending_handoff(_shared_snapshot()) == module.HANDLED
 
     assert updated == []
-    assert [title for title, _text in ui.messages] == ["Waveguide Generator automatic update refused"]
-    assert "model state it expects" in ui.messages[0][1]
+    assert [title for title, _text in ui.messages] == ["Waveguide Generator"]
+    assert "model state it expects" in "\n".join(ui.text_palette.written)
 
 
 def test_an_interrupted_operation_is_recovery_required_and_never_repeated(
@@ -5441,7 +5445,7 @@ def test_an_interrupted_operation_is_recovery_required_and_never_repeated(
     module._publish_fusion_status(snapshot)
 
     assert updated == []
-    assert "recovery required" in ui.messages[0][1]
+    assert "previous update was interrupted" in ui.messages[0][1]
     status = json.loads((ipc / ".fusion-status.json").read_text())
     assert status["diagnostics"]["lastRequest"]["outcome"] == "recoveryRequired"
     assert status["deliveryVersion"] == module.wglink_status.DELIVERY_VERSION
@@ -5722,5 +5726,5 @@ def test_handoff_preflight_refuses_before_creating_a_document(monkeypatch, tmp_p
     assert module._apply_pending_handoff({"document_id": "fusion:doc-a", "links": []}) == module.HANDLED
     assert writes == []
     assert module._request_trace["outcome"] == "refused"
-    assert any(term in ui.messages[-1][1] for term in ("identity mismatch", "does not exist", "symlink"))
+    assert any(term in "\n".join(ui.text_palette.written) for term in ("identity mismatch", "does not exist", "symlink"))
     assert list((ipc / ".fusion-handoffs").iterdir()) == []

@@ -372,7 +372,7 @@ def test_a_wg_that_does_not_advertise_version_3_gets_no_solve_command(
     with pytest.raises(error) as raised:
         _write_solve(ipc, tmp_path)
     if error is wglink_inbox.WgNotCollectingError:
-        assert "Start Waveguide Generator" in str(raised.value)
+        assert "Open Waveguide Generator" in str(raised.value)
         assert "Update Waveguide Generator" not in str(raised.value)
     else:
         assert "Update Waveguide Generator" in str(raised.value)

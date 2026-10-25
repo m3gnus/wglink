@@ -413,7 +413,7 @@ def test_the_preview_reports_the_refusal_and_writes_nothing(
     report = send_module.preflight_scope(_app(), {"source_identity": True})
 
     assert "Sources & Mesh" in report["source_error"]
-    assert "adopt" in report["source_error"].lower()
+    assert "Review its faces" in report["source_error"]
     assert a.attributes.values == b.attributes.values == {}
 
 

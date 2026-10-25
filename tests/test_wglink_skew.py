@@ -47,7 +47,7 @@ def test_incompatible_wg_refuses_before_export_picker_or_mutation(
     assert fixture.timers == []
     assert fixture.ui.progress_dialogs == []
     title, text = fixture.ui.messages[-1]
-    assert title == "Waveguide Generator refused" and "Update Waveguide Generator" in text
+    assert title == "Waveguide Generator" and "Update Waveguide Generator" in text
 
 
 @pytest.mark.parametrize("operation", ["send", "solve", "insert", "update"])
@@ -89,9 +89,9 @@ def test_unavailable_wg_consumer_requires_starting_wg_and_checking_folder(
 
     assert calls == [] and _inbox(fixture.ipc) == []
     title, text = fixture.ui.messages[-1]
-    assert title == "Waveguide Generator refused"
-    assert "not collecting requests from Fusion" in text
-    assert "Start Waveguide Generator" in text and "check its WGLink folder" in text
+    assert title == "Waveguide Generator"
+    assert "not ready to receive this model" in text
+    assert "Open Waveguide Generator" in text and "Settings → CAD Link" in text
     assert "Update Waveguide Generator" not in text
 
 
@@ -224,7 +224,7 @@ def test_return_request_needs_manifest_features_but_not_wgs_solve_consumer(
     assert _inbox(fixture.ipc) == []
     if missing_feature is not None:
         assert sent == [] and module._request_trace["outcome"] == "refused"
-        assert ("too old for Fusion-side mesh settings" if missing_feature == "meshSizing" else "newer Waveguide Generator") in fixture.ui.messages[-1][1]
+        assert ("too old for Fusion-side mesh settings" if missing_feature == "meshSizing" else "needs updating") in fixture.ui.messages[-1][1]
         return
     assert [options["request_id"] for options in sent] == ["return-channel"]
     assert sent[0]["automatic_domain"] is True and sent[0]["document_up"] is True
@@ -276,7 +276,7 @@ def test_file_request_errors_name_the_current_service(monkeypatch, tmp_path: Pat
 
     module.WatchEventHandler().notify(None)
 
-    assert reported == [("Servicing WG file requests", "Waveguide Generator file request error", "request read failed")]
+    assert reported == [("Servicing WG file requests", "Waveguide Generator", "request read failed")]
 
 
 @pytest.mark.parametrize('operation', ['send', 'solve'])

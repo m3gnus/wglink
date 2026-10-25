@@ -243,7 +243,7 @@ def test_a_clean_unlinked_scope_no_longer_states_the_frame(author):
     assert summary.warnings == ()
     assert "Scope: root assembly" in summary.lines[0]
     assert "Bodies included: 1 solid" in summary.lines[1]
-    assert "unlinked (Fusion-first) return" in summary.lines[2]
+    assert "this model was created in Fusion" in summary.lines[2]
     assert "Source: HF — 506.7 mm² over 1 face" in summary.lines[3]
     # Before: a 5th line, REMOVED_AFFIRMATIVE_FRAME_LINE, was appended here.
     # After: the dialog stops at 4 lines.
@@ -258,8 +258,8 @@ def test_a_linked_scope_names_its_links(author):
         bounds_mm=bounds((-100.0, -100.0, -180.0), (100.0, 100.0, 0.0)),
     ))
 
-    assert "WG links in scope: 2 (wgi_one, wgi_two)" in summary.lines[2]
-    assert "from link wgi_one" in summary.lines[3]
+    assert "WG links in scope: 2" in summary.lines[2]
+    assert "from WG" in summary.lines[3]
     assert summary.warnings == ()
 
 
@@ -381,24 +381,17 @@ def test_pre_flight_needs_a_gathered_report(author):
 # ------------------------------------------------------------ failure copy
 
 
-def test_a_failure_message_is_one_human_line_plus_where_to_look(author):
+def test_a_failure_message_keeps_internal_detail_out_of_the_box(author):
     message = author.failure_message(
         "Sources & Mesh…", RuntimeError("Fusion refused\nthe appearance")
     )
-
-    assert message.startswith("Sources & Mesh… hit an unexpected error: ")
-    assert "Fusion refused the appearance" in message
-    assert "Traceback" not in message
-    assert author.LOG_HINT in message
+    assert message == "Waveguide Generator could not save settings for this model. This has been recorded."
 
 
-def test_a_long_or_empty_failure_detail_stays_readable(author):
-    long_message = author.failure_message("Send to WG", RuntimeError("x" * 500))
-    assert len(long_message.splitlines()[0]) < 250
-    assert long_message.splitlines()[0].endswith("…")
-
-    assert "RuntimeError" in author.failure_message("Send to WG", RuntimeError(""))
-    assert "no details" in author.failure_message("Send to WG", None)
+def test_long_or_empty_internal_detail_does_not_change_the_user_message(author):
+    for exc in (RuntimeError("x" * 500), RuntimeError(""), None):
+        assert author.failure_message("Send to WG", exc) == (
+            "Waveguide Generator could not send this model. This has been recorded.")
 
 
 def test_an_unsurveyable_model_says_so_in_the_pre_flight_box(author):
@@ -408,7 +401,7 @@ def test_an_unsurveyable_model_says_so_in_the_pre_flight_box(author):
         "happening, it has been recorded."
     )
     # A refusal worded for the user says what to do.
-    assert author.preflight_unavailable(RuntimeError("Start WG, then try again."), refusal=True) == (
+    assert author.preflight_unavailable(author.AuthorError("Start WG, then try again."), refusal=True) == (
         "Start WG, then try again."
     )
 

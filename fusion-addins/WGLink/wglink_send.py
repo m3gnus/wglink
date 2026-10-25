@@ -28,9 +28,10 @@ import adsk.core
 import adsk.fusion
 
 if __package__:
-    from . import wglink_protocol
+    from . import wglink_protocol, wglink_text
 else:
     import wglink_protocol
+    import wglink_text
 
 if __package__:
     from . import wglink_activity, wglink_author, wglink_core, wglink_fem, wglink_mesh
@@ -298,7 +299,7 @@ def read_fem_region(body: object, *, strict: bool = False) -> dict[str, Any] | N
     text = wglink_core._attribute_value(native, wglink_fem.REGION_ATTRIBUTE, strict=strict)
     region = wglink_fem.read_region_attribute(text)
     if strict and text is not None and region is None:
-        raise wglink_core.WgLinkError("The saved FEM region is unreadable.")
+        raise wglink_text.problem("fem_setup", "The saved FEM region is unreadable.")
     return region
 
 
@@ -312,7 +313,7 @@ def fem_region_faces(body: object, region_id: str, *, strict: bool = False) -> d
         text = wglink_core._attribute_value(native, wglink_fem.FACE_ATTRIBUTE, strict=strict)
         current = wglink_fem.read_face_attribute(text)
         if strict and text is not None and current is None:
-            raise wglink_core.WgLinkError("A saved FEM surface group is unreadable.")
+            raise wglink_text.problem("fem_setup", "A saved FEM surface group is unreadable.")
         if current is not None and current[0] == region_id:
             grouped.setdefault(current[1], []).append(face)
     return grouped
@@ -454,9 +455,7 @@ def _selection(design: object, value: object) -> tuple[object, object, object, s
     if not selected or selected == [root]:
         return "root", root, root, ROOT_EXPORT_FRAME
     if len(selected) != 1:
-        raise wglink_core.WgLinkError(
-            "Select the root or exactly one occurrence subtree; several selections are not supported."
-        )
+        raise wglink_text.problem("scope_selection", "Select the root or exactly one occurrence subtree; several selections are not supported.")
     entity = getattr(selected[0], "entity", selected[0])
     kind = wglink_core._kind(entity)
     component = getattr(entity, "component", None)
@@ -465,9 +464,7 @@ def _selection(design: object, value: object) -> tuple[object, object, object, s
         and (hasattr(entity, "transform2") or hasattr(entity, "transform"))
     ):
         label = (kind or type(entity).__name__).lower()
-        raise wglink_core.WgLinkError(
-            f"Cannot export a selected {label}; select the root or exactly one occurrence subtree."
-        )
+        raise wglink_text.problem("scope_selection", f"Cannot export a selected {label}; select the root or exactly one occurrence subtree.")
     path = _occurrence_path(entity)
     if component is None:
         # An unresolved external link has no component to export. The scope walk
@@ -482,14 +479,12 @@ def _selection(design: object, value: object) -> tuple[object, object, object, s
     if not _is_identity_placement(
         _occurrence_placement(entity)
     ) and _child_occurrences(entity, component):
-        raise wglink_core.WgLinkError(
-            f"Occurrence {path!r} is placed away from the assembly origin and "
+        raise wglink_text.problem("scope_selection", f"Occurrence {path!r} is placed away from the assembly origin and "
             "contains sub-assemblies, and Fusion can only export a component in "
             "its own frame. Leave Assembly scope empty to send the whole root "
             "assembly, select one of the sub-assemblies on its own, or move the "
             "occurrence back onto the assembly origin (edit or delete the joint "
-            "or Move feature that placed it) and send again."
-        )
+            "or Move feature that placed it) and send again.")
     return {"kind": "occurrence", "path": path}, component, entity, OCCURRENCE_EXPORT_FRAME
 
 
@@ -744,8 +739,7 @@ def _refuse_inventory_disagreement(
             + ", ".join(repr(name) for name in unexported)
             + ", which Fusion will not export"
         )
-    raise wglink_core.WgLinkError(
-        "The return inventory and Fusion's STEP export disagree about this "
+    raise wglink_text.problem("body_inclusion", "The return inventory and Fusion's STEP export disagree about this "
         "document: "
         + "; ".join(parts)
         + ". Fusion writes every visible, unsuppressed B-rep body of the "
@@ -753,8 +747,7 @@ def _refuse_inventory_disagreement(
         "so hide the body itself in the browser -- hiding a folder that "
         "contains it will not work, because Autodesk exports a group-hidden "
         "body as if it were visible, and that case is one this check cannot "
-        "see."
-    )
+        "see.")
 
 
 def _fem_bodies_fusion_would_export(
@@ -834,17 +827,14 @@ def _refuse_fem_bodies_in_export(fem_exported: list[dict[str, Any]]) -> None:
         {item["occurrence"] for item in fem_exported if item["is_export_scope"]}
     )
     if itself:
-        raise wglink_core.WgLinkError(
-            f"The export scope {itself[0]!r} is itself a FEM air volume, so "
+        raise wglink_text.problem("fem_visibility", f"The export scope {itself[0]!r} is itself a FEM air volume, so "
             f"assembly.step would carry its {listed} as exterior geometry. "
             "Send the assembly that contains the FEM air volume instead: leave "
-            "Assembly scope empty, or select an occurrence that contains it."
-        )
+            "Assembly scope empty, or select an occurrence that contains it.")
     occurrences = sorted({item["occurrence"] for item in fem_exported})
     one = len(occurrences) == 1
     noun = "occurrence" if one else "occurrences"
-    raise wglink_core.WgLinkError(
-        "Fusion writes every visible body of the exported component into "
+    raise wglink_text.problem("fem_visibility", "Fusion writes every visible body of the exported component into "
         f"assembly.step, so the {listed} under a FEM air volume would reach "
         f"WG as exterior geometry. Hide the FEM {noun} "
         + ", ".join(repr(name) for name in occurrences)
@@ -852,8 +842,7 @@ def _refuse_fem_bodies_in_export(fem_exported: list[dict[str, Any]]) -> None:
         f"bodies inside {'it' if one else 'them'}: Fusion exports visible "
         "bodies only, so hidden bodies would leave the separate FEM file empty "
         "as well. If Fusion leaves that file empty anyway, Send refuses it by "
-        "name."
-    )
+        "name.")
 
 
 def _mark_uncovered_helper_sources(candidates: list[dict[str, Any]]) -> None:
@@ -1099,12 +1088,10 @@ def _scope_walk(design: object, selection_value: object) -> dict[str, Any]:
             # document changed under the dialog. Refusing again here is cheap,
             # and the alternative is measuring a child's native geometry in the
             # wrong frame.
-            raise wglink_core.WgLinkError(
-                "The selected occurrence is placed away from the assembly origin "
+            raise wglink_text.problem("scope_selection", "The selected occurrence is placed away from the assembly origin "
                 "and contains sub-assemblies; its bodies cannot be measured in "
                 "the frame the STEP is written in. Leave Assembly scope empty to "
-                "send the whole root assembly."
-            )
+                "send the whole root assembly.")
         for child in children:
             child_path = _occurrence_path(child)
             child_suppressed = suppressed or _bool(child, ("isSuppressed",), False)
@@ -1221,15 +1208,13 @@ def _record_body(record: dict[str, Any]) -> object | None:
     ]
     if len(bodies) > 1:
         labels = ", ".join(wglink_core._entity_label(entity) for entity in bodies)
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {record['instance_id']!r} belongs to several "
+        raise wglink_text.problem("copied_link", f"Waveguide Generator instance {record['instance_id']!r} belongs to several "
             f"managed bodies: {labels}. Send cannot choose between them. "
             "Detach removes Waveguide Generator metadata and no geometry, and it does run "
             "on this state: pass options['entity_token'] or options['entity'] "
             "naming the copy you are giving up to unmanage only that one, "
             "options['preview'] to see what that removes first, or no target "
-            "to unmanage every copy."
-        )
+            "to unmanage every copy.")
     return bodies[0] if bodies else None
 
 
@@ -1262,9 +1247,7 @@ def _records_in_scope(design: object, walk: dict[str, Any]) -> list[dict[str, An
             if wglink_core._kind(entity) == "Component" or hasattr(entity, "bRepBodies")
         ]
         if len(wrappers) > 1:
-            raise wglink_core.WgLinkError(
-                f"Waveguide Generator instance {record['instance_id']!r} has several wrapper components."
-            )
+            raise wglink_text.problem("copied_link", f"Waveguide Generator instance {record['instance_id']!r} has several wrapper components.")
         record["wrapper_component"] = wrappers[0] if wrappers else getattr(record.get("body"), "parentComponent", None)
     return sorted(chosen, key=lambda item: str(item["instance_id"]))
 
@@ -1410,7 +1393,7 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
             for group in record["surface_groups"]
         )
     except (wglink_core.WgLinkError, wglink_fem.FemDeclarationError) as exc:
-        report["fem_region_error"] = str(exc)
+        report["fem_region_error"] = wglink_text.user_message(exc, action="check")
     report["fem_driven"] = fem_driven
     _mark_solver_anchor(walk["candidates"], anchor)
     surface_basis: dict[str, str] = {}
@@ -1419,7 +1402,7 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
         surface_basis = dict(scope_plan.surface_basis)
         scope = scope_plan.manifest_scope()
     except WgReturnError as exc:
-        report["scope_error"] = str(exc)
+        report["scope_error"] = wglink_text.scope_message(exc)
         report["scope_reason_codes"] = list(dict.fromkeys(
             str(reason["reason_code"])
             for reason in exc.reasons
@@ -1514,7 +1497,7 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
     except wglink_core.WgLinkError as exc:
         if isinstance(exc, SourceIdentityReadError) and authoring_context is not None:
             raise
-        report["source_error"] = str(exc)
+        report["source_error"] = wglink_text.user_message(exc, action="check")
         sources = []
         fractions = {}
     for source in sources:
@@ -1543,7 +1526,7 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
             )
         except wglink_core.WgLinkError as exc:
             # The preview's whole job is to say this before OK rather than after.
-            report["domain_error"] = str(exc)
+            report["domain_error"] = wglink_text.user_message(exc, action="check")
     drawn = wglink_mesh.drawn_fraction(report.get("domain"), report["cut_provenance"], estimate_scope["included"])
     if authoring_context is not None:
         authoring_context["drawn_fraction"] = drawn
@@ -1577,7 +1560,7 @@ def _preview_mesh(
     try:
         mesh = _mesh_snapshot(design, sources, bodies, source_face_keys, left_out=left_out)
     except wglink_core.WgLinkError as exc:
-        report["mesh_error"] = str(exc)
+        report["mesh_error"] = wglink_text.user_message(exc, action="check")
         return
     report["surface_groups"] = [{"name": group.get("name")} for group in mesh["surface_groups"]]
     report["groups_out_of_scope"] = left_out
@@ -1822,16 +1805,12 @@ def _instance_identity_summaries(
 
 def _strict_matrix_rows(matrix: object, instance_id: str) -> list[list[float]]:
     if matrix is None:
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {instance_id!r} has no readable occurrence transform."
-        )
+        raise wglink_text.problem("link_placement", f"Waveguide Generator instance {instance_id!r} has no readable occurrence transform.")
     try:
         values = [float(value) for value in matrix.asArray()]
         return wglink_core.fusion_matrix_to_mm(values)
     except Exception as exc:  # noqa: BLE001 - identity would be a dangerous fallback
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {instance_id!r} has an unreadable occurrence transform: {exc}."
-        ) from exc
+        raise wglink_text.problem("link_placement", f"Waveguide Generator instance {instance_id!r} has an unreadable occurrence transform: {exc}.") from exc
 
 
 def _same_entity(left: object, right: object) -> bool:
@@ -1906,12 +1885,10 @@ def _strict_assembly_from_link(
                 [0.0, 0.0, 1.0, 0.0],
                 [0.0, 0.0, 0.0, 1.0],
             ], _occurrence_path(selected_occurrence)
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {instance_id!r} is not the selected occurrence, so "
+        raise wglink_text.problem("scope_selection", f"Waveguide Generator instance {instance_id!r} is not the selected occurrence, so "
             "its placement inside the exported component cannot be recorded "
             "faithfully. Leave Assembly scope empty to send the whole root "
-            "assembly, or select that instance's own occurrence."
-        )
+            "assembly, or select that instance's own occurrence.")
     if record.get("payload", {}).get("wrapper") == "root":
         return [
             [1.0, 0.0, 0.0, 0.0],
@@ -1929,8 +1906,7 @@ def _strict_assembly_from_link(
         payload = record.get("payload") or {}
         label = str(payload.get("link_name") or payload.get("design_name") or "").strip()
         named = f"the WG waveguide {label!r}" if label else "a WG waveguide"
-        raise wglink_core.WgLinkError(
-            f"The Waveguide Generator add-in cannot find the component that holds {named} in this "
+        raise wglink_text.problem("link_placement", f"The Waveguide Generator add-in cannot find the component that holds {named} in this "
             "assembly, so it cannot tell where the waveguide sits. It will not "
             "guess a position, because a guessed position would be solved as if "
             "it were real.\n\n"
@@ -1938,36 +1914,27 @@ def _strict_assembly_from_link(
             "was deleted or replaced, undo that and send again. If it is there "
             "and this keeps happening, do not insert a second copy; report it, "
             "with this message, so the cause can be found.\n\n"
-            f"(Waveguide Generator link {instance_id}: no wrapper occurrence could be resolved.)"
-        )
+            f"(Waveguide Generator link {instance_id}: no wrapper occurrence could be resolved.)")
     if len(occurrences) > 1:
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {instance_id!r} has multiple wrapper occurrences; placement is ambiguous."
-        )
+        raise wglink_text.problem("copied_link", f"Waveguide Generator instance {instance_id!r} has multiple wrapper occurrences; placement is ambiguous.")
     occurrence = occurrences[0]
     # transform2 is PARENT-relative. For a root-level wrapper that is the
     # assembly transform; for a wrapper nested inside another occurrence it is
     # not, and composing the chain is unverified arithmetic on the trust path
     # (C4). Refusing is the R19 rule: never a plausible default.
     if getattr(occurrence, "assemblyContext", None) is not None:
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {instance_id!r} wrapper is nested inside another "
+        raise wglink_text.problem("link_placement", f"Waveguide Generator instance {instance_id!r} wrapper is nested inside another "
             "occurrence; its assembly placement cannot be recorded faithfully. "
-            "Move the wrapper to the root level and send again."
-        )
+            "Move the wrapper to the root level and send again.")
     try:
         matrix = getattr(occurrence, "transform2", None)
     except Exception as exc:  # noqa: BLE001
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {instance_id!r} has an unreadable transform2: {exc}."
-        ) from exc
+        raise wglink_text.problem("link_placement", f"Waveguide Generator instance {instance_id!r} has an unreadable transform2: {exc}.") from exc
     if matrix is None:
         try:
             matrix = occurrence.transform
         except Exception as exc:  # noqa: BLE001
-            raise wglink_core.WgLinkError(
-                f"Waveguide Generator instance {instance_id!r} has an unreadable occurrence transform: {exc}."
-            ) from exc
+            raise wglink_text.problem("link_placement", f"Waveguide Generator instance {instance_id!r} has an unreadable occurrence transform: {exc}.") from exc
     return _strict_matrix_rows(matrix, instance_id), _occurrence_path(occurrence)
 
 
@@ -2239,12 +2206,10 @@ def _contract_datum(
         owner = wglink_core._attribute_value(entity, "instance_id")
         role = wglink_core._attribute_value(entity, "datum")
         if owner not in (None, "", instance_id) or role not in (None, "", name):
-            raise wglink_core.WgLinkError(
-                f"Waveguide Generator instance {instance_id!r} recorded its {name} as a datum "
+            raise wglink_text.problem("link_datums", f"Waveguide Generator instance {instance_id!r} recorded its {name} as a datum "
                 f"The Waveguide Generator add-in stamped as {role or 'a datum'} of instance {owner or instance_id!r}. "
                 "The two ownership records disagree, so Send will not guess which "
-                "datum is this link's. Re-insert the link from WG and send again."
-            )
+                "datum is this link's. Re-insert the link from WG and send again.")
     if stamped and recorded:
         agreed = [
             entity
@@ -2286,12 +2251,10 @@ def _contract_datum(
     if not named:
         return None
     if _shares_component(design, record, component):
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {instance_id!r} has no record of which {name} is its "
+        raise wglink_text.problem("link_datums", f"Waveguide Generator instance {instance_id!r} has no record of which {name} is its "
             "own, and its component holds another WG link whose datums share that "
             "name, so Send will not guess between them. Re-insert this link from "
-            "WG, which records its datums, or give each link its own component."
-        )
+            "WG, which records its datums, or give each link its own component.")
     if len(named) > 1:
         raise _datum_refusal(
             instance_id, name, f"{len(named)} datums in its component are named {name}"
@@ -2319,14 +2282,12 @@ def _chirality(matrix: list[list[float]], instance_id: str) -> str:
     (a, b, c), (d, e, f), (g, h, i) = rotation
     determinant = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
     if determinant < 0.0:
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {instance_id!r} is placed mirrored (its placement's "
+        raise wglink_text.problem("mirrored_placement", f"Waveguide Generator instance {instance_id!r} is placed mirrored (its placement's "
             f"determinant is {determinant:.6g}). The return contract's only "
             "chirality, 'original', is true of an unmirrored placement alone, so "
             "Send refuses it rather than mislabel it. "
             "Place an unmirrored copy instead: insert it from WG and move or "
-            "rotate it into position."
-        )
+            "rotate it into position.")
     orthonormal = all(
         abs(
             sum(rotation[k][p] * rotation[k][q] for k in range(3))
@@ -2337,14 +2298,12 @@ def _chirality(matrix: list[list[float]], instance_id: str) -> str:
         for q in range(3)
     )
     if not orthonormal or abs(determinant - 1.0) > _RIGID_TOLERANCE:
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {instance_id!r} is not a rigid placement: its rotation "
+        raise wglink_text.problem("scaled_placement", f"Waveguide Generator instance {instance_id!r} is not a rigid placement: its rotation "
             f"is not orthonormal within {_RIGID_TOLERANCE:g} (determinant "
             f"{determinant:.9g}). The return contract places a link by a rotation "
             "plus a translation only, so Send refuses it. Remove any scale or "
             "skew from the wrapper's "
-            "placement and send again."
-        )
+            "placement and send again.")
     return "original"
 
 
@@ -2379,9 +2338,7 @@ def _source_contract(design: object, record: dict[str, Any]) -> dict[str, Any] |
         return None
     disc_area = math.pi * diameter * diameter / 4.0
     if expected_area <= 0.0 or not math.isclose(expected_area, disc_area, rel_tol=0.01):
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {record['instance_id']!r} has a throat diameter whose disc area contradicts the stored expected area."
-        )
+        raise wglink_text.problem("source_setup", f"Waveguide Generator instance {record['instance_id']!r} has a throat diameter whose disc area contradicts the stored expected area.")
     return {
         "role": str(role),
         "throat_z_mm": throat_z,
@@ -2467,17 +2424,13 @@ def _throat_faces(record: dict[str, Any], retained_fraction: float = 1.0) -> lis
     # the throat disc double-counts as a user source (measured in E2E).
     body = record.get("source_body") or record.get("body")
     if body is None:
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {record['instance_id']!r} has no managed body for its required throat source."
-        )
+        raise wglink_text.problem("source_setup", f"Waveguide Generator instance {record['instance_id']!r} has no managed body for its required throat source.")
     payload = record.get("payload", {})
     role = str(_nullable(payload.get("source_role")) or "").upper()
     expected = _float_echo(payload, "expected_throat_area_mm2")
     throat_z = _float_echo(payload, "throat_z_mm")
     if role not in RECOGNISED_SOURCE_ROLES or expected is None or throat_z is None:
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {record['instance_id']!r} lacks a complete required throat selector."
-        )
+        raise wglink_text.problem("source_setup", f"Waveguide Generator instance {record['instance_id']!r} lacks a complete required throat selector.")
     # What the declared domain leaves of the contract's disc, decided before any
     # face is looked at. Both candidate branches are measured against it: the
     # geometric one and the painted one match the same physical face, so a
@@ -2485,10 +2438,8 @@ def _throat_faces(record: dict[str, Any], retained_fraction: float = 1.0) -> lis
     # export -- the linked reduced model WG's own ingest already accepts.
     retained = float(retained_fraction)
     if not math.isfinite(retained) or not 0.0 < retained <= 1.0:
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {record['instance_id']!r} has a retained source "
-            f"fraction of {retained!r}, which is not a share of a disc."
-        )
+        raise wglink_text.problem("source_setup", f"Waveguide Generator instance {record['instance_id']!r} has a retained source "
+            f"fraction of {retained!r}, which is not a share of a disc.")
     expected = expected * retained
     faces = wglink_core._items(getattr(body, "faces", None))
     geometric = []
@@ -2517,10 +2468,8 @@ def _throat_faces(record: dict[str, Any], retained_fraction: float = 1.0) -> lis
             if retained >= 1.0
             else f" at the {retained:g} of its disc a declared cut leaves ({expected:.4g} mm2)"
         )
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {record['instance_id']!r} required throat source{share} "
-            f"resolved to {len(matches)} faces; expected exactly one."
-        )
+        raise wglink_text.problem("source_setup", f"Waveguide Generator instance {record['instance_id']!r} required throat source{share} "
+            f"resolved to {len(matches)} faces; expected exactly one.")
     return matches
 
 
@@ -2641,33 +2590,25 @@ def _check_source_identities(sources: list[dict[str, Any]]) -> None:
         source_id = source.get("id")
         role = str(source.get("role") or "")
         if not isinstance(source_id, str) or not source_id:
-            raise wglink_core.WgLinkError(f"The {role} source has no source identity.")
+            raise wglink_text.problem("source_name", f"The {role} source has no source identity.")
         if source_id != source_id.strip():
-            raise wglink_core.WgLinkError(
-                f"The {role} source identity {source_id!r} must be trimmed."
-            )
+            raise wglink_text.problem("source_name", f"The {role} source identity {source_id!r} must be trimmed.")
         if len(source_id.encode("utf-8")) > SOURCE_IDENTITY_MAX_BYTES:
-            raise wglink_core.WgLinkError(
-                f"The {role} source identity {source_id!r} is longer than "
-                f"{SOURCE_IDENTITY_MAX_BYTES} UTF-8 bytes."
-            )
+            raise wglink_text.problem("source_name", f"The {role} source identity {source_id!r} is longer than "
+                f"{SOURCE_IDENTITY_MAX_BYTES} UTF-8 bytes.")
         if source_id in seen:
-            raise wglink_core.WgLinkError(
-                f"Two sources claim the source identity {source_id!r}; identities must "
+            raise wglink_text.problem("copied_link", f"Two sources claim the source identity {source_id!r}; identities must "
                 "be unique within a return, so the Waveguide Generator add-in will not choose between them. "
                 "A copied link or face carries its original's identity: remove the "
-                "copy, or insert a fresh link from WG."
-            )
+                "copy, or insert a fresh link from WG.")
         seen.add(source_id)
         name = source_physical_name(
             WORST_CASE_SOURCE_TAG, source_id, source.get("instance_id"), role
         )
         size = len(name.encode("utf-8"))
         if size > GMSH_PHYSICAL_NAME_MAX_BYTES:
-            raise wglink_core.WgLinkError(
-                f"The {role} source {source_id!r} would need a {size}-byte mesh name; "
-                f"WG keeps at most {GMSH_PHYSICAL_NAME_MAX_BYTES} bytes."
-            )
+            raise wglink_text.problem("source_name", f"The {role} source {source_id!r} would need a {size}-byte mesh name; "
+                f"WG keeps at most {GMSH_PHYSICAL_NAME_MAX_BYTES} bytes.")
 
 
 def _native_face(face: object) -> object:
@@ -2694,12 +2635,15 @@ def _parse_source_stamp(value: object) -> dict[str, Any] | None:
     return stamp
 
 
-class SourceIdentityReadError(wglink_core.WgLinkError):
+class SourceIdentityReadError(wglink_text.UserFacing):
     """An API read failure, distinct from an absent or malformed stamp."""
+
+    def __init__(self, detail):
+        text, step = wglink_text.PROBLEMS["source_identity_unreadable"]
+        super().__init__("source_identity_unreadable", text, step, detail=detail)
 
 
 SOURCE_IDENTITY_UNREADABLE = "Fusion could not read a saved WG source identity in this design."
-
 
 def read_source_stamp(face: object) -> dict[str, Any] | None:
     """Return an absent/malformed stamp as None; API failures always refuse."""
@@ -2819,22 +2763,18 @@ def _painted_source_identity(
                 f"{refusal} These faces predate WG source identities, so Send "
                 f"offers to adopt them as this document's {canonical} source."
             )
-        raise wglink_core.WgLinkError(refusal)
+        raise wglink_text.problem("source_changed", refusal)
     identities = sorted({stamp["id"] for _native, stamp in stamps})
     if len(identities) != 1:
-        raise wglink_core.WgLinkError(
-            f"The faces painted {role} carry {len(identities)} different WG source "
-            f"identities, so which source they are is ambiguous. {_run_again(canonical)}"
-        )
+        raise wglink_text.problem("source_changed", f"The faces painted {role} carry {len(identities)} different WG source "
+            f"identities, so which source they are is ambiguous. {_run_again(canonical)}")
     by_nonce: dict[str, list[object]] = {}
     for native, stamp in stamps:
         by_nonce.setdefault(stamp["face"], []).append(native)
     copied = max(len(group) for group in by_nonce.values())
     if copied > 1:
-        raise wglink_core.WgLinkError(
-            f"A face of the {canonical} source was split or copied: {copied} faces carry "
-            f"one face's identity. {_run_again(canonical)}"
-        )
+        raise wglink_text.problem("source_changed", f"A face of the {canonical} source was split or copied: {copied} faces carry "
+            f"one face's identity. {_run_again(canonical)}")
     counts = {stamp["faces"] for _native, stamp in stamps}
     if counts == {len(natives)}:
         return identities[0]
@@ -2851,17 +2791,13 @@ def _painted_source_identity(
             if not any(_same_live_entity(member, native) for native in natives)
         ]
         if outside:
-            raise wglink_core.WgLinkError(
-                f"{len(outside)} face(s) of the {canonical} source are outside what is "
+            raise wglink_text.problem("source_changed", f"{len(outside)} face(s) of the {canonical} source are outside what is "
                 "being sent (in a hidden or excluded body, or another component), so "
                 "this export would carry only part of that source. Include them in the "
-                f"export, or select them and Clear their WG source."
-            )
-    raise wglink_core.WgLinkError(
-        f"The {canonical} source was marked on {expected} face(s), but only "
+                f"export, or select them and Clear their WG source.")
+    raise wglink_text.problem("source_changed", f"The {canonical} source was marked on {expected} face(s), but only "
         f"{len(natives)} still carry it: a face was removed or repainted. "
-        f"{_run_again(canonical)}"
-    )
+        f"{_run_again(canonical)}")
 
 
 def _identity_members(design: object, identity: str) -> list[tuple[object, object, dict[str, Any]]]:
@@ -3435,22 +3371,20 @@ def read_mesh_settings(design: object) -> dict[str, Any] | None:
         )
     except Exception as exc:  # noqa: BLE001 - failed access must never become defaults
         # Send reads these too: the remedy belongs to whoever is reading.
-        raise wglink_core.WgLinkError(
-            "Could not read the saved mesh settings from this document."
-        ) from exc
+        raise wglink_text.problem("mesh_settings", "Could not read the saved mesh settings from this document.") from exc
     if text is None:
         return None
     try:
         return wglink_mesh.loads_settings(text)
     except wglink_mesh.MeshSettingsError as exc:
-        raise wglink_core.WgLinkError(str(exc)) from exc
+        raise wglink_text.problem("mesh_settings", str(exc)) from exc
 
 
 def save_mesh_settings(design: object, mesh: dict[str, Any]) -> None:
     try:
         text = wglink_mesh.dumps_settings(mesh)
     except wglink_mesh.MeshSettingsError as exc:
-        raise wglink_core.WgLinkError(str(exc)) from exc
+        raise wglink_text.problem("mesh_settings", str(exc)) from exc
     document_edit("save mesh settings",
                   lambda edit: edit.remember_attribute(design.rootComponent, wglink_mesh.SETTINGS_ATTRIBUTE),
                   lambda edit: edit.set_attribute(design.rootComponent, wglink_mesh.SETTINGS_ATTRIBUTE, text))
@@ -3705,9 +3639,9 @@ def _mesh_snapshot(
                 continue
             group_id = name[len("WGMESH_"):]
             if group_id not in groups:
-                raise wglink_core.WgLinkError("A painted surface group has no settings. Open Sources & Mesh… and save again.")
+                raise wglink_text.problem("size_zone", "A painted surface group has no settings. Open Sources & Mesh… and save again.")
             if _face_key(face) in source_face_keys:
-                raise wglink_core.WgLinkError("A face cannot be in both a source and a surface group.")
+                raise wglink_text.problem("size_zone", "A face cannot be in both a source and a surface group.")
             faces_by_group[group_id].append(face)
     empty = [group_id for group_id in groups if not faces_by_group[group_id]]
     elsewhere = _groups_painted_in_design(design, empty) if empty else set()
@@ -3715,7 +3649,7 @@ def _mesh_snapshot(
         group = groups.pop(group_id)
         if group_id not in elsewhere:
             # No faces anywhere: the group's paint is gone, which the user fixes.
-            raise wglink_core.WgLinkError(f"Surface group {group['name']!r} has no faces in this export. Open Sources & Mesh… and select its faces again.")
+            raise wglink_text.problem("size_zone", f"Surface group {group['name']!r} has no faces in this export. Open Sources & Mesh… and select its faces again.")
         if left_out is not None:
             left_out.append(str(group.get("name") or group_id))
     for group_id, group in groups.items():
@@ -3725,7 +3659,7 @@ def _mesh_snapshot(
     try:
         mesh = wglink_mesh.snapshot(sources, settings, surface_groups=list(groups.values()))
     except wglink_mesh.MeshSettingsError as exc:
-        raise wglink_core.WgLinkError(str(exc)) from exc
+        raise wglink_text.problem("size_zone", str(exc)) from exc
     for source in sources:
         source["suggested_resolution_mm"] = mesh["source_size_mm"][source["id"]]
     return mesh
@@ -3812,11 +3746,9 @@ def _declared_disc_reduction(
     if not planes:
         return 1.0
     if contract is None or matrix is None:
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {instance_id!r} declares a reduced domain but has no "
+        raise wglink_text.problem("domain_setup", f"Waveguide Generator instance {instance_id!r} declares a reduced domain but has no "
             "readable throat contract, so what the cut leaves of its source cannot "
-            "be derived. Send the full model, or repair the link's throat datums."
-        )
+            "be derived. Send the full model, or repair the link's throat datums.")
     plane_link = contract.get("throat_plane_link") or {}
     axis_link = contract.get("axis_link") or {}
     normal, normal_length = _unit(
@@ -3827,10 +3759,8 @@ def _declared_disc_reduction(
     )
     diameter = float(contract["throat_diameter_mm"])
     if normal_length <= 0.0 or direction_length <= 0.0 or diameter <= 0.0:
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {instance_id!r} has a degenerate throat plane, axis or "
-            "diameter, so a declared reduced domain cannot be applied to its source."
-        )
+        raise wglink_text.problem("domain_setup", f"Waveguide Generator instance {instance_id!r} has a degenerate throat plane, axis or "
+            "diameter, so a declared reduced domain cannot be applied to its source.")
     plane_origin = _placed_point(
         matrix, [float(value) for value in plane_link["origin_mm"]]
     )
@@ -3839,11 +3769,9 @@ def _declared_disc_reduction(
     )
     along = sum(direction[axis] * normal[axis] for axis in range(3))
     if abs(along) < math.cos(math.radians(THROAT_NORMAL_ANGLE_DEG)):
-        raise wglink_core.WgLinkError(
-            f"Waveguide Generator instance {instance_id!r} has a throat axis that is not "
+        raise wglink_text.problem("domain_setup", f"Waveguide Generator instance {instance_id!r} has a throat axis that is not "
             "perpendicular to its own throat plane, so the disc a declared reduced "
-            "domain would cut is undefined."
-        )
+            "domain would cut is undefined.")
     # Where the axis pierces the throat plane: the centre of the contract's disc.
     reach_along = (
         sum((plane_origin[axis] - axis_origin[axis]) * normal[axis] for axis in range(3))
@@ -3875,21 +3803,17 @@ def _declared_disc_reduction(
             fraction *= 0.5
             cuts.append([value / span for value in in_plane])
             continue
-        raise wglink_core.WgLinkError(
-            f"The export was declared a reduced domain about {DOMAIN_PLANE_LABEL[plane]}, "
+        raise wglink_text.problem("domain_setup", f"The export was declared a reduced domain about {DOMAIN_PLANE_LABEL[plane]}, "
             f"but that plane crosses the throat of Waveguide Generator instance {instance_id!r} "
             f"{offset:+.4g} mm off its centre (disc reach {reach:.4g} mm). A declared "
             "cut is supported only where it misses a source or passes through its "
-            "centre; this one would leave a partial disc of no known area."
-        )
+            "centre; this one would leave a partial disc of no known area.")
     if len(cuts) == 2:
         skew = abs(sum(cuts[0][axis] * cuts[1][axis] for axis in range(3)))
         if skew > 1.0e-3:
-            raise wglink_core.WgLinkError(
-                f"The two declared cut planes are not perpendicular within the throat "
+            raise wglink_text.problem("domain_setup", f"The two declared cut planes are not perpendicular within the throat "
                 f"plane of Waveguide Generator instance {instance_id!r}, so the retained wedge is "
-                "not a quarter of its disc."
-            )
+                "not a quarter of its disc.")
     return fraction
 
 
@@ -4051,7 +3975,7 @@ def _sources(
             }
         )
     if not sources and not allow_empty:
-        raise wglink_core.WgLinkError(wglink_author.NO_SOURCE_WARNING)
+        raise wglink_text.problem("no_drive", wglink_author.NO_SOURCE_WARNING)
     if source_identity:
         _check_source_identities(sources)
     if (getattr(design, "rootComponent", None) is not None
@@ -4470,9 +4394,7 @@ def plan_domain(planes: tuple[str, ...], bodies: list[object]) -> dict[str, Any]
         return None
     boxes = [wglink_core._bbox_values(body) for body in bodies]
     if not boxes:
-        raise wglink_core.WgLinkError(
-            "A reduced domain cannot be declared for an export with no included bodies."
-        )
+        raise wglink_text.problem("domain_setup", "A reduced domain cannot be declared for an export with no included bodies.")
     low = [min(box[axis] for box in boxes) for axis in range(3)]
     high = [max(box[axis + 3] for box in boxes) for axis in range(3)]
     diagonal = math.sqrt(sum((high[axis] - low[axis]) ** 2 for axis in range(3)))
@@ -4486,18 +4408,14 @@ def plan_domain(planes: tuple[str, ...], bodies: list[object]) -> dict[str, Any]
         # wholly on the wrong side is a mirror away from being right, while one
         # that straddles is not a half at all.
         if maximum <= tolerance:
-            raise wglink_core.WgLinkError(
-                f"The export was declared a reduced domain about {label}, but the "
+            raise wglink_text.problem("domain_setup", f"The export was declared a reduced domain about {label}, but the "
                 "included bodies have no extent on the positive side of it. WG keeps "
-                f"the positive half, so mirror the model onto {label[0]} >= 0 first."
-            )
+                f"the positive half, so mirror the model onto {label[0]} >= 0 first.")
         if minimum < -tolerance:
-            raise wglink_core.WgLinkError(
-                f"The export was declared a reduced domain about {label}, but the "
+            raise wglink_text.problem("domain_setup", f"The export was declared a reduced domain about {label}, but the "
                 f"included bodies reach {abs(minimum):.4g} mm onto the negative side "
                 f"of it (tolerance {tolerance:.4g} mm). Cut the model in CAD, or "
-                "declare the full model."
-            )
+                "declare the full model.")
         evidence[plane] = {
             "min_mm": minimum,
             "max_mm": maximum,
@@ -4600,19 +4518,15 @@ def _fem_region_exports(walk: dict[str, Any]) -> list[tuple["wglink_fem.RegionEx
         return []
     for item in regions:
         if item["declaration"] is None:
-            raise wglink_core.WgLinkError(
-                f"FEM region attribute on body {item['name']!r} is unreadable, malformed, "
-                "or uses an unsupported schema. Clear or re-declare this region before sending."
-            )
+            raise wglink_text.problem("fem_setup", f"FEM region attribute on body {item['name']!r} is unreadable, malformed, "
+                "or uses an unsupported schema. Clear or re-declare this region before sending.")
     visible = sorted(item["name"] for item in regions if item["visible"])
     if visible:
-        raise wglink_core.WgLinkError(
-            "Hide the FEM region "
+        raise wglink_text.problem("fem_visibility", "Hide the FEM region "
             + ("body " if len(visible) == 1 else "bodies ")
             + ", ".join(repr(name) for name in visible)
             + " before sending: the Waveguide Generator add-in exports each region on its own, and a "
-            "visible one would also be exported as exterior geometry."
-        )
+            "visible one would also be exported as exterior geometry.")
     # A failed cleanup can leave a declared copy in the temporary component.
     # Diagnose that copy before the root-only rule suggests moving it instead.
     try:
@@ -4620,19 +4534,15 @@ def _fem_region_exports(walk: dict[str, Any]) -> list[tuple["wglink_fem.RegionEx
             (str(item["declaration"]["region_id"]), item["path"]) for item in regions
         ])
     except wglink_fem.FemDeclarationError as exc:
-        raise wglink_core.WgLinkError(str(exc)) from exc
+        raise wglink_text.problem("fem_setup", str(exc)) from exc
     for item in regions:
         if not item["direct_root_body"]:
-            raise wglink_core.WgLinkError(
-                f"FEM region body {item['name']!r} must belong directly to the root component. "
-                "Move the region to the root component and leave Assembly scope empty before sending."
-            )
+            raise wglink_text.problem("fem_setup", f"FEM region body {item['name']!r} must belong directly to the root component. "
+                "Move the region to the root component and leave Assembly scope empty before sending.")
     exports = []
     for item in regions:
         if not item["solid"]:
-            raise wglink_core.WgLinkError(
-                f"FEM region body {item['name']!r} is no longer a closed solid."
-            )
+            raise wglink_text.problem("fem_setup", f"FEM region body {item['name']!r} is no longer a closed solid.")
         region_id = str(item["declaration"]["region_id"])
         faces: dict[str, list[dict[str, Any]]] = {}
         face_ids: dict[str, list[str | None]] = {}
@@ -4655,7 +4565,7 @@ def _fem_region_exports(walk: dict[str, Any]) -> list[tuple["wglink_fem.RegionEx
         try:
             wglink_fem.validate_group_areas(export)
         except wglink_fem.FemDeclarationError as exc:
-            raise wglink_core.WgLinkError(str(exc)) from exc
+            raise wglink_text.problem("fem_setup", str(exc)) from exc
         exports.append((export, item["body"]))
     return exports
 
@@ -4685,11 +4595,9 @@ def _refuse_ambiguous_fem_drivers(
                 f"{source['id']!r} ({source['default_drive_channel_id']})"
                 for source in exterior
             )
-            raise wglink_core.WgLinkError(
-                f"Drive role {role!r} for FEM moving group {groups[0]} has more "
+            raise wglink_text.problem("fem_setup", f"Drive role {role!r} for FEM moving group {groups[0]} has more "
                 f"than one exterior source channel: {labels}. Use a different "
-                "drive role for each driver before sending."
-            )
+                "drive role for each driver before sending.")
 
 
 def _export_body_step(design: object, path: Path, body: object) -> None:
@@ -4773,7 +4681,7 @@ def _export_fusion_archive(design: object, path: Path) -> str | None:
 def _bbox(bodies: list[object]) -> list[list[float]]:
     boxes = [wglink_core._bbox_values(body) for body in bodies]
     if not boxes:
-        raise wglink_core.WgLinkError("The exterior assembly contains no included B-rep bodies.")
+        raise wglink_text.problem("scope_invalid", "The exterior assembly contains no included B-rep bodies.")
     return [
         [min(box[index] for box in boxes) for index in range(3)],
         [max(box[index] for box in boxes) for index in range(3, 6)],
@@ -4830,10 +4738,8 @@ def _create_reservation(reservation: Path) -> int | None:
             return os.open(reservation, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except PermissionError as exc:
             if os.name != "nt":
-                raise wglink_core.WgLinkError(
-                    f"The Waveguide Generator add-in cannot create files in the return folder {reservation.parent}: "
-                    f"{exc}. Check that the folder is writable, then send again."
-                ) from exc
+                raise wglink_text.problem("export_folder", f"The Waveguide Generator add-in cannot create files in the return folder {reservation.parent}: "
+                    f"{exc}. Check that the folder is writable, then send again.") from exc
     return None
 
 
@@ -4855,16 +4761,12 @@ def _reserve_target(target: Path, *, overwrite: bool) -> tuple[Path, Path]:
             if descriptor is None:
                 held += 1
                 if held >= _RESERVE_HELD_NAMES:
-                    raise wglink_core.WgLinkError(
-                        f"The Waveguide Generator add-in could not reserve a return name in {target.parent}: "
+                    raise wglink_text.problem("export_folder", f"The Waveguide Generator add-in could not reserve a return name in {target.parent}: "
                         f"{held} names in a row were held by another program. Check "
-                        "that the folder is writable and not locked, then send again."
-                    )
+                        "that the folder is writable and not locked, then send again.")
         if descriptor is None:
             if overwrite:
-                raise wglink_core.WgLinkError(
-                    f"Another Waveguide Generator export is already publishing {candidate.name}."
-                )
+                raise wglink_text.problem("export_busy", f"Another Waveguide Generator export is already publishing {candidate.name}.")
             index += 1
             continue
         held = 0
@@ -4924,9 +4826,7 @@ def _cleanup_stale_publish_artifacts(
 
 def _publish(temp: Path, target: Path, overwrite: bool) -> None:
     if target.exists() and not overwrite:
-        raise wglink_core.WgLinkError(
-            f"Return bundle already exists: {target}. Pass options['overwrite']=true to replace it."
-        )
+        raise wglink_text.problem("export_folder", f"Return bundle already exists: {target}. Pass options['overwrite']=true to replace it.")
     if not target.exists():
         os.replace(temp, target)
         return
@@ -4974,7 +4874,7 @@ def send(
     fem_regions_enabled = bool(options.get("fem_regions"))
     if walk["fem_regions"] and not fem_regions_enabled:
         if confirm_clear_fem is None:
-            raise wglink_core.WgLinkError(wglink_fem.UNAVAILABLE_MESSAGE)
+            raise wglink_text.problem("fem_setup", wglink_fem.UNAVAILABLE_MESSAGE)
         if not confirm_clear_fem():
             raise wglink_core.WgLinkError("Send cancelled. FEM declarations were kept.")
         bodies_to_clear = [item["body"] for item in walk["fem_regions"]]
@@ -4999,17 +4899,13 @@ def send(
         anchor = instance_ids[0]
     elif len(instance_ids) > 1:
         if requested_anchor is None:
-            raise wglink_core.WgLinkError(
-                "More than one Waveguide Generator instance is in scope; choose options['anchor_instance_id']."
-            )
+            raise wglink_text.problem("anchor_choice", "More than one Waveguide Generator instance is in scope; choose options['anchor_instance_id'].")
         anchor = str(requested_anchor)
         if anchor not in instance_ids:
-            raise wglink_core.WgLinkError(
-                f"Anchor instance {anchor!r} is not one of the in-scope instances: {', '.join(instance_ids)}."
-            )
+            raise wglink_text.problem("anchor_choice", f"Anchor instance {anchor!r} is not one of the in-scope instances: {', '.join(instance_ids)}.")
     else:
         if requested_anchor is not None:
-            raise wglink_core.WgLinkError("An unlinked return cannot name an anchor instance.")
+            raise wglink_text.problem("anchor_choice", "An unlinked return cannot name an anchor instance.")
         anchor = None
 
     _mark_solver_anchor(walk["candidates"], anchor)
@@ -5017,7 +4913,7 @@ def send(
         scope_plan = plan_export_scope(walk["selection"], walk["candidates"])
         scope = scope_plan.manifest_scope()
     except WgReturnError as exc:
-        raise wglink_core.WgLinkError(str(exc)) from exc
+        raise wglink_text.scope_problem(exc) from exc
 
     # Before anything is written: the inventory and the file must be about the
     # same set of bodies. Run it here, ahead of the temp bundle and the export,
@@ -5113,9 +5009,7 @@ def send(
     try:
         output.mkdir(parents=True, exist_ok=True)
     except Exception as exc:  # noqa: BLE001
-        raise wglink_core.WgLinkError(
-            f"Could not create return output folder {output}: {exc}."
-        ) from exc
+        raise wglink_text.problem("export_folder", f"Could not create return output folder {output}: {exc}.") from exc
     _cleanup_stale_publish_artifacts(output)
     request_id = _nullable(options.get("request_id"))
     suffix = f"-{_safe_document_name(str(request_id))}" if request_id else ""
@@ -5130,23 +5024,17 @@ def send(
     temp: Path | None = None
     try:
         if target.exists() and not target.is_dir():
-            raise wglink_core.WgLinkError(
-                f"Return target exists but is not a bundle folder: {target}."
-            )
+            raise wglink_text.problem("export_folder", f"Return target exists but is not a bundle folder: {target}.")
         try:
             temp = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=output))
         except Exception as exc:  # noqa: BLE001
-            raise wglink_core.WgLinkError(
-                f"Could not create a temporary return bundle beside {target}: {exc}."
-            ) from exc
+            raise wglink_text.problem("export_folder", f"Could not create a temporary return bundle beside {target}: {exc}.") from exc
         assembly_path = temp / "assembly.step"
         _export_step(design, assembly_path, walk["geometry"])
         observed_count = count_step_bodies(assembly_path)
         expected_count = len(included_bodies)
         if observed_count != expected_count:
-            raise wglink_core.WgLinkError(
-                f"STEP body count gate refused the export: inventory expects {expected_count}, but assembly.step contains {observed_count}."
-            )
+            raise wglink_text.problem("export_body_count", f"STEP body count gate refused the export: inventory expects {expected_count}, but assembly.step contains {observed_count}.")
         files = {"assembly.step": _file_record(assembly_path, "exterior-assembly")}
         if capture_document:
             document_path = temp / CAD_DOCUMENT_MEMBER
@@ -5160,16 +5048,14 @@ def send(
         for fem in scope["fem_air_volumes"]:
             component = walk["fem_components"].get(fem.get("object_id"))
             if component is None:
-                raise wglink_core.WgLinkError(f"Could not resolve FEM component {fem.get('name', '?')!r}.")
+                raise wglink_text.problem("fem_setup", f"Could not resolve FEM component {fem.get('name', '?')!r}.")
             member = str(fem["file"])
             fem_path = temp / Path(member)
             fem_path.parent.mkdir(parents=True, exist_ok=True)
             _export_step(design, fem_path, component)
             fem_count = count_step_bodies(fem_path)
             if fem_count != 1:
-                raise wglink_core.WgLinkError(
-                    f"FEM STEP {member!r} contains {fem_count} bodies; exactly one solid is required."
-                )
+                raise wglink_text.problem("fem_setup", f"FEM STEP {member!r} contains {fem_count} bodies; exactly one solid is required.")
             files[member] = _file_record(fem_path, "fem-air-volume")
         for record, (_export, body) in zip(fem_region_records, sorted(
             region_exports, key=lambda pair: str(pair[0].declaration.get("region_id"))
@@ -5180,10 +5066,8 @@ def send(
             _export_body_step(design, region_path, body)
             region_count = count_step_bodies(region_path)
             if region_count != 1:
-                raise wglink_core.WgLinkError(
-                    f"FEM region STEP {member!r} contains {region_count} bodies; "
-                    "exactly one solid is required."
-                )
+                raise wglink_text.problem("fem_setup", f"FEM region STEP {member!r} contains {region_count} bodies; "
+                    "exactly one solid is required.")
             files[member] = _file_record(region_path, wglink_fem.FEM_REGION_PURPOSE)
         if fem_region_records:
             scope = {**scope, "fem_regions": fem_region_records}
@@ -5264,9 +5148,7 @@ def send(
     except Exception as exc:  # noqa: BLE001 - one head-less filesystem boundary
         if temp is not None:
             shutil.rmtree(temp, ignore_errors=True)
-        raise wglink_core.WgLinkError(
-            f"Could not publish return bundle {target}: {exc}."
-        ) from exc
+        raise wglink_text.problem("export_folder", f"Could not publish return bundle {target}: {exc}.") from exc
     finally:
         reservation.unlink(missing_ok=True)
 

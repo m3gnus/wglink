@@ -324,8 +324,8 @@ def test_a_known_failure_on_every_attempt_is_still_a_visible_refusal(
     _run(fixture.module, "send")
 
     title, text = fixture.ui.messages[-1]
-    assert title == "Waveguide Generator refused"
-    assert "was not asked to take it" in text
+    assert title == "Waveguide Generator"
+    assert "has not received it" in text
     assert _outcome(fixture) == "writeFailed"
     assert fixture.timers == []
 
@@ -401,7 +401,7 @@ def test_a_write_that_fails_every_time_is_refused_and_leaves_nothing(
     _run(fixture.module, "solve")
 
     assert _names(fixture.ipc / ".wg-solve-requests") == []
-    assert fixture.ui.messages[-1][0] == "Waveguide Generator refused"
+    assert fixture.ui.messages[-1][0] == "Waveguide Generator"
     assert _outcome(fixture) == "writeFailed"
 
 
@@ -794,7 +794,7 @@ def test_control_a_capability_refusal_with_nothing_attempted_is_still_refused(
     _run(fixture.module, "send")
 
     title, text = fixture.ui.messages[-1]
-    assert title == "Waveguide Generator refused" and "not collecting requests from Fusion" in text
+    assert title == "Waveguide Generator" and "not ready to receive this model" in text
     assert fixture.module._request_trace is None  # Refused before planning a request.
     assert fixture.timers == []
 
@@ -979,7 +979,8 @@ def test_a_conversion_that_raises_is_shown_and_start_up_carries_on(
         titles = [title for title, _text in fixture.ui.messages]
         assert _EARLIER in titles
         text = dict(fixture.ui.messages)[_EARLIER]
-        assert "the outbox index is unreadable" in text and "Nothing was dropped" in text
+        assert "the outbox index is unreadable" in "\n".join(fixture.ui.text_palette.written)
+        assert "Your models are kept" in text
         # A failed migration never stops the panel from loading.
         assert module._owned is True
         assert "Waveguide Generator start error" not in titles
@@ -1019,7 +1020,7 @@ def test_items_start_up_could_not_convert_are_reported_and_converted_next_start_
     first.module.stop(None)
 
     text = dict(first.ui.messages)[_EARLIER]
-    assert text.startswith("2 request(s)") and "same request ids" in text
+    assert text.startswith("2 request(s)") and "Your models are kept" in text
     assert outcomes >= {("snap-1", "conversionFailed"), ("solve-1", "conversionFailed")}
     assert _inbox(first.ipc) == []
     assert len(_outbox(first.ipc)) == 2
@@ -1038,7 +1039,7 @@ def test_items_start_up_could_not_convert_are_reported_and_converted_next_start_
 
 
 _WAITING = "Waveguide Generator request waiting"
-_CAUSES = ("closed", "older than this Waveguide Generator add-in", "not collecting requests")
+_CAUSES = ("still waiting", "Open Waveguide Generator", "Settings → CAD Link")
 
 
 def _leave_request(ipc: Path, command_id: str, *, kind: str = SNAPSHOT, age: float = 3600.0) -> Path:
@@ -1068,7 +1069,7 @@ def test_a_request_left_waiting_across_a_restart_is_reported_once_at_start_up(
         waiting = [text for title, text in fixture.ui.messages if title == _WAITING]
         assert len(waiting) == 1
         text = waiting[0]
-        assert text.startswith("2 request(s)")
+        assert text.startswith("2 model(s)")
         for cause in _CAUSES:
             assert cause in text
         assert "solve" not in text.lower() and "send" not in text.lower()
@@ -1165,7 +1166,7 @@ def test_a_request_younger_than_the_window_gets_the_rest_of_its_minute(
         _fire_timers(fixture)
         _deliver_followups(module, fixture.app)
         waiting = [text for title, text in fixture.ui.messages if title == _WAITING]
-        assert len(waiting) == 1 and waiting[0].startswith("2 request(s)")
+        assert len(waiting) == 1 and waiting[0].startswith("2 model(s)")
         assert _startup_checks(module) == {"startup": 1}
         _fire_timers(fixture)
         _deliver_followups(module, fixture.app)

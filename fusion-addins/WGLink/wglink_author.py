@@ -30,17 +30,21 @@ import re
 from typing import Any, Callable, Mapping, Sequence
 
 if __package__:
-    from . import wglink_protocol
+    from . import wglink_protocol, wglink_text
 else:
     import wglink_protocol
+    import wglink_text
 
 
-class AuthorError(Exception):
+class AuthorError(wglink_text.UserFacing):
     """A refusal the user can act on. WGLink.py shows it like a WgLinkError.
 
-    Deliberately not ``wglink_core.WgLinkError``: that module imports ``adsk``,
-    and this one has to stay importable -- and testable -- without Fusion.
+    UserFacing shares the headless bundle error type, so this module stays
+    importable and testable without importing Fusion.
     """
+
+    def __init__(self, text: str):
+        super().__init__("authoring", text)
 
 
 # ---------------------------------------------------------------- source roles
@@ -93,7 +97,7 @@ def resolve_source_choice(choice: object) -> str | None:
     if canonical not in SOURCE_ROLES:
         raise AuthorError(
             f"{value!r} is not a WG source role. Choose one of "
-            f"{', '.join(SOURCE_ROLES)}, or {CLEAR_SOURCE_LABEL!r}."
+            f"{', '.join(wglink_text.role_label(role) for role in SOURCE_ROLES)}, or {CLEAR_SOURCE_LABEL!r}."
         )
     return canonical
 
@@ -225,14 +229,14 @@ def plan_source_assignment(
         area = _total_area_mm2(entries, carrying, positions)
         measured = f" ({area:.1f} mm² in total)" if area is not None else ""
         summary = (
-            f"{_faces_phrase(len(carrying))} now drive the {role} source"
+            f"{_faces_phrase(len(carrying))} now drive the {wglink_text.role_label(role)} source"
             f"{measured}."
         )
         if paint and unchanged:
             summary += f" {_faces_phrase(len(paint))} {_was(len(paint))} repainted."
         elif not paint:
             summary = (
-                f"Every selected face already carried {role}"
+                f"Every selected face already carried {wglink_text.role_label(role)}"
                 f"{measured}; nothing changed."
             )
     return SourcePlan(
@@ -247,7 +251,7 @@ def plan_source_assignment(
 
 def group_appearance_name(group_id: str) -> str:
     if not isinstance(group_id, str) or not group_id.strip() or group_id != group_id.strip():
-        raise AuthorError("A surface group needs a nonempty, trimmed id.")
+        raise AuthorError("A size zone needs a name.")
     return f"WGMESH_{group_id}"
 
 
@@ -257,7 +261,7 @@ def plan_surface_group_assignment(
     """Groups cannot replace a source or another group's membership."""
     name = group_appearance_name(group_id) if group_id is not None else None
     if not faces:
-        raise AuthorError("Select at least one face or body for the surface group.")
+        raise AuthorError("Select at least one face or body for the size zone.")
     positions = _indices(faces, "face")
     paint, clear, unchanged = [], [], []
     for index, entry in zip(positions, faces):
@@ -267,13 +271,13 @@ def plan_surface_group_assignment(
         elif current == name:
             unchanged.append(index)
         elif _canonical_role(current) or entry.get("is_source"):
-            raise AuthorError("A face cannot be in both a source and a surface group.")
+            raise AuthorError("A face cannot be in both a source and a size zone.")
         elif current.startswith("WGMESH_"):
-            raise AuthorError("A face cannot be in two surface groups. Clear its group first.")
+            raise AuthorError("A face cannot be in two size zones. Clear its zone first.")
         else:
             paint.append(index)
     return SourcePlan(None, name, tuple(paint), tuple(clear), tuple(unchanged),
-                      f"{'Saved' if name else 'Cleared'} the surface group on {_faces_phrase(len(faces))}.")
+                      f"{'Saved' if name else 'Cleared'} the size zone on {_faces_phrase(len(faces))}.")
 
 
 def apply_face_appearance_plan(
@@ -306,18 +310,18 @@ BODY_DECLARATIONS = ("exterior-shell", "exclude")
 CLEAR_DECLARATION_LABEL = "Clear declaration"
 DECLARATION_CHOICES = (
     ("Exterior shell — solve this body's outer surface", "exterior-shell"),
-    ("Exclude — leave this body out of the return", "exclude"),
+    ("Exclude — leave this body out of the model sent to WG", "exclude"),
     (CLEAR_DECLARATION_LABEL, None),
 )
 
 _DECLARATION_HELP = {
     "exterior-shell": (
         "Declares the selected surface body as the exterior WG solves. A visible "
-        "surface body with no declaration refuses the export, because WG cannot "
+        "surface body with no declaration cannot be sent, because WG cannot "
         "tell a horn shell from modelling scaffolding."
     ),
     "exclude": (
-        "Leaves the selected bodies out of the WG return entirely: sketch "
+        "Leaves the selected bodies out of the model sent to WG entirely: sketch "
         "scaffolding, fixtures, and anything that is not part of the acoustic "
         "exterior."
     ),
@@ -558,16 +562,15 @@ def preflight_summary(
     ]
     if instance_ids:
         lines.append(
-            f"WG links in scope: {len(instance_ids)} ({', '.join(instance_ids)})"
+            f"WG links in scope: {len(instance_ids)}"
         )
     else:
         lines.append(
-            "WG links in scope: none — this exports as an unlinked "
-            "(Fusion-first) return."
+            "WG links in scope: none — this model was created in Fusion."
         )
     if sources:
         for source in sources:
-            role = str(source.get("role") or "?")
+            role = wglink_text.role_label(source.get("role") or "?")
             faces = source.get("face_count")
             faces = int(faces) if isinstance(faces, int) else 0
             area = source.get("area_mm2")
@@ -577,7 +580,7 @@ def preflight_summary(
                 else "area unread"
             )
             instance_id = str(source.get("instance_id") or "").strip()
-            suffix = f", from link {instance_id}" if instance_id else ""
+            suffix = ", from WG" if instance_id else ""
             lines.append(
                 f"Source: {role} — {measured} over {_faces_phrase(faces)}{suffix}"
             )
@@ -604,34 +607,12 @@ def preflight_summary(
 # ------------------------------------------------------- user-facing failures
 
 
-def _detail(exc: BaseException | None) -> str:
-    if exc is None:
-        return "no details were reported"
-    text = " ".join(str(exc).split())
-    if not text:
-        text = exc.__class__.__name__
-    return text if len(text) <= 200 else text[:197] + "…"
-
-
 def failure_message(action: str, exc: BaseException | None) -> str:
-    """One human line for a message box; the traceback goes to the log.
-
-    A raw ``traceback.format_exc()`` in a modal states the add-in's internals
-    and nothing the user can act on, and it hides the one sentence that would
-    have identified the failure.
-    """
-
-    return f"{action} hit an unexpected error: {_detail(exc)}\n\n{LOG_HINT}"
+    return wglink_text.user_message(exc, action=wglink_text.action_verb(action))
 
 
 def preflight_unavailable(exc: BaseException | None, *, refusal: bool = False) -> str:
-    """Text for the pre-flight box when the model could not be surveyed.
-
-    ``refusal``: ``exc`` is one the add-in words for the user (WG not running
-    or too old, no design), which says what to do. Any other failure is the
-    add-in's own: the caller logs it, and the user reads one calm line.
-    """
-
-    if refusal and exc is not None:
-        return _detail(exc)
+    if isinstance(exc, wglink_text.UserFacing):
+        return wglink_text.user_message(exc, action="check")
+    wglink_text.user_message(exc, action="check")  # record the diagnostic detail
     return wglink_protocol.PREFLIGHT_UNAVAILABLE_MESSAGE

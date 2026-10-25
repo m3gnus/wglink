@@ -675,7 +675,7 @@ def test_two_visible_undeclared_surfaces_still_refuse(send_module, monkeypatch):
 
     report = send_module.preflight_scope(app)
 
-    assert "not classified" in report["scope_error"]
+    assert "no purpose set" in report["scope_error"]
     assert "hide the body itself in the browser" in report["scope_error"]
     assert (
         "select it and use Manage Link… → Declare Body… → Exterior shell"
@@ -859,11 +859,8 @@ def test_unclassified_surface_name_does_not_add_exclusion_advice(
 
     assert report["scope_reason_codes"] == ["unclassified_visible_surface"]
     assert report["has_unclassified_visible_surface_refusal"] is True
-    assert "visible surface body 'Speaker/shell'" in report["scope_error"]
-    assert (
-        "visible surface body 'Speaker/unclassified helper'"
-        in report["scope_error"]
-    )
+    assert "A visible surface body has no purpose set" in report["scope_error"]
+    assert "hide the body itself" in report["scope_error"]
     assert "exclude" not in summary.text().casefold()
     assert "Manage Link… → Declare Body… → Exterior shell" in summary.text()
     assert "Declare Body… is under Manage Link…." not in summary.text()
@@ -2918,7 +2915,7 @@ def test_the_preflight_previews_a_domain_refusal_instead_of_raising(
     report = send_module.preflight_scope(app, {"domain": ["y0"]})
 
     assert report["domain"] is None
-    assert "negative side" in report["domain_error"]
+    assert "chosen half or quarter" in report["domain_error"]
 
 
 def test_old_wg_preflight_still_calls_the_domain_automatic_without_new_evidence(

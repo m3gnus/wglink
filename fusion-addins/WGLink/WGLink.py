@@ -43,6 +43,7 @@ def _load_registration_package() -> dict[str, types.ModuleType]:
     sys.modules[_registration_package_name] = package
     loaded: dict[str, types.ModuleType] = {}
     for name in (
+        "wglink_text",
         "wglink_activity",
         "wglink_locator",
         "wglink_workspace",
@@ -66,6 +67,7 @@ def _load_registration_package() -> dict[str, types.ModuleType]:
 
 
 _registration_modules = _load_registration_package()
+wglink_text = _registration_modules["wglink_text"]
 wglink_activity = _registration_modules["wglink_activity"]
 wglink_workspace = _registration_modules["wglink_workspace"]
 wglink_mesh_dialog = _registration_modules["wglink_mesh_dialog"]
@@ -100,57 +102,10 @@ format_measurement_mm = _registration_modules["wglink_bundle"].format_measuremen
 
 PANEL_ID = "hornlab_wglink_panel"
 PANEL_NAME = "Waveguide Generator"
-BROWSE_FOLDER = "Browse for a bundle folder…"
+BROWSE_FOLDER = "Browse for a WG model folder…"
 BROWSE_ZIP = "Browse for a zipped .wglink file…"
 SETTINGS_PATH = Path.home() / ".hornlab" / "WGLink" / "settings.json"
-COMMANDS = {
-    "source": (
-        "hornlab_wglink_set_source",
-        "Sources & Mesh…",
-        "Set sources, mesh sizes and surface groups in this document.",
-    ),
-    "declare": (
-        "hornlab_wglink_declare_body",
-        "Declare Body…",
-        "Classify a body as the exterior WG solves, or leave it out of the return.",
-    ),
-    "fem": (
-        "hornlab_wglink_declare_fem_region",
-        "Declare FEM Region…",
-        "Mark a solid body of air as a FEM region and name its driver, interface "
-        "and termination faces for a coupled FEM/BEM solve.",
-    ),
-    "solve": (
-        "hornlab_wglink_solve",
-        "Solve in WG",
-        "Send this model to Waveguide Generator and solve it now.",
-    ),
-    "insert": (
-        "hornlab_wglink_insert",
-        "Insert",
-        "Insert the full WG viewport model from a .wglink bundle.",
-    ),
-    "update": (
-        "hornlab_wglink_update",
-        "Update",
-        "Rebuild a managed link in place from its current bundle.",
-    ),
-    "send": (
-        "hornlab_wglink_send",
-        "Send to WG",
-        "Open this model in Waveguide Generator to inspect or set up. Does not solve.",
-    ),
-    "detach": (
-        "hornlab_wglink_detach",
-        "Detach",
-        "Remove Waveguide Generator link data without changing bodies or features.",
-    ),
-    "requests": (
-        "hornlab_wglink_requests",
-        "Requests…",
-        "Show the progress of your latest Send or Solve.",
-    ),
-}
+COMMANDS = wglink_text.COMMANDS
 # The commands a user starts. Everything else is maintenance or recovery and
 # lives under one dropdown; the automatic handoff already covers the ordinary
 # Insert and Update.
@@ -312,7 +267,7 @@ def _note_outcome(channel: str, request_id: str, outcome: str) -> None:
     del _recent_outcomes[:-_RECENT_OUTCOMES_LIMIT]
 
 
-def _modal(text: str, title: str) -> None:
+def _modal(text: str | BaseException, title: str) -> None:
     """A message box shown from the watch tick, which no tick may run inside."""
 
     global _command_busy
@@ -362,8 +317,9 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _refusal_text(reason: str, hint: str) -> str:
-    return f"{reason}\n\n{hint}"
+def _refusal_text(reason: str | BaseException, hint: str, *, action: str = "use",
+                  request_id: str | None = None) -> str:
+    return f"{wglink_text.user_message(reason, action=action, request_id=request_id)}\n\n{hint}"
 
 
 def _begin_request(channel: str, correlation_id: str, delivery: str) -> dict[str, str]:
@@ -491,7 +447,11 @@ def _ui() -> object | None:
     return app.userInterface if app else None
 
 
-def _message(text: str, title: str = PANEL_NAME) -> None:
+def _message(text: str | BaseException, title: str = PANEL_NAME, *, action: str = "use",
+             request_id: str | None = None, names: tuple[str, ...] = ()) -> None:
+    text = wglink_text.user_message(text, action=action, request_id=request_id, names=names)
+    if wglink_protocol.user_text_violations(title):
+        title = PANEL_NAME
     ui = _ui()
     if ui:
         ui.messageBox(text, title)
@@ -572,12 +532,12 @@ def _confirm_source_adoption(role: str, faces: int) -> bool:
     if not callable(message_box):
         return False
     answer = message_box(
-        f"{faces} face(s) painted {role} carry no WG source identity.\n\n"
-        f"Adopt them as this document's {role} source?\n\n"
-        f"This unsaved document has no stable lineage yet. {role} will get a "
+        f"{faces} face(s) marked {wglink_text.role_label(role)} have no saved driver setup.\n\n"
+        f"Adopt them as this document's {wglink_text.role_label(role)} source?\n\n"
+        f"This document has not been saved yet. {wglink_text.role_label(role)} will get a "
         "new source identity; Waveguide Generator may ask for its setup. "
         "Save the document to keep source identities.",
-        f"{PANEL_NAME} — adopt {role} source",
+        f"{PANEL_NAME} — adopt {wglink_text.role_label(role)} source",
         yes_no,
         question,
     )
@@ -610,7 +570,8 @@ def _log(text: str) -> None:
         pass
 
 
-def _report_error(action: str, title: str, exc: BaseException | None = None) -> None:
+def _report_error(action: str, title: str, exc: BaseException | None = None, *,
+                  request_id: str | None = None) -> None:
     """Log the traceback, show one human line.
 
     A raw ``traceback.format_exc()`` in a modal states the add-in's internals
@@ -618,8 +579,14 @@ def _report_error(action: str, title: str, exc: BaseException | None = None) -> 
     failure is buried in the middle of it.
     """
 
-    _log(f"[{PANEL_NAME}] {action}\n{traceback.format_exc()}")
-    _message(wglink_author.failure_message(action, exc), title)
+    _message(exc, title, action=wglink_text.action_verb(action), request_id=request_id)
+
+
+wglink_text.log = _log
+wglink_text.context = lambda: (
+    _active_document_name() or "this model",
+    (_requests.current() or {}).get("requestId") or (_request_trace or {}).get("correlationId"),
+)
 
 
 def _load_settings() -> dict[str, object]:
@@ -703,7 +670,7 @@ def _choose_bundle(title: str, source_kind: str) -> str | None:
         dialog = ui.createFileDialog()
         dialog.title = title
         dialog.isMultiSelectEnabled = False
-        dialog.filter = "Waveguide Generator bundles (*.wglink);;All files (*.*)"
+        dialog.filter = "Waveguide Generator models (*.wglink);;All files (*.*)"
         if initial.exists():
             dialog.initialDirectory = str(initial)
         if dialog.showOpen() != adsk.core.DialogResults.DialogOK:
@@ -722,6 +689,9 @@ def _choose_bundle(title: str, source_kind: str) -> str | None:
     return str(selected)
 
 
+_document_choice_ids: dict[str, str] = {}
+
+
 def _document_link_choices() -> list[tuple[str, str]]:
     """``(label, instance_id)`` for every managed link in the active document."""
 
@@ -731,14 +701,9 @@ def _document_link_choices() -> list[tuple[str, str]]:
     except LinksNotInspected:
         # A chooser only shows links; the command it opens refuses on its own.
         links = []
-    for link in links:
-        instance_id = str(link.get("instance_id") or "")
-        if not instance_id:
-            continue
-        # The user's own label wins over WG's name for the design: this list is
-        # how they recognise their own link, and the design name is WG's.
-        name = str(link.get("link_name") or link.get("design_name") or "").strip()
-        choices.append((f"{name} · {instance_id}" if name else instance_id, instance_id))
+    choices = wglink_text.link_choices(links)
+    _document_choice_ids.clear()
+    _document_choice_ids.update(choices)
     return choices
 
 
@@ -748,7 +713,7 @@ def _command_options(command_inputs: object) -> dict[str, object]:
     if chosen:
         # The label carries the link's display name for recognition; the id is
         # the part the head-less API takes.
-        result["instance_id"] = chosen.rsplit(" · ", 1)[-1].strip()
+        result["instance_id"] = _document_choice_ids.get(chosen, chosen.rsplit(" · ", 1)[-1].strip())
     link_name = str(_input_value(command_inputs, "link_name") or "").strip()
     if link_name:
         result["link_name"] = link_name
@@ -791,9 +756,7 @@ def _manifest_feature_enabled(name: str) -> bool:
 
 def _require_fem_regions() -> None:
     if not _manifest_feature_enabled(wglink_inbox.FEM_REGIONS):
-        raise wglink_core.WgLinkError(
-            wglink_fem.UNAVAILABLE_MESSAGE
-        )
+        raise wglink_text.problem("fem_unavailable", wglink_fem.UNAVAILABLE_MESSAGE)
 
 
 def _required_manifest_features() -> dict[str, bool]:
@@ -808,16 +771,12 @@ def _required_manifest_features() -> dict[str, bool]:
         if not _manifest_feature_enabled(capability)
     ]
     if missing:
-        raise wglink_core.WgLinkError(
-            "The Waveguide Generator add-in needs a newer Waveguide Generator before it can "
+        raise wglink_text.problem("wg_outdated", "The Waveguide Generator add-in needs a newer Waveguide Generator before it can "
             "Send or Solve: the running WG does not advertise "
             + " and ".join(missing)
-            + ". Update and restart WG, then try again."
-        )
+            + ". Update and restart WG, then try again.")
     if not _manifest_feature_enabled(wglink_inbox.MESH_SIZING):
-        raise wglink_core.WgLinkError(
-            wglink_send.wglink_protocol.MESH_SIZING_UNAVAILABLE_MESSAGE
-        )
+        raise wglink_text.problem("mesh_outdated", wglink_send.wglink_protocol.MESH_SIZING_UNAVAILABLE_MESSAGE)
     # FEM regions are optional: a design that declares none sends to a compatible WG,
     # and wglink_send refuses one that does when WG cannot solve them.
     features = {
@@ -861,7 +820,7 @@ def _send_backend_options() -> dict[str, object]:
     # so overwriting one loses evidence.
     output = wglink_workspace.return_folder()
     if output is None:
-        raise wglink_core.WgLinkError(_no_workspace_text())
+        raise wglink_text.problem("workspace", _no_workspace_text())
     return {
         "output_folder": str(output),
         "capture_document": wglink_workspace.capture_document(),
@@ -882,10 +841,17 @@ def _send_options(command_inputs: object, *, backend_ready: bool = True) -> dict
         if anchor_input.isVisible:
             anchor = str(anchor_input.selectedItem.name).strip()
             if anchor:
-                options["anchor_instance_id"] = anchor
+                options["anchor_instance_id"] = _anchor_id(anchor)
     except Exception:  # noqa: BLE001
         pass
     return options
+
+
+_anchor_choice_ids: dict[str, str] = {}
+
+
+def _anchor_id(label: str) -> str:
+    return _anchor_choice_ids.get(label, label)
 
 
 def _sync_anchor_choices(command_inputs: object) -> None:
@@ -901,13 +867,16 @@ def _sync_anchor_choices(command_inputs: object) -> None:
         instance_ids = []
     anchor.isVisible = len(instance_ids) > 1
     try:
-        previous = str(anchor.selectedItem.name) if anchor.selectedItem else None
+        previous = _anchor_id(str(anchor.selectedItem.name)) if anchor.selectedItem else None
     except Exception:  # noqa: BLE001
         previous = None
     try:
         anchor.listItems.clear()
-        for index, instance_id in enumerate(instance_ids):
-            anchor.listItems.add(str(instance_id), str(instance_id) == previous or (previous is None and index == 0))
+        _anchor_choice_ids.clear()
+        choices = wglink_text.link_choices([{"instance_id": value} for value in instance_ids])
+        _anchor_choice_ids.update(choices)
+        for index, (label, instance_id) in enumerate(choices):
+            anchor.listItems.add(label, instance_id == previous or (previous is None and index == 0))
     except Exception:  # noqa: BLE001
         pass
 
@@ -946,7 +915,7 @@ def _sync_preflight(command_inputs: object, state: SendDialogState | None = None
         anchor = _input(command_inputs, "anchor_instance_id")
         try:
             if anchor is not None and anchor.isVisible and anchor.selectedItem:
-                options["anchor_instance_id"] = str(anchor.selectedItem.name)
+                options["anchor_instance_id"] = _anchor_id(str(anchor.selectedItem.name))
         except Exception:  # noqa: BLE001 - an untouched dropdown has no choice yet
             pass
         report = wglink_send.preflight_scope(_app(), options)
@@ -1062,7 +1031,7 @@ def _sync_help(command_inputs: object, box_id: str, choice_id: str, text_of) -> 
     try:
         text = text_of(_selected_name(command_inputs, choice_id, ""))
     except wglink_author.AuthorError as exc:
-        text = str(exc)
+        text = wglink_text.user_message(exc)
     for attribute in ("formattedText", "text"):
         try:
             setattr(box, attribute, text)
@@ -1111,16 +1080,13 @@ def _tag_summary(tag: object) -> str:
     if not isinstance(tag, dict):
         return "Tag: not reported"
     return (
-        f"Tag: {tag.get('role', '?')} on {tag.get('tagged_faces', 0)} face(s), "
+        f"Tag: {wglink_text.role_label(tag.get('role', '?'))} on {tag.get('tagged_faces', 0)} face(s), "
         f"{float(tag.get('area_mm2', 0.0)):.3f} mm²"
     )
 
 
 def _warnings(report: dict[str, object]) -> str:
-    warnings = report.get("warnings")
-    if not isinstance(warnings, list) or not warnings:
-        return ""
-    return "\n\nWarnings:\n- " + "\n- ".join(str(item) for item in warnings)
+    return wglink_text.report_warnings(report)
 
 
 def _summary(operation: str, report: dict[str, object]) -> str:
@@ -1140,7 +1106,7 @@ def _summary(operation: str, report: dict[str, object]) -> str:
             naming = f"Link name: {link_name}\n" + naming
         naming += f"Parameters: {report.get('parameter_prefix', '?')}*\n"
         return (
-            f"Inserted Waveguide Generator instance {report.get('instance_id', '?')}.\n"
+            "Inserted the Waveguide Generator model.\n"
             f"{naming}"
             f"Wrapper: {report.get('wrapper', '?')}\n"
             f"{_tag_summary(report.get('tag'))}\n"
@@ -1160,7 +1126,7 @@ def _summary(operation: str, report: dict[str, object]) -> str:
             f"{_warnings(report)}"
         )
     return (
-        f"Detached Waveguide Generator instance {report.get('instance_id', '?')}.\n"
+        "Detached the Waveguide Generator model.\n"
         f"Attributes removed: {report.get('attributes_removed', 0)}\n"
         "Bodies and features changed: 0"
         f"{_warnings(report)}"
@@ -1238,11 +1204,10 @@ def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[s
     ipc = wglink_workspace.ipc_folder(create=True)
     workspace = wglink_workspace.workspace_root()
     if ipc is None or workspace is None:
-        raise wglink_core.WgLinkError(_no_workspace_text(action))
+        raise wglink_text.problem("workspace", _no_workspace_text(action))
     bundle = Path(str(report.get("bundle_path") or ""))
     not_asked = (
-        "The return bundle is in the WGLink folder, but Waveguide Generator was "
-        "not asked to take it. "
+        "This model was saved, but Waveguide Generator has not received it. "
     )
     request_id = request_id or str(uuid.uuid4())
     try:
@@ -1259,10 +1224,11 @@ def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[s
         )
     except (wglink_inbox.WgOutdatedError, wglink_inbox.WgNotCollectingError) as exc:
         _begin_request(channel, request_id, DELIVERY)["outcome"] = "refused"
-        raise wglink_core.WgLinkError(f"{not_asked}{exc}") from exc
+        code = "wg_outdated" if isinstance(exc, wglink_inbox.WgOutdatedError) else "wg_not_collecting"
+        raise wglink_text.problem(code, f"{not_asked}{exc}") from exc
     except OSError as exc:
         _begin_request(channel, request_id, DELIVERY)["outcome"] = "writeFailed"
-        raise wglink_core.WgLinkError(
+        raise wglink_text.problem("delivery_write",
             f"{not_asked}The Waveguide Generator add-in could not write the request for WG: {exc}. "
             f"Check the WGLink folder is writable, then {action}."
         ) from exc
@@ -1412,11 +1378,7 @@ def _startup_pickup_check(paths: list[Path]) -> None:
 
 #: What an item that start-up could not convert still has: it is kept, and the
 #: next start-up writes it again under its own id -- never a new one.
-OUTBOX_KEPT_TEXT = (
-    "Nothing was dropped. They stay in the WGLink folder, and the Waveguide Generator add-in tries again "
-    "the next time it starts, under the same request ids, so Waveguide Generator "
-    "never runs one twice. Restart Fusion once the folder is writable."
-)
+OUTBOX_KEPT_TEXT = wglink_text.OUTBOX_KEPT
 
 
 def _convert_outbox_at_startup() -> None:
@@ -1455,7 +1417,7 @@ def _convert_outbox_at_startup() -> None:
         _log(f"[{PANEL_NAME}] could not convert queued deliveries: {exc}")
         _message(
             "The Waveguide Generator add-in could not hand the requests an earlier session queued for "
-            f"Waveguide Generator over at start-up: {exc}\n\n"
+            "Waveguide Generator when Fusion started.\n\n"
             + OUTBOX_KEPT_TEXT,
             f"{PANEL_NAME} earlier requests waiting",
         )
@@ -1479,7 +1441,7 @@ def _convert_outbox_at_startup() -> None:
             f"{len(result['abandoned'])} earlier Send(s) to Waveguide Generator were "
             "never delivered, and this Waveguide Generator cannot take a Send from a "
             "file. Update Waveguide Generator, then send those models again from "
-            "Fusion. Their returns are still in the WGLink folder.",
+            "Fusion. Their models are kept in the WGLink folder.",
             f"{PANEL_NAME} earlier sends not delivered",
         )
 
@@ -1487,31 +1449,7 @@ def _convert_outbox_at_startup() -> None:
 def _delivery_notice_text(notice: dict[str, object]) -> str:
     """Describe the final answer, including a locally expired delivery."""
 
-    what = "Solve in WG" if notice.get("kind") == wglink_legacy_queue.KIND_SOLVE else "Send to WG"
-    sent = str(notice.get("createdAt") or "earlier")
-    operation = str(notice.get("operationId") or "?")
-    outcome = notice.get("outcome")
-    if outcome == "rejected":
-        reason = str(notice.get("reason") or "")
-        detail = str(notice.get("message") or "") or "WG gave no message"
-        return (
-            f"Waveguide Generator did not accept the return from {what} (sent {sent}, "
-            f"operation {operation}): {detail}"
-            f"{f' [{reason}]' if reason else ''}\n\n"
-            "The Waveguide Generator add-in does not send it again by itself. Send it again from Fusion if you "
-            "still want it; that is a new request."
-        )
-    if outcome == "conflict":
-        return (
-            f"Waveguide Generator refused the return from {what} (sent {sent}): its "
-            f"operation id {operation} already names a different request, so nothing "
-            "changed in WG. Send it again from Fusion."
-        )
-    return (
-        f"The return from {what} (sent {sent}, operation {operation}) could not be "
-        "delivered to Waveguide Generator within 7 days and was removed from the Waveguide Generator add-in's "
-        "queue. Send it again from Fusion if you still want it."
-    )
+    return wglink_text.legacy_delivery_message(notice)
 
 
 def _show_export_progress(operation: str, message: str = "Surveying the assembly…") -> object | None:
@@ -1564,14 +1502,15 @@ def _require_compatible_wg(*, wg_inbox: bool = False) -> None:
     try:
         if ipc is None:
             if wglink_workspace.missing_workspace() is not None:
-                raise wglink_core.WgLinkError(_no_workspace_text())
+                raise wglink_text.problem("workspace", _no_workspace_text())
             raise wglink_inbox.WgNotCollectingError(wglink_inbox.WG_NOT_COLLECTING_MESSAGE)
         if wg_inbox:
             wglink_inbox.require_wg_delivery(ipc)
         else:
             wglink_inbox.require_fusion_delivery(ipc)
     except (wglink_inbox.WgOutdatedError, wglink_inbox.WgNotCollectingError) as exc:
-        raise wglink_core.WgLinkError(str(exc)) from exc
+        code = "wg_outdated" if isinstance(exc, wglink_inbox.WgOutdatedError) else "wg_not_collecting"
+        raise wglink_text.problem(code, exc) from exc
 
 
 # -------------------------------------------------------- the request palette
@@ -1687,7 +1626,7 @@ def _submission_key(operation: str, inputs: object) -> str:
     return json.dumps([
         _active_document_id(), str(getattr(document, "name", "")), operation,
         str(getattr(selection, "entityToken", selection)),
-        _selected_name(inputs, "anchor_instance_id", ""),
+        _anchor_id(_selected_name(inputs, "anchor_instance_id", "")),
         revision, sorted(marks), settings,
     ], default=str)
 
@@ -2189,7 +2128,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                     _selected_name(inputs, "bundle_source", BROWSE_FOLDER)
                 )
                 path = chosen or _choose_bundle(
-                    "Select a .wglink bundle to insert", kind
+                    "Select a WG model to insert", kind
                 )
                 if path is None:
                     return
@@ -2210,7 +2149,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 _show_request_palette(open_it=True)
                 progress = _show_export_progress(self.operation)
                 _update_export_progress(
-                    progress, 1, "Exporting STEP and validating the return bundle…"
+                    progress, 1, wglink_text.EXPORT_CHECKING
                 )
                 if admission is not None and admission.cancelled:
                     return
@@ -2231,9 +2170,9 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 _update_export_progress(
                     progress,
                     2,
-                    "Return written. Asking Waveguide Generator to solve…"
+                    wglink_text.EXPORT_SOLVING
                     if solve
-                    else "Return written. Handing it to Waveguide Generator…",
+                    else wglink_text.EXPORT_SENDING,
                 )
                 if admission is not None and admission.cancelled:
                     return
@@ -2274,6 +2213,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                     f"{PANEL_NAME} request unconfirmed"
                     if isinstance(report, dict) and report.get("delivery_unconfirmed")
                     else PANEL_NAME,
+                    names=wglink_text.report_names(report),
                 )
         except (wglink_core.WgLinkError, wglink_author.AuthorError) as exc:
             # Only a dialog save is a transaction that keeps its dialog open on
@@ -2287,12 +2227,9 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             # It is owed a refresh and a status like any command that ran.
             if exported:
                 ran = True
-            if exc.__cause__ is not None:
-                # The refusal is plain text; its Fusion cause belongs in the log.
-                _log(f"[{PANEL_NAME}] {self.operation} refused\n{traceback.format_exc()}")
-            _message(str(exc), f"{PANEL_NAME} refused")
+            _message(exc, PANEL_NAME, action=wglink_text.action_verb(self.operation))
         except Exception as exc:  # noqa: BLE001 - UI boundary; core remains head-less
-            _report_error(COMMANDS[self.operation][1], f"{PANEL_NAME} error", exc)
+            _report_error(COMMANDS[self.operation][1], PANEL_NAME, exc)
         finally:
             _hide_export_progress(progress)
             if self.operation in {"send", "solve"}:
@@ -2338,7 +2275,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 # invalid entry when the managed install cannot rescue it.
                 wglink_launcher.launcher_argv(ipc, strict=True)
         except wglink_launcher.LauncherError as exc:
-            raise wglink_core.WgLinkError(str(exc)) from exc
+            raise wglink_text.problem("startup", exc) from exc
         if argv is None:
             return False
         try:
@@ -2347,9 +2284,9 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         except wglink_inbox.WgNotCollectingError:
             pass  # An installed launcher can start or adopt this same folder.
         except wglink_inbox.WgOutdatedError as exc:
-            raise wglink_core.WgLinkError(str(exc)) from exc
+            raise wglink_text.problem("wg_outdated", exc) from exc
         if _followup_event is None:
-            raise wglink_core.WgLinkError("The Waveguide Generator add-in's main-thread event is unavailable. Start WG manually, then try again.")
+            raise wglink_text.problem("startup", "main-thread event unavailable")
         app = _app()
         document_id = _active_document_id()
         document = app.activeDocument
@@ -2374,11 +2311,11 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             if admission.cancelled:
                 return
             if error is not None:
-                _modal(f"Could not start Waveguide Generator. Start WG manually, then try again.\n\n{error}", f"{PANEL_NAME} refused")
+                _modal(wglink_text.problem("startup", error), PANEL_NAME)
                 return
             if (_active_document_id() != document_id
                     or (document_id is None and app.activeDocument != document)):
-                _modal("The active Fusion document changed while WG was starting. Send or Solve again from the intended document.", f"{PANEL_NAME} refused")
+                _modal(wglink_text.problem("document_changed"), PANEL_NAME)
                 return
             # Read settings and negotiate capabilities after WG has created its
             # first workspace and advertisement, before any export.
@@ -2386,7 +2323,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 options.pop("fem_regions", None)
                 options.update(_send_backend_options())
             except wglink_core.WgLinkError as exc:
-                _modal(str(exc), f"{PANEL_NAME} refused")
+                _modal(exc, PANEL_NAME)
                 return
             if not admission.cancelled:
                 self._execute(None, send_options=options, admission=admission)
@@ -2424,7 +2361,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 # worker. The next command reports it and clears it on main.
                 _hide_export_progress(_backend_progress)
                 _backend_progress = None
-            raise wglink_core.WgLinkError(str(exc)) from exc
+            raise wglink_text.problem("startup", exc) from exc
         return True
 
 
@@ -2637,10 +2574,8 @@ def _restore_fem_region(inputs: object, state: FemDialogState, body: object) -> 
         state.loaded_body = _native(body)
         state.restoration_error = None
     except Exception as exc:  # noqa: BLE001 - refuse partial or unreadable restoration
-        state.restoration_error = (
-            "Could not load the saved FEM region and surface groups. "
-            "Reselect the air body to retry before saving. " + str(exc)
-        )
+        wglink_text.user_message(exc, action="check")
+        state.restoration_error = "The saved FEM region could not be read. Reselect the air body before saving."
         raise
     finally:
         state.restoring = False
@@ -2737,7 +2672,7 @@ def _fem_validation_error(inputs: object, state: FemDialogState) -> str | None:
     try:
         _plan_fem_region(inputs, state)
     except wglink_fem.FemDeclarationError as exc:
-        return str(exc)
+        return wglink_text.user_message(wglink_text.UserFacing("fem_validation", str(exc)))
     return None
 
 
@@ -2904,7 +2839,7 @@ def _mesh_dialog_services() -> object:
     """What Sources & Mesh… borrows from this module: reporting and WG's capabilities."""
 
     return wglink_mesh_dialog.MeshDialogServices(
-        report_error=lambda action, exc: _report_error(action, f"{PANEL_NAME} error", exc),
+        report_error=lambda action, exc: _report_error(action, PANEL_NAME, exc),
         log=lambda text: _log(text),
         active_document_id=lambda: _active_document_id(),
         source_identity_enabled=lambda: _source_identity_enabled(),
@@ -2993,7 +2928,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 # pass output_folder and overwrite.
                 anchor = inputs.addDropDownCommandInput(
                     "anchor_instance_id",
-                    "Solver anchor instance",
+                    "Reference link",
                     adsk.core.DropDownStyles.TextListDropDownStyle,
                 )
                 anchor.isVisible = False
@@ -3025,7 +2960,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 bodies = inputs.addSelectionInput(
                     "declare_bodies",
                     "Bodies",
-                    "Select the bodies to classify for the WG return.",
+                    "Select the bodies to classify for the model sent to WG.",
                 )
                 _add_selection_filters(
                     bodies, "SolidBodies", "SurfaceBodies", "MeshBodies"
@@ -3053,7 +2988,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             if self.operation == "insert":
                 source = inputs.addDropDownCommandInput(
                     "bundle_source",
-                    "Bundle source",
+                    "Model source",
                     adsk.core.DropDownStyles.TextListDropDownStyle,
                 )
                 # Bundles already sitting in WG's workspace come first, so the
@@ -3074,7 +3009,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                     "",
                     "Optional. Leave empty to use the WG design name. This "
                     "names the link in menus and in the timeline only; the "
-                    "wg_&lt;name&gt;_* parameters keep the bundle's namespace.",
+                    "wg_&lt;name&gt;_* parameters keep the WG design's name.",
                     3,
                     True,
                 )
@@ -3104,7 +3039,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             args.command.execute.add(handler)
             _handlers.append(handler)
         except Exception as exc:  # noqa: BLE001
-            _report_error("Building a dialog for the Waveguide Generator add-in", f"{PANEL_NAME} command error", exc)
+            _report_error("Building a dialog for the Waveguide Generator add-in", PANEL_NAME, exc)
 
 
 def _delete_quietly(entity: object) -> None:
@@ -3911,7 +3846,7 @@ def _require_live_state(expected_hash: str, changed_message: str) -> None:
             "the model still matches what WG displayed."
         )
     if current_state_hash != expected_hash:
-        raise wglink_core.WgLinkError(changed_message)
+        raise wglink_text.problem("model_changed", changed_message)
 
 
 def _installed_source() -> dict[str, object]:
@@ -4123,9 +4058,7 @@ def _execute_return_request(
             snapshot["document_id"] if snapshot is not None else _active_document_id()
         )
         if request.document_id != document_id:
-            raise wglink_core.WgLinkError(
-                "The active Fusion document changed after WG requested the model. Reopen CAD Link and try again."
-            )
+            raise wglink_text.problem("model_changed", "The active Fusion document changed after WG requested the model. Reopen CAD Link and try again.")
         links = _evidence_or_refuse(snapshot)
         matching = [
             link for link in links
@@ -4165,11 +4098,11 @@ def _execute_return_request(
     except wglink_core.WgLinkError as exc:
         outcome = "refused"
         _message(
-            _refusal_text(str(exc), _RETURN_RETRY_HINT),
-            f"{PANEL_NAME} return to WG refused",
+            _refusal_text(exc, _RETURN_RETRY_HINT, action="send", request_id=request.request_id),
+            PANEL_NAME,
         )
     except Exception as exc:  # noqa: BLE001 - main-thread add-in boundary
-        _report_error("Returning this model to WG", f"{PANEL_NAME} return to WG error", exc)
+        _report_error("Returning this model to WG", PANEL_NAME, exc, request_id=request.request_id)
     finally:
         trace["outcome"] = outcome
         _release_command_busy()
@@ -4243,10 +4176,8 @@ def _require_insert_target(
             raise _ExpiredInsertError(reason)
         raise wglink_core.WgLinkError(reason)
     if handoff.expected_document_id and handoff.expected_document_id != active_document_id:
-        raise wglink_core.WgLinkError(
-            "The active Fusion document changed after WG prepared this insert. "
-            "Refresh CAD Link and try again."
-        )
+        raise wglink_text.problem("model_changed", "The active Fusion document changed after WG prepared this insert. "
+            "Refresh CAD Link and try again.")
     destination = getattr(handoff, "destination", None)
     if destination is not None:
         expected = (
@@ -4255,12 +4186,10 @@ def _require_insert_target(
             else new_document_id
         )
         if not expected or expected != active_document_id:
-            raise wglink_core.WgLinkError(
-                "The active Fusion document changed from this insert's destination. "
-                "Refresh CAD Link and try again."
-            )
+            raise wglink_text.problem("model_changed", "The active Fusion document changed from this insert's destination. "
+                "Refresh CAD Link and try again.")
     if _linked_to(handoff, _document_links()):
-        raise wglink_core.WgLinkError(_ALREADY_LINKED_TEXT)
+        raise wglink_text.problem("already_linked", _ALREADY_LINKED_TEXT)
 
 
 def _interrupted(operation_id: str, applying: dict[str, str] | None) -> bool:
@@ -4276,8 +4205,12 @@ _RECOVERY_REQUIRED_TEXT = (
 )
 
 
-class _ExpiredInsertError(wglink_core.WgLinkError):
+class _ExpiredInsertError(wglink_text.UserFacing):
     """An insert crossed its TTL after it was claimed but before mutation."""
+
+    def __init__(self, detail):
+        text, step = wglink_text.PROBLEMS["expired"]
+        super().__init__("expired", text, step, detail=detail)
 
 
 def _design_ready() -> bool:
@@ -4381,7 +4314,7 @@ def _apply_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
         _handoff_attempted_id = attempt_key
         outcome, reason = issue
         _begin_request("handoff", correlation_id, DELIVERY)["outcome"] = outcome
-        _message(reason, f"{PANEL_NAME} automatic insert refused")
+        _message(reason, PANEL_NAME)
         return HANDLED
     try:
         _require_compatible_wg()
@@ -4397,8 +4330,8 @@ def _apply_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
         _handoff_attempted_id = attempt_key
         _begin_request("handoff", correlation_id, DELIVERY)["outcome"] = "refused"
         _message(
-            _refusal_text(str(exc), _HANDOFF_RETRY_HINT),
-            f"{PANEL_NAME} automatic open refused",
+            _refusal_text(exc, _HANDOFF_RETRY_HINT, request_id=handoff.request_id),
+            PANEL_NAME,
         )
         return HANDLED
     if not ready:
@@ -4447,10 +4380,8 @@ def _execute_handoff(
         # already applied; with no reading of them there is no deciding.
         links = _evidence_or_refuse(snapshot)
         if handoff.expected_document_id and handoff.expected_document_id != document_id:
-            raise wglink_core.WgLinkError(
-                "The active Fusion document changed after WG prepared this "
-                f"{operation}. Refresh CAD Link and try again."
-            )
+            raise wglink_text.problem("model_changed", "The active Fusion document changed after WG prepared this "
+                f"{operation}. Refresh CAD Link and try again.")
         if operation == "update":
             # The exact target first: the document (above), the instance, and
             # the model state WG measured.
@@ -4478,7 +4409,7 @@ def _execute_handoff(
                 outcome = "reconciled"
             elif _interrupted(handoff.operation_id, applying):
                 outcome = "recoveryRequired"
-                raise wglink_core.WgLinkError(_RECOVERY_REQUIRED_TEXT)
+                raise wglink_text.problem("recovery", _RECOVERY_REQUIRED_TEXT)
             elif link.get("export_id") == handoff.export_id:
                 # The export got there another way -- a manual Update, or
                 # another operation. There is nothing left to do.
@@ -4512,9 +4443,9 @@ def _execute_handoff(
             outcome = "reconciled"
         elif _interrupted(handoff.operation_id, applying):
             outcome = "recoveryRequired"
-            raise wglink_core.WgLinkError(_RECOVERY_REQUIRED_TEXT)
+            raise wglink_text.problem("recovery", _RECOVERY_REQUIRED_TEXT)
         elif _linked_to(handoff, links):
-            raise wglink_core.WgLinkError(_ALREADY_LINKED_TEXT)
+            raise wglink_text.problem("already_linked", _ALREADY_LINKED_TEXT)
         else:
             wglink_core.insert(
                 _app(),
@@ -4540,8 +4471,8 @@ def _execute_handoff(
     except _ExpiredInsertError as exc:
         outcome = "expired"
         _message(
-            _refusal_text(str(exc), _HANDOFF_RETRY_HINT),
-            f"{PANEL_NAME} automatic insert refused",
+            _refusal_text(exc, _HANDOFF_RETRY_HINT, request_id=handoff.request_id),
+            PANEL_NAME,
         )
     except wglink_core.WgLinkError as exc:
         if outcome != "recoveryRequired":
@@ -4551,14 +4482,14 @@ def _execute_handoff(
                 else "refused"
             )
         _message(
-            _refusal_text(str(exc), _HANDOFF_RETRY_HINT),
-            f"{PANEL_NAME} automatic {operation} refused",
+            _refusal_text(exc, _HANDOFF_RETRY_HINT, request_id=handoff.request_id),
+            PANEL_NAME,
         )
     except Exception as exc:  # noqa: BLE001 - main-thread add-in boundary
         if _interrupted(handoff.operation_id, _applying_operation()):
             outcome = "recoveryRequired"
         _report_error(
-            f"The automatic {operation}", f"{PANEL_NAME} automatic {operation} error", exc
+            f"The automatic {operation}", PANEL_NAME, exc, request_id=handoff.request_id
         )
     finally:
         trace["outcome"] = outcome
@@ -4857,7 +4788,7 @@ class WatchEventHandler(adsk.core.CustomEventHandler):
             with wglink_activity.because(wglink_activity.CAUSE_TICK):
                 _on_watch_tick()
         except Exception as exc:  # noqa: BLE001
-            _report_error("Servicing WG file requests", f"{PANEL_NAME} file request error", exc)
+            _report_error("Servicing WG file requests", PANEL_NAME, exc)
 
 
 class CandidateEventHandler(adsk.core.CustomEventHandler):
@@ -4871,7 +4802,7 @@ class CandidateEventHandler(adsk.core.CustomEventHandler):
             with wglink_activity.because(wglink_activity.CAUSE_PROMOTION):
                 _attempt_promotion()
         except Exception as exc:  # noqa: BLE001
-            _report_error("Promoting the Waveguide Generator add-in's standby registration", f"{PANEL_NAME} recovery error", exc)
+            _report_error("Promoting the Waveguide Generator add-in's standby registration", PANEL_NAME, exc)
 
 
 class FollowupEventHandler(adsk.core.CustomEventHandler):
@@ -4888,7 +4819,7 @@ class FollowupEventHandler(adsk.core.CustomEventHandler):
                 return
             _run_followups()
         except Exception as exc:  # noqa: BLE001
-            _report_error("Finishing a command in the Waveguide Generator add-in", f"{PANEL_NAME} error", exc)
+            _report_error("Finishing a command in the Waveguide Generator add-in", PANEL_NAME, exc)
 
 
 def _schedule_followup(job: object) -> None:
@@ -5485,7 +5416,7 @@ def _run() -> None:
             _release_ipc_lease()
             raise
     except Exception as exc:  # noqa: BLE001
-        _report_error("Starting the Waveguide Generator add-in", f"{PANEL_NAME} add-in start error", exc)
+        _report_error("Starting the Waveguide Generator add-in", PANEL_NAME, exc)
 
 
 def stop(_context: object) -> None:
@@ -5511,4 +5442,4 @@ def _stop() -> None:
             if lease_owner:
                 _release_ipc_lease()
     except Exception as exc:  # noqa: BLE001
-        _report_error("Stopping the Waveguide Generator add-in", f"{PANEL_NAME} add-in stop error", exc)
+        _report_error("Stopping the Waveguide Generator add-in", PANEL_NAME, exc)

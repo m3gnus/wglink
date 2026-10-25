@@ -73,34 +73,22 @@ _PLAIN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 # on its next pass while it runs, so a minute is far past normal. The request
 # is never dropped or rerouted.
 SOLVE_PICKUP_NOTICE_SECONDS = 60.0
-WG_NOT_COLLECTING_MESSAGE = (
-    "Waveguide Generator is not collecting requests from Fusion: it has not said "
-    "that it reads them. Either WG is not running with this WGLink folder, or "
-    "its CAD Link request handling is switched off. Start Waveguide Generator, "
-    "check its WGLink folder, then try again."
-)
-WG_OUTDATED_MESSAGE = (
-    "This Waveguide Generator does not advertise the delivery capabilities this "
-    "Waveguide Generator add-in needs (WG request inbox 4 and Fusion request delivery 3). "
-    "Update Waveguide Generator; it installs the matching Fusion add-in."
-)
-WG_FUSION_OUTDATED_MESSAGE = (
-    "This Waveguide Generator does not advertise the delivery capabilities this "
-    "Waveguide Generator add-in needs (Fusion request delivery 3 under capability schema 1). "
-    "Update Waveguide Generator; it installs the matching Fusion add-in."
-)
+if __package__:
+    from . import wglink_text
+else:
+    import wglink_text
+
+WG_NOT_COLLECTING_MESSAGE = " ".join(wglink_text.PROBLEMS["wg_not_collecting"])
+WG_OUTDATED_MESSAGE = " ".join(wglink_text.PROBLEMS["wg_outdated"])
+WG_FUSION_OUTDATED_MESSAGE = WG_OUTDATED_MESSAGE
 
 
 # The same three causes, for requests a restart found still waiting (A8 brief 5):
 # the pickup timer that would have said so did not survive the restart.
 def requests_not_taken_at_startup_message(count: int) -> str:
     return (
-        f"{count} request(s) from Fusion to Waveguide Generator that were waiting "
-        "when the Waveguide Generator add-in started have not been picked up. Either WG is closed, or it "
-        "is older than this Waveguide Generator add-in, or it is not collecting requests from "
-        "Fusion. Open Waveguide Generator (update it if an older version is "
-        "running). The requests wait in the WGLink folder and are handled once WG "
-        "takes them."
+        f"{count} model(s) from an earlier Fusion session are still waiting for Waveguide Generator. "
+        "Open Waveguide Generator and check Settings → CAD Link, then try again."
     )
 
 

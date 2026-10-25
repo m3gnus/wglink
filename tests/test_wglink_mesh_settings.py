@@ -273,7 +273,7 @@ def test_group_paint_reuses_library_writer_and_clear_restores_body(monkeypatch, 
     selected_body = types.SimpleNamespace(faces=Collection([back]))
     send_module.paint_surface_group(app, design, [selected_body, back], 'back')
     assert back.appearance is appearance and lookups == ['WGMESH_back']
-    with pytest.raises(send_module.wglink_core.WgLinkError, match='two surface groups'):
+    with pytest.raises(send_module.wglink_core.WgLinkError, match='two size zones'):
         send_module.paint_surface_group(app, design, [back], 'other')
     # Validation precedes every write, including mixed body/face selections.
     with pytest.raises(send_module.wglink_core.WgLinkError, match='both a source'):
@@ -456,7 +456,7 @@ def test_a_group_with_no_faces_anywhere_blocks_on_every_path(monkeypatch, tmp_pa
     app, design, exterior, _, back = document(monkeypatch, send_module)
     send_module.save_mesh_settings(design, fixture_mesh())
     report = send_module.preflight_scope(app)
-    assert 'select its faces again' in report['mesh_error']
+    assert 'Review the size zones' in report['mesh_error']
     assert report['groups_out_of_scope'] == []
     codes = [f['code'] for f in send_module.wglink_protocol.preflight_findings(report)]
     assert codes == ['mesh_settings_invalid']

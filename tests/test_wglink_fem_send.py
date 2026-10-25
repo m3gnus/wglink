@@ -367,7 +367,7 @@ def test_group_area_changes_refuse_before_export(send_module, tmp_path, monkeypa
     assert exports == []
     assert list(tmp_path.iterdir()) == []
     report = send_module.preflight_scope(app, {})
-    assert "re-declare this region" in report["fem_region_error"]
+    assert "Declare FEM Region…" in report["fem_region_error"]
 
 
 def test_redeclaration_resets_the_area_baseline(send_module, tmp_path, monkeypatch):

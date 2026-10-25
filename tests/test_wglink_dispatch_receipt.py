@@ -74,8 +74,8 @@ def test_false_return_without_delivery_cancels_late_job_and_reports_loss(monkeyp
     first_worker = fixture.module._backend_admission.thread
     _run(fixture.module, "send")
     assert fixture.module._backend_admission.thread is first_worker
-    assert "No export was resumed" in fixture.ui.messages[-1][1]
-    assert "not delivered before its deadline" in fixture.ui.messages[-1][1]
+    assert "Start Waveguide Generator manually" in fixture.ui.messages[-1][1]
+    assert "not delivered before its deadline" in "\n".join(fixture.ui.text_palette.written)
 
 
 def test_receipt_is_exactly_once_and_acknowledges_before_job():
@@ -122,7 +122,7 @@ def test_lost_completion_is_reported_and_hides_start_status_on_main(monkeypatch,
         assert fixture.ui.progress_dialogs and fixture.module._backend_progress is not None
         assert fixture.exports == [] and _inbox(fixture.ipc) == []
         _run(fixture.module, "send")
-        assert "No export was resumed" in fixture.ui.messages[-1][1]
+        assert "Start Waveguide Generator manually" in fixture.ui.messages[-1][1]
         assert fixture.module._backend_progress is None
         assert fixture.ui.progress_dialogs[0].events[-1][0] == "hide"
     finally:

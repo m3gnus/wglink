@@ -19,7 +19,9 @@ def _assignments(filename):
             try:
                 values[node.targets[0].id] = ast.literal_eval(node.value)
             except (ValueError, TypeError):
-                pass
+                if (isinstance(node.value, ast.Attribute) and isinstance(node.value.value, ast.Name)
+                        and node.value.value.id == "wglink_text"):
+                    values[node.targets[0].id] = _assignments("wglink_text.py")[node.value.attr]
     return values
 
 

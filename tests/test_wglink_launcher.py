@@ -174,8 +174,10 @@ def test_json_failure_preserves_reason_and_writes_nothing(monkeypatch, tmp_path,
     _finish(fixture)
     assert fixture.exports == [] and _inbox(fixture.ipc) == []
     text = fixture.ui.messages[-1][1]
-    assert "Start WG manually" in text and "BackendFailure: specific reason" in text
-    assert f"exit {code}" in text
+    assert "Start Waveguide Generator manually" in text
+    detail = "\n".join(fixture.ui.text_palette.written)
+    assert "BackendFailure: specific reason" in detail
+    assert f"exit {code}" in detail
 
 
 @pytest.mark.parametrize("output,code", [("", 0), ("", 5), ("not json", 0), ("{}\n{}", 0), ("[]", 0)])
@@ -185,7 +187,7 @@ def test_native_and_invalid_json_failures_do_not_export(monkeypatch, tmp_path, o
     _run(fixture.module, "solve")
     _finish(fixture)
     assert fixture.exports == [] and _inbox(fixture.ipc) == []
-    assert "JSON" in fixture.ui.messages[-1][1]
+    assert "JSON" in "\n".join(fixture.ui.text_palette.written)
 
 
 def test_timeout_terminates_only_launcher_and_does_not_export(monkeypatch, tmp_path):
@@ -206,7 +208,7 @@ def test_timeout_terminates_only_launcher_and_does_not_export(monkeypatch, tmp_p
     _run(fixture.module, "send")
     _finish(fixture)
     assert fixture.exports == [] and _inbox(fixture.ipc) == []
-    assert "Timed out" in fixture.ui.messages[-1][1]
+    assert "Timed out" in "\n".join(fixture.ui.text_palette.written)
     assert len(children) == 1 and children[0].poll() is not None
 
 
@@ -296,7 +298,7 @@ def test_no_launcher_keeps_start_manually_behavior(monkeypatch, tmp_path, operat
     monkeypatch.setattr(fixture.module.wglink_launcher.subprocess, "Popen", lambda *a, **k: pytest.fail("spawn"))
     _run(fixture.module, operation)
     assert fixture.exports == [] and _inbox(fixture.ipc) == []
-    assert "Start Waveguide Generator" in fixture.ui.messages[-1][1]
+    assert "Open Waveguide Generator" in fixture.ui.messages[-1][1]
     assert fixture.module._backend_admission.thread is None
 
 
@@ -333,7 +335,7 @@ def test_wrong_folder_success_is_refused_without_retry(monkeypatch, tmp_path):
     _run(fixture.module, "solve")
     _finish(fixture)
     assert fixture.exports == [] and _inbox(fixture.ipc) == []
-    assert "different WG data folder" in fixture.ui.messages[-1][1]
+    assert "different WG data folder" in "\n".join(fixture.ui.text_palette.written)
 
 
 def test_document_switch_while_starting_does_not_export(monkeypatch, tmp_path):
@@ -365,8 +367,8 @@ def test_missing_installed_entry_is_a_visible_validation_failure(monkeypatch, tm
     _run(fixture.module, "send")
     assert fixture.exports == [] and _inbox(fixture.ipc) == []
     assert fixture.module._backend_admission.thread is None
-    assert "missing or is not a regular file" in fixture.ui.messages[-1][1]
-    assert "Start WG manually" in fixture.ui.messages[-1][1]
+    assert "missing or is not a regular file" in "\n".join(fixture.ui.text_palette.written)
+    assert "Start Waveguide Generator manually" in fixture.ui.messages[-1][1]
 
 
 def test_unsupported_delivery_with_launcher_still_refuses_without_spawn(monkeypatch, tmp_path):
@@ -384,7 +386,7 @@ def test_success_with_disabled_consumer_is_refused_before_export(monkeypatch, tm
     _run(fixture.module, "send")
     _finish(fixture)
     assert fixture.exports == [] and _inbox(fixture.ipc) == []
-    assert "not collecting" in fixture.ui.messages[-1][1]
+    assert "not ready to receive this model" in fixture.ui.messages[-1][1]
 
 
 @pytest.mark.parametrize("operation", ["insert", "update"])
@@ -489,8 +491,8 @@ def test_invalid_advertised_launcher_refuses_before_export_or_spawn(monkeypatch,
     _run(fixture.module, operation)
     assert fixture.exports == [] and _inbox(fixture.ipc) == []
     assert fixture.module._backend_admission.thread is None
-    assert "Invalid WG installed launcher" in fixture.ui.messages[-1][1]
-    assert reason in fixture.ui.messages[-1][1]
+    assert "Invalid WG installed launcher" in "\n".join(fixture.ui.text_palette.written)
+    assert reason in "\n".join(fixture.ui.text_palette.written)
     assert wglink_launcher.launcher_argv(fixture.ipc) is None
 
 
@@ -654,7 +656,7 @@ def test_invalid_install_marker_keeps_manual_start_message(monkeypatch, tmp_path
     _run(fixture.module, "send")
     assert fixture.exports == [] and _inbox(fixture.ipc) == []
     assert fixture.module._backend_admission.thread is None
-    assert "Start Waveguide Generator" in fixture.ui.messages[-1][1]
+    assert "Open Waveguide Generator" in fixture.ui.messages[-1][1]
 
 
 @pytest.mark.parametrize("symlinked", [False, True])
@@ -704,7 +706,7 @@ def test_install_marker_uses_production_addin_folder(monkeypatch, tmp_path, syml
     if symlinked:
         assert fixture.module._backend_admission.thread is None
         assert calls == [] and fixture.exports == [] and _inbox(fixture.ipc) == []
-        assert "Start Waveguide Generator" in fixture.ui.messages[-1][1]
+        assert "Open Waveguide Generator" in fixture.ui.messages[-1][1]
     else:
         _finish(fixture)
         assert len(calls) == 1 and calls[0][0] == [str(entry)]
@@ -725,8 +727,8 @@ def test_invalid_advertisement_and_marker_preserve_strict_error(monkeypatch, tmp
     assert fixture.module._backend_admission.thread is None
     assert fixture.exports == [] and _inbox(fixture.ipc) == []
     assert fixture.ui.messages[-1][1] == (
-        "Invalid WG installed launcher: the installed entry is missing or is not a regular file. "
-        "Start WG manually, then try again.")
+        "Waveguide Generator could not start. Start Waveguide Generator manually, then try again.")
+    assert "missing or is not a regular file" in "\n".join(fixture.ui.text_palette.written)
 
 
 @pytest.mark.parametrize("platform", ["win32", "darwin"])
@@ -840,8 +842,8 @@ def test_marker_cold_start_without_ipc_resumes_only_after_fresh_gates(
     assert calls == [expected]
     if fresh in {"outdated", "missing-feature", "override-no-root"}:
         assert fixture.exports == [] and _inbox(fixture.ipc) == []
-        assert {"outdated": "Update Waveguide Generator", "missing-feature": "Update and restart WG",
-                "override-no-root": "no selected WGLink folder"}[fresh] in fixture.ui.messages[-1][1]
+        assert {"outdated": "Update Waveguide Generator", "missing-feature": "Update Waveguide Generator",
+                "override-no-root": "no usable WGLink folder"}[fresh] in fixture.ui.messages[-1][1]
     else:
         assert len(fixture.exports) == 1
         assert fixture.exports[0]["capture_document"] is False
@@ -862,7 +864,7 @@ def test_windows_without_appdata_cannot_admit_even_with_marker(monkeypatch, tmp_
     monkeypatch.setattr(wglink_launcher.subprocess, "Popen", lambda *a, **k: pytest.fail("spawn"))
     _run(fixture.module, "send")
     assert fixture.module._backend_admission.thread is None and fixture.exports == []
-    assert "Start Waveguide Generator" in fixture.ui.messages[-1][1]
+    assert "Open Waveguide Generator" in fixture.ui.messages[-1][1]
 
 
 @pytest.mark.parametrize("cancel", [False, True])

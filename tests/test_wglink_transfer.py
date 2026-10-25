@@ -287,7 +287,7 @@ def test_a_send_to_a_wg_that_reads_only_schema_3_is_refused_visibly(
 
     assert _inbox(fixture.ipc) == [] and _outbox(fixture.ipc) == []
     title, text = fixture.ui.messages[-1]
-    assert title == "Waveguide Generator refused"
+    assert title == "Waveguide Generator"
     assert "Update Waveguide Generator" in text
     assert fixture.timers == []
 
@@ -309,8 +309,8 @@ def test_a_wg_not_collecting_requests_is_named_at_command_time(
 
     assert _inbox(fixture.ipc) == []
     title, text = fixture.ui.messages[-1]
-    assert title == "Waveguide Generator refused"
-    assert "not collecting requests from Fusion" in text
+    assert title == "Waveguide Generator"
+    assert "not ready to receive this model" in text
 
 
 def test_a_write_whose_outcome_is_unknown_is_retried_once_with_the_same_id(
@@ -355,8 +355,9 @@ def test_a_write_that_keeps_failing_is_a_visible_refusal(monkeypatch, tmp_path: 
 
     assert len(calls) == fixture.module.WG_REQUEST_WRITE_ATTEMPTS
     title, text = fixture.ui.messages[-1]
-    assert title == "Waveguide Generator refused"
-    assert "could not write the request for WG" in text and "disk full" in text
+    assert title == "Waveguide Generator"
+    assert "has not received it" in text and "writable" in text
+    assert "disk full" in "\n".join(fixture.ui.text_palette.written)
 
 
 def test_a_refusal_is_an_answer_and_is_never_retried(monkeypatch, tmp_path: Path) -> None:
@@ -1011,7 +1012,7 @@ def test_a_failure_between_the_bundle_and_the_request_leaves_no_request_file(
     assert _request_files(fixture.ipc) == []  # no request, and no staging litter
     [bundle] = [p for p in (fixture.workspace / "wgreturn").iterdir() if not p.name.startswith(".")]
     assert (bundle / "wgreturn.json").is_file() and (bundle / "assembly.step").is_file()
-    assert fixture.ui.messages[-1][0] == "Waveguide Generator refused"
+    assert fixture.ui.messages[-1][0] == "Waveguide Generator"
 
 
 def test_a_failure_taking_the_return_reference_leaves_no_request_file(
@@ -1027,7 +1028,7 @@ def test_a_failure_taking_the_return_reference_leaves_no_request_file(
     _run(fixture.module, "send")
 
     assert _request_files(fixture.ipc) == []
-    assert fixture.ui.messages[-1][0] == "Waveguide Generator refused"
+    assert fixture.ui.messages[-1][0] == "Waveguide Generator"
 
 
 def test_a_bundle_that_could_not_be_published_is_never_requested(monkeypatch, tmp_path: Path) -> None:
@@ -1049,7 +1050,7 @@ def test_a_bundle_that_could_not_be_published_is_never_requested(monkeypatch, tm
     assert requested == []
     assert _request_files(fixture.ipc) == []
     assert not [p for p in (fixture.workspace / "wgreturn").iterdir() if p.name.endswith(".wgreturn")]
-    assert fixture.ui.messages[-1][0] == "Waveguide Generator refused"
+    assert fixture.ui.messages[-1][0] == "Waveguide Generator"
 
 
 @pytest.mark.parametrize("outcome", ["delivered", "rejected", "conflict", "expired"])
@@ -1064,8 +1065,8 @@ def test_startup_settles_earlier_answers_without_resending(monkeypatch, tmp_path
     assert _inbox(fixture.ipc) == [] and not path.exists()
     assert len(fixture.ui.messages) == (0 if outcome == "delivered" else 1)
     if outcome == "rejected":
-        assert "earlier WG reason" in fixture.ui.messages[0][1]
-        assert "new request" in fixture.ui.messages[0][1]
+        assert "earlier WG reason" in "\n".join(fixture.ui.text_palette.written)
+        assert "Send or Solve again" in fixture.ui.messages[0][1]
 
 
 def test_a_held_earlier_answer_is_never_migrated_as_unanswered(monkeypatch, tmp_path: Path) -> None:
@@ -1122,7 +1123,7 @@ def test_earlier_refusal_is_kept_until_its_notice_can_be_shown(monkeypatch, tmp_
     monkeypatch.setattr(fixture.module, "_ui", original)
     fixture.module._convert_outbox_at_startup()
     assert not path.exists() and _inbox(fixture.ipc) == []
-    assert "malformed" in fixture.ui.messages[-1][1]
+    assert "malformed" in "\n".join(fixture.ui.text_palette.written)
 
 
 @pytest.mark.parametrize("outcome,wording", [
@@ -1142,11 +1143,11 @@ def test_earlier_delivery_notice_names_its_actual_outcome(
     path.write_text(json.dumps(item))
     fixture.module._convert_outbox_at_startup()
     text = fixture.ui.messages[-1][1]
-    assert wording in text and command in text and "settled-1" in text
-    if outcome == "rejected":
-        assert "malformed" in text and "snapshot_invalid" in text
-    else:
-        assert "did not accept" not in text
+    assert text == "Waveguide Generator could not receive an earlier model. Send or Solve again from Fusion."
+    detail = "\n".join(fixture.ui.text_palette.written)
+    assert outcome in detail and kind in detail and "settled-1" in detail
+    assert "malformed" in detail and "snapshot_invalid" in detail
+    assert fixture.module.wglink_protocol.user_text_violations(text) == []
 
 
 def test_earlier_delivery_notice_is_shown_once_when_delete_fails(monkeypatch, tmp_path):
