@@ -272,7 +272,7 @@ def document(scene, monkeypatch):
     change(scene, inputs, items, state, "mesh_add_group")
     items["mesh_group_name_2"].value = "Old panel"
     items["mesh_group_faces_2"].addSelection(faces[1])
-    module._apply_mesh_dialog(inputs, state)
+    module.wglink_mesh_dialog._apply_mesh_dialog(inputs, state)
     module._apply_fem_region(_inputs(module, fem_air, fem_faces), _state(module, 1, 2))
     second_state = _state(module, 1, 2)
     second_state.region_id = "side-air"
@@ -312,7 +312,7 @@ def operation(scene, path):
     air, faces = scene.cabinet, scene.faces
     if path == "mesh-restore-save":
         inputs, _items, state = build(scene)
-        return module._apply_mesh_dialog(inputs, state)
+        return module.wglink_mesh_dialog._apply_mesh_dialog(inputs, state)
     if path == "mesh-save-and-restore":
         inputs, items, state = build(scene)
         items["mesh_source_size_1"].value = 2.2
@@ -322,7 +322,7 @@ def operation(scene, path):
         change(scene, inputs, items, state, "mesh_add_group")
         items["mesh_group_name_4"].value = "New panel"
         items["mesh_group_faces_4"].addSelection(faces[2])
-        return module._apply_mesh_dialog(inputs, state)
+        return module.wglink_mesh_dialog._apply_mesh_dialog(inputs, state)
     if path.startswith("fem-"):
         air, faces = scene.fem_air, scene.fem_faces
     if path == "fem-save":

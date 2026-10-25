@@ -87,12 +87,16 @@ def test_reload_refreshes_the_scenarios_in_place(monkeypatch, tmp_path):
         assert set(old) == {"noop", "reload", "sources-mesh-baseline"}
         dev_tests = importlib.import_module(f"{module._registration_package_name}.wglink_dev_tests")
         requests, results = dev_tests.folders(tmp_path)
-        dev_tests.write_json(requests / "r.json", {"id": "r", "scenario": "reload", "modules": ["wglink_mesh"]})
+        dev_tests.write_json(requests / "r.json", {"id": "r", "scenario": "reload",
+                                                       "modules": ["wglink_mesh_dialog"]})
         for _ in range(4):
             runner.tick()
         result = json.loads((results / "r.json").read_text())
         assert result["status"] == "passed", result
-        assert result["reloaded"] == ["wglink_mesh", "wglink_dev_tests"]
+        assert result["reloaded"] == ["wglink_mesh_dialog", "wglink_dev_tests"]
+        # A reloaded helper keeps its binding to the entry module's helpers.
+        assert module.wglink_mesh_dialog.host is not None
+        assert module.wglink_mesh_dialog.host.PANEL_NAME == module.PANEL_NAME
         assert runner.scenarios is not old and set(runner.scenarios) == set(old)
     finally:
         module.stop(None)

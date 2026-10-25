@@ -618,7 +618,7 @@ def test_dialog_builds_defaults_and_updates_kind_and_lining_visibility(fixture):
     assert items["fem_resistivity_1"].isEnabled
     for kind in ("moving", "interface", "plane-wave-termination"):
         label = next(label for label, value in module.wglink_fem.KIND_CHOICES if value == kind)
-        module._mesh_select(items["fem_kind_1"], label)
+        module.wglink_mesh_dialog._mesh_select(items["fem_kind_1"], label)
         module.FemInputChangedHandler(state)._changed(types.SimpleNamespace(
             input=items["fem_kind_1"], inputs=inputs,
         ))
