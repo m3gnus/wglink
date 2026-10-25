@@ -66,11 +66,16 @@ _WG_BUSY = frozenset({"accepted", "preparing", "queued", "solving"})
 POLL_VISIBLE_SECONDS = 2.0
 POLL_HIDDEN_SECONDS = 5.0
 POLL_QUIET_SECONDS = 30.0
-#: With no news for this long, a request WG is working on reads as quiet:
-#: "has not reported for a while", with a way on. Sooner when WG no longer
-#: advertises that it reads requests at all (it closed, or stopped collecting).
-QUIET_SECONDS = 10 * 60.0
-QUIET_WITHOUT_WG_SECONDS = 60.0
+#: WG rewrites the status of every request it has not finished once the file
+#: is this old, each time with a higher ``seq`` (docs/REQUEST-STATUS.md).
+WG_STATUS_RHYTHM_SECONDS = float(wglink_protocol.REQUEST_STATUS_REFRESH_SECONDS)
+#: With no new ``seq`` for this long, a request WG is working on reads as
+#: quiet: "has not reported for a while", with a way on.
+QUIET_SECONDS = 5 * WG_STATUS_RHYTHM_SECONDS
+#: Sooner when WG is gone: its capability file carries ``stoppedAt`` (a clean
+#: shutdown), or a request whose status WG keeps fresh has missed two of its
+#: rewrites (a crash).
+QUIET_WITHOUT_WG_SECONDS = 2 * WG_STATUS_RHYTHM_SECONDS
 #: With no news for this long, the add-in stops looking. The palette keeps
 #: its last words and its ways on.
 FOLLOW_LIMIT_SECONDS = 24 * 3600.0
@@ -153,6 +158,20 @@ def request_path(ipc: Path, request: Mapping[str, Any]) -> Path:
     return Path(ipc) / wglink_inbox.SOLVE_REQUESTS_DIRECTORY / f"{request.get('requestId')}.json"
 
 
+def replaces(previous: Mapping[str, Any] | None, request: Mapping[str, Any]) -> bool:
+    """Whether ``request`` is the same press for the same document as ``previous``.
+
+    The same command, and the same document by its id: two documents the
+    add-in cannot name are never taken for one.
+    """
+
+    if previous is None or previous.get("requestId") == request.get("requestId"):
+        return False
+    document = previous.get("documentId")
+    return (bool(document) and document == request.get("documentId")
+            and previous.get("kind") == request.get("kind"))
+
+
 def withdraw(ipc: Path, request: Mapping[str, Any]) -> bool:
     """Take back a request WG has not picked up, because a newer one replaces it.
 
@@ -200,9 +219,12 @@ def _advance(request: dict[str, Any], ipc: Path, now: float) -> None:
         status = wglink_inbox.read_request_status(
             ipc, request_id, kind=kind, manifest_sha256=manifest)
         held = request.get("status")
-        if status is not None and (not isinstance(held, Mapping) or status["seq"] > held.get("seq", -1)):
+        held_seq = held.get("seq", -1) if isinstance(held, Mapping) else -1
+        # An equal seq is not older (the contract): it is taken. Only a higher
+        # one is news from WG.
+        if status is not None and status["seq"] >= held_seq:
             request["status"] = status
-            heard = True
+            heard = status["seq"] > held_seq
     if capabilities.get("acknowledgement") and request.get("receipt") is None:
         receipt = wglink_inbox.read_acknowledgement(
             ipc, request_id, kind=kind, manifest_sha256=manifest)
@@ -215,7 +237,8 @@ def _advance(request: dict[str, Any], ipc: Path, now: float) -> None:
         heard = heard or request.get("local") != before
     if heard:
         request["heardAt"] = now
-    request["quiet"] = _quiet(request, ipc, now)
+    request["wgStopped"] = wglink_inbox.wg_stopped(ipc)
+    request["quiet"] = _quiet(request, now)
 
 
 def _advance_local(request: dict[str, Any], ipc: Path, now: float) -> None:
@@ -249,7 +272,7 @@ def _silent(request: Mapping[str, Any], now: float) -> float:
     return now - float(request.get("heardAt") or now)
 
 
-def _quiet(request: Mapping[str, Any], ipc: Path, now: float) -> bool:
+def _quiet(request: Mapping[str, Any], now: float) -> bool:
     """WG is working on the request, but has said nothing about it for a while."""
 
     if not _quiet_eligible(request):
@@ -257,10 +280,18 @@ def _quiet(request: Mapping[str, Any], ipc: Path, now: float) -> bool:
     silent = _silent(request, now)
     if silent >= QUIET_SECONDS:
         return True
-    still_there = (wglink_inbox.wg_reports_request_status(ipc)
-                   if (request.get("capabilities") or {}).get("requestStatus")
-                   else wglink_inbox.wg_acknowledges(ipc))
-    return silent >= QUIET_WITHOUT_WG_SECONDS and not still_there
+    if request.get("wgStopped"):
+        return True  # WG shut down; a restart rewrites the status at once
+    # A status WG keeps fresh that missed two rewrites: WG is not running.
+    fresh = (request.get("capabilities") or {}).get("requestStatus")
+    return bool(fresh) and silent > QUIET_WITHOUT_WG_SECONDS
+
+
+def is_quiet(request: Mapping[str, Any], now: float | None = None) -> bool:
+    """Quiet by age alone (``QUIET_SECONDS`` without news), whatever was saved."""
+
+    moment = time.time() if now is None else float(now)
+    return _quiet_eligible(request) and _silent(request, moment) >= QUIET_SECONDS
 
 
 def _wg_record(request: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -347,11 +378,17 @@ def repeat_question(request: Mapping[str, Any]) -> str:
     """The question for a second press of the same model while its request is under way."""
 
     name = _name(request.get("documentName")) or "this model"
-    if request.get("kind") == SOLVE:
-        return (f"{APP_NAME} is already working on {name}. Solve it again?\n\n"
-                "Yes: Solve again.\nNo: Show its progress.")
-    return (f"{name} was already sent to {APP_NAME} and is still on its way. "
-            "Send it again?\n\nYes: Send again.\nNo: Show its progress.")
+    verb = "Solve" if request.get("kind") == SOLVE else "Send"
+    has_it = (request.get("status") is not None or request.get("receipt") is not None
+              or request.get("local") in (TAKEN, TAKEN_UNCONFIRMED))
+    if has_it and verb == "Solve":
+        said = f"{APP_NAME} is already working on {name}."
+    elif has_it:
+        said = f"{APP_NAME} already has {name}."
+    else:
+        said = f"{name} is still waiting for {APP_NAME} to pick it up."
+    return (f"{said} {verb} it again?\n\n"
+            f"Yes: {verb} again.\nNo: Show its progress.")
 
 
 def view(request: Mapping[str, Any], *, now: float | None = None) -> dict[str, Any]:
@@ -384,7 +421,7 @@ def _view(request: Mapping[str, Any], now: float) -> dict[str, Any]:
     record = _wg_record(request)
     # Quiet once looked at, or by age alone: a request no longer looked at
     # (a day without news) still reads as quiet, never as busy.
-    if request.get("quiet") or (_quiet_eligible(request) and _silent(request, now) >= QUIET_SECONDS):
+    if request.get("quiet") or is_quiet(request, now):
         headline = f"{APP_NAME} has not reported on {inner} for a while."
         detail = f"Open {APP_NAME} to check it, or {verb.lower()} it again."
         actions.append(again)
@@ -565,6 +602,7 @@ class RequestTracker:
 __all__ = [
     "ACTION_IDS", "EXPORTING", "NOT_SENT", "NOT_TAKEN", "POLL_HIDDEN_SECONDS",
     "POLL_QUIET_SECONDS", "POLL_VISIBLE_SECONDS", "QUIET_SECONDS", "RECORD_FILENAME",
+    "is_quiet", "replaces",
     "RequestTracker", "SEND", "SEND_AGAIN_ID", "SOLVE", "SUBMITTED", "TAKEN",
     "TAKEN_UNCONFIRMED", "UNCONFIRMED", "diagnostics", "following", "load", "new_request",
     "not_sent", "outcome", "poll", "repeat_question", "request_path", "save", "submitted",

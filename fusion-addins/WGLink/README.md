@@ -367,8 +367,10 @@ Commands and requests cross through WG's machine-local IPC folder,
   stays "has not picked up" until WG answers: the file's absence alone is never
   read as picked up. No state is a dead end: every one still under way offers
   Send/Solve again where the add-in cannot tell what WG has, and a request WG
-  stops reporting on (10 minutes without news, 1 minute once WG no longer
-  advertises that it reads requests) reads "has not reported on <name> for a
+  stops reporting on (5 minutes without a higher `seq`, where WG rewrites
+  every unfinished request every minute; at once when WG's capability file
+  carries `stoppedAt`; after 120 s, two missed rewrites, for a status WG keeps
+  fresh) reads "has not reported on <name> for a
   while" with Open Waveguide Generator and Solve again, looked at every 30 s,
   and not at all after a day. A request WG could not finish is still looked at
   every 30 s for an hour, because WG's Try again moves it back to preparing.

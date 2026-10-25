@@ -141,6 +141,13 @@ def wg_reports_request_status(ipc_folder: Path) -> bool:
                        wglink_protocol.REQUEST_STATUS_SCHEMA_VERSION)
 
 
+def wg_stopped(ipc_folder: Path) -> bool:
+    """Whether WG's capability file says it shut down (``stoppedAt``)."""
+
+    return wglink_protocol.capabilities_stopped(
+        _read_json(Path(ipc_folder) / CAPABILITIES_FILENAME))
+
+
 #: A status file WG is replacing can be briefly unreadable on Windows: one
 #: more look after this pause, then "not yet".
 STATUS_READ_RETRY_SECONDS = 0.05

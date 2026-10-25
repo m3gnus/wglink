@@ -1333,7 +1333,7 @@ def _write_wg_request(ipc: Path, **fields: object) -> tuple[Path, bool]:
 
 
 def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[str, ...] = (),
-                  request_id: str | None = None) -> str:
+                  request_id: str | None = None, superseded: dict[str, object] | None = None) -> str:
     """Hand the return this command just published to WG: one file, one id.
 
     Send and Solve both come here and differ only in ``kind`` (M1 transfer
@@ -1386,7 +1386,8 @@ def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[s
     acknowledges = wglink_inbox.wg_acknowledges(ipc)
     current = _requests.current()
     if current is None or current.get("requestId") != request_id:
-        current = wglink_requests.new_request(request_id, kind, _active_document_name())
+        current = wglink_requests.new_request(request_id, kind, _active_document_name(),
+                                              document_id=_active_document_id())
     followed = wglink_requests.submitted(
         current,
         manifest_sha256=manifest,
@@ -1396,6 +1397,10 @@ def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[s
         notes=_export_notes(report),
     )
     _follow(followed)
+    if confirmed and wglink_requests.replaces(superseded, followed):
+        # The same press for the same document, now safely in WG's inbox,
+        # replaces a request WG has not picked up yet: take that one back.
+        wglink_requests.withdraw(ipc, superseded)
     _arm_request_poll()
     return request_id
 
@@ -1752,8 +1757,10 @@ def _submission_key(operation: str, inputs: object) -> str:
     Read on the main thread while the dialog's inputs are valid: body
     revisions and visibility, every occurrence's placement and visibility
     (moving a driver or a joint changes it), every parameter's value, the
-    timeline and the mesh settings. Only decides whether to ask before sending
-    again; a model that changed in any of these ways is simply sent.
+    timeline, and every Waveguide Generator attribute in the design (face
+    roles, source identities, FEM regions, mesh settings: owner, name and
+    value). Only decides whether to ask before sending again; a model that
+    changed in any of these ways is simply sent.
     """
 
     app = _app()
@@ -1761,7 +1768,7 @@ def _submission_key(operation: str, inputs: object) -> str:
     product = getattr(app, "activeProduct", None)
     selection = _send_selection(inputs)
     root = getattr(product, "rootComponent", None)
-    bodies, occurrences, parameters = [], [], []
+    bodies, occurrences, parameters, marks = [], [], [], []
     try:
         components = [root]
         for occurrence in wglink_core._items(getattr(root, "allOccurrences", None)):
@@ -1778,6 +1785,11 @@ def _submission_key(operation: str, inputs: object) -> str:
             parameters.append([str(getattr(parameter, "name", "")),
                                str(getattr(parameter, "expression", "")),
                                repr(getattr(parameter, "value", None))])
+        find = getattr(product, "findAttributes", None)
+        for attribute in wglink_core._items(find(wglink_core.ATTRIBUTE_GROUP, "") if callable(find) else None):
+            owner = getattr(attribute, "parent", None)
+            marks.append([str(getattr(owner, "entityToken", "") if owner is not None else ""),
+                          str(getattr(attribute, "name", "")), str(getattr(attribute, "value", ""))])
         settings = wglink_core._attribute_value(root, wglink_mesh.SETTINGS_ATTRIBUTE)
     except Exception:  # noqa: BLE001 - an unreadable model is never "the same"
         return str(uuid.uuid4())
@@ -1786,7 +1798,7 @@ def _submission_key(operation: str, inputs: object) -> str:
         str(getattr(selection, "entityToken", selection)),
         _selected_name(inputs, "anchor_instance_id", ""),
         getattr(getattr(product, "timeline", None), "count", None),
-        sorted(bodies), sorted(occurrences, key=str), sorted(parameters), settings,
+        sorted(bodies), sorted(occurrences, key=str), sorted(parameters), sorted(marks), settings,
     ], default=str)
 
 
@@ -1886,13 +1898,15 @@ def _show_request_palette(open_it: bool = False) -> None:
     """
 
     global _requests_palette_unavailable
-    if _requests_palette_unavailable:
+    if _requests_palette_unavailable and not open_it:
         _show_request_fallback(open_it)
         return
+    # Opening tries the palette again: a host that failed once may not again.
     try:
         palette = _requests_palette_handle(create=open_it)
         if palette is None:
             return
+        _requests_palette_unavailable = False
         if open_it:
             palette.isVisible = True
         _requests.visible = bool(palette.isVisible)
@@ -1919,7 +1933,8 @@ def _show_request_fallback(open_it: bool) -> None:
     request = _requests.current() or {}
     if open_it and wglink_requests.outcome(request) == "needsYou":
         options = "".join(f"\n• {option}" for option in view.get("options") or [])
-        _modal(f"{text}{options}\n\nAnswer in {PANEL_NAME}.", PANEL_NAME)
+        # A follow-up: never a box inside a command's execute or during start-up.
+        _schedule_followup(lambda: _modal(f"{text}{options}\n\nAnswer in {PANEL_NAME}.", PANEL_NAME))
 
 
 def _close_request_palette() -> None:
@@ -1995,6 +2010,9 @@ def _arm_request_poll(delay: float | None = None) -> None:
             return
         _request_poll_armed = True
     _start_timer(interval, wglink_activity.carrying(_poll_requests_due))
+    if _timers_closed:
+        with _request_poll_lock:
+            _request_poll_armed = False  # stop() closed the timers: nothing is armed
 
 
 def _poll_requests_due() -> None:
@@ -2032,6 +2050,8 @@ def _poll_requests_once() -> None:
     if not taken:
         return  # a newer request replaced this one meanwhile
     with _followups_lock:
+        if _timers_closed:
+            return  # stopped while looking: nothing follows a stop()
         _followups.append(wglink_activity.carrying(
             lambda: _request_changed(previous, updated, problem)))
     _raise_followup_event()
@@ -2044,6 +2064,8 @@ def _request_changed(previous: dict[str, object] | None, updated: dict[str, obje
     global _requests_hint
     if problem:
         _log(f"[{PANEL_NAME}] {problem}")
+    if (_requests.current() or {}).get("requestId") != updated.get("requestId"):
+        return  # a later request, or a stop(), came between the look and now
     before = wglink_requests.outcome(previous) if previous else None
     after = wglink_requests.outcome(updated)
     if before != after:
@@ -2082,7 +2104,7 @@ def _recover_request() -> None:
         return
     _requests.begin(found)
     if wglink_requests.following(found):
-        if not wglink_requests.terminal(found) and not found.get("quiet"):
+        if not wglink_requests.terminal(found) and not wglink_requests.is_quiet(found):
             _show_request_palette(open_it=True)
         _arm_request_poll(0.0)
 
@@ -2198,13 +2220,6 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                     document_id=_active_document_id(),
                     submission_key=self.submission_key,
                 )
-                ipc = wglink_workspace.ipc_folder()
-                if (superseded is not None and ipc is not None
-                        and all(superseded.get(key) == followed.get(key)
-                                for key in ("kind", "documentId", "documentName"))):
-                    # The same press for the same document replaces a
-                    # request WG has not picked up yet: take that one back.
-                    wglink_requests.withdraw(ipc, superseded)
                 _follow(followed)
                 _show_request_palette(open_it=True)
                 progress = _show_export_progress(self.operation)
@@ -2245,6 +2260,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                     else wglink_inbox.KIND_RECEIVE_SNAPSHOT,
                     acknowledged=acknowledged if solve else (),
                     request_id=followed["requestId"],
+                    superseded=superseded,
                 )
                 report["solve_requested"] = solve
                 _update_export_progress(progress, 3, f"Sent to {PANEL_NAME}.")
@@ -5548,9 +5564,12 @@ def _start_followups(app: object) -> bool:
     """
 
     global _followup_event, _followup_handler, _backend_admission, _followup_app, _timers_closed
+    global _request_poll_armed
     _backend_admission = wglink_launcher.BackendAdmission()
     with _timers_lock:
         _timers_closed = False
+    with _request_poll_lock:
+        _request_poll_armed = False
     _followup_event = app.registerCustomEvent(FOLLOWUP_EVENT_ID)
     if _followup_event is None:
         return False

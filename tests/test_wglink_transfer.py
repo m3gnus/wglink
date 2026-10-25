@@ -404,7 +404,8 @@ def test_a_repeat_press_of_the_same_model_asks_and_no_shows_progress(
 
     [(title, question)] = fixture.ui.messages
     assert title == "Waveguide Generator"
-    assert ("already working on Horn A" if operation == "solve" else "still on its way") in question
+    # WG has not picked it up: the question says so, not "already working on".
+    assert "Horn A is still waiting for Waveguide Generator to pick it up." in question
     assert "Yes:" in question and "No: Show its progress." in question
     assert _inbox(fixture.ipc) == [first]  # nothing sent, nothing lost
     assert _palette(fixture).isVisible is True
@@ -414,6 +415,7 @@ def test_a_repeat_press_answered_yes_sends_again_and_takes_back_the_untaken_one(
     monkeypatch, tmp_path: Path
 ) -> None:
     fixture = _transfer(monkeypatch, tmp_path, "WGLink_repeat_yes")
+    monkeypatch.setattr(fixture.module, "_active_document_id", lambda: "fusion:doc-a")
     _press(fixture.module, "solve")
     [first] = _inbox(fixture.ipc)
     fixture.ui.dialog_result = "yes"
@@ -428,6 +430,7 @@ def test_a_repeat_press_answered_yes_sends_again_and_takes_back_the_untaken_one(
 
 def test_a_press_without_a_question_box_still_sends(monkeypatch, tmp_path: Path) -> None:
     fixture = _transfer(monkeypatch, tmp_path, "WGLink_repeat_no_box")
+    monkeypatch.setattr(fixture.module, "_active_document_id", lambda: "fusion:doc-a")
     _press(fixture.module, "send")
     monkeypatch.setattr(fixture.ui, "messageBox", None)
 
@@ -439,6 +442,7 @@ def test_a_press_without_a_question_box_still_sends(monkeypatch, tmp_path: Path)
 
 def test_the_palettes_send_again_does_not_ask(monkeypatch, tmp_path: Path) -> None:
     fixture = _transfer(monkeypatch, tmp_path, "WGLink_repeat_forced")
+    monkeypatch.setattr(fixture.module, "_active_document_id", lambda: "fusion:doc-a")
     _press(fixture.module, "send")
 
     _press(fixture.module, "send", force_new=True)
@@ -446,6 +450,79 @@ def test_the_palettes_send_again_does_not_ask(monkeypatch, tmp_path: Path) -> No
     assert fixture.ui.messages == []
     assert len({payload["operationId"] for payload in _inbox(fixture.ipc)}) == 1
     assert fixture.module._requests.current()["requestId"] == _inbox(fixture.ipc)[0]["operationId"]
+
+
+def test_wg_having_the_request_is_said_in_the_question(monkeypatch, tmp_path: Path) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_repeat_wg_has_it")
+    fixture.ui.dialog_result = "no"
+    _press(fixture.module, "solve")
+    current = fixture.module._requests.current()
+    fixture.module._requests.begin(dict(current, receipt={"outcome": "accepted", "reason": None},
+                                        capabilities={"acknowledgement": True, "requestStatus": True}))
+
+    _press(fixture.module, "solve")
+
+    [(_title, question)] = fixture.ui.messages
+    assert question.startswith("Waveguide Generator is already working on Horn A. Solve it again?")
+
+
+def test_an_unnamed_document_never_takes_back_anothers_request(monkeypatch, tmp_path: Path) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_repeat_unnamed")
+    monkeypatch.setattr(fixture.module, "_active_document_id", lambda: None)
+    _press(fixture.module, "send")
+    fixture.app.activeDocument = types.SimpleNamespace(name="Horn A", isModified=False)  # another unsaved "Horn A"
+
+    _press(fixture.module, "send", force_new=True)
+
+    assert len(_inbox(fixture.ipc)) == 2
+
+
+def test_the_previous_request_is_taken_back_only_once_the_new_one_is_written(
+    monkeypatch, tmp_path: Path
+) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_repeat_after_write")
+    module = fixture.module
+    monkeypatch.setattr(module, "_active_document_id", lambda: "fusion:doc-a")
+    monkeypatch.setattr(module, "_retry_pause", lambda _seconds: None)
+    _press(module, "solve")
+    [first] = _inbox(fixture.ipc)
+    seen: list[list[str]] = []
+    real_publish = module.wglink_inbox.publish_wg_request
+
+    def publish(path, payload):
+        seen.append([item["operationId"] for item in _inbox(fixture.ipc)])
+        return real_publish(path, payload)
+
+    monkeypatch.setattr(module.wglink_inbox, "publish_wg_request", publish)
+    _press(module, "solve", force_new=True)
+    assert seen[0] == [first["operationId"]]  # still there while the new one was written
+    [second] = _inbox(fixture.ipc)
+    assert second["operationId"] != first["operationId"]
+
+    # A write that cannot be confirmed takes nothing back.
+    monkeypatch.setattr(module.wglink_inbox, "publish_wg_request",
+                        lambda *_a: (_ for _ in ()).throw(module.wglink_inbox.WriteOutcomeUnknown("held")))
+    _press(module, "solve", force_new=True)
+    assert second in _inbox(fixture.ipc)
+
+
+def _marked_model(app, role: str) -> None:
+    face = types.SimpleNamespace(entityToken="face-7")
+    mark = types.SimpleNamespace(parent=face, name="face_role", value=role)
+    app.activeProduct = types.SimpleNamespace(
+        objectType="adsk::fusion::Design",
+        rootComponent=types.SimpleNamespace(bRepBodies=[], allOccurrences=[], attributes=None),
+        findAttributes=lambda group, name: [mark] if group == "WGLink" else [])
+
+
+def test_a_changed_source_mark_is_a_changed_model(monkeypatch, tmp_path: Path) -> None:
+    fixture = _transfer(monkeypatch, tmp_path, "WGLink_repeat_marks")
+    _marked_model(fixture.app, "HF")
+    key = fixture.module._submission_key("solve", _dialog_inputs())
+    assert fixture.module._submission_key("solve", _dialog_inputs()) == key  # stable
+    _marked_model(fixture.app, "MF")
+
+    assert fixture.module._submission_key("solve", _dialog_inputs()) != key
 
 
 def test_send_again_is_spent_by_one_dialog_and_never_outlives_it(monkeypatch, tmp_path: Path) -> None:

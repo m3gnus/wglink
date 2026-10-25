@@ -263,7 +263,7 @@ def _solve(monkeypatch, module, state):
         "scope": {"status": "clean"}, "sources": [],
     })[1])
     monkeypatch.setattr(module, "_submit_to_wg", lambda _report, kind, **kw: (
-        submitted.append((kind, {key: value for key, value in kw.items() if key != "request_id"})), "req")[1])
+        submitted.append((kind, {key: value for key, value in kw.items() if key == "acknowledged"})), "req")[1])
     handler = module.CommandExecuteHandler("solve")
     handler.send_state = state
     args = types.SimpleNamespace(command=types.SimpleNamespace(commandInputs=_dialog_inputs()), isValidResult=True)

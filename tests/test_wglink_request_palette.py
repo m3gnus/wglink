@@ -600,15 +600,83 @@ def test_a_request_wg_stops_reporting_on_goes_quiet_with_a_way_on(tmp_path: Path
     assert tracker.poll_interval(now=1.0 + wglink_requests.QUIET_SECONDS) == wglink_requests.POLL_QUIET_SECONDS
 
 
-def test_quiet_comes_sooner_when_wg_no_longer_reads_requests(tmp_path: Path) -> None:
+def _write_status(tmp_path: Path, seq: int, state: str = "solving") -> None:
+    folder = tmp_path / wglink_inbox.ACK_DIRECTORY
+    folder.mkdir(exist_ok=True)
+    (folder / "req-1.status.json").write_text(json.dumps({
+        "contract": "wg-request-status", "schemaVersion": 1, "seq": seq,
+        "requestId": "req-1", "documentName": "Horn A", "state": state}))
+
+
+def test_a_clean_shutdown_is_quiet_at_once_and_a_restart_is_not(tmp_path: Path) -> None:
     request = _submitted(tmp_path)
-    request["receipt"] = {"outcome": "accepted", "reason": None}
-    soon = 1.0 + wglink_requests.QUIET_WITHOUT_WG_SECONDS
-    assert wglink_requests.poll(request, tmp_path, now=soon)["quiet"] is False
+    _write_status(tmp_path, 1)
+    request = wglink_requests.poll(request, tmp_path, now=10.0)
+    capabilities = tmp_path / wglink_inbox.CAPABILITIES_FILENAME
+    running = json.loads(capabilities.read_text())
+    capabilities.write_text(json.dumps({**running, wglink_protocol.CAPABILITY_STOPPED_AT: "2026-10-25T10:00:00Z"}))
 
-    (tmp_path / wglink_inbox.CAPABILITIES_FILENAME).unlink()  # WG closed
+    stopped = wglink_requests.poll(request, tmp_path, now=12.0)
+    assert stopped["quiet"] is True
+    assert "for a while" in wglink_requests.view(stopped, now=12.0)["headline"]
 
-    assert wglink_requests.poll(request, tmp_path, now=soon)["quiet"] is True
+    capabilities.write_text(json.dumps(running))  # WG started again ...
+    _write_status(tmp_path, 2)  # ... and rewrote every unfinished status at once
+    back = wglink_requests.poll(stopped, tmp_path, now=20.0)
+    assert back["quiet"] is False
+    assert wglink_requests.view(back, now=20.0)["headline"] == "Horn A · Solving…"
+
+
+def test_a_crashed_wg_is_quiet_after_two_missed_rewrites(tmp_path: Path) -> None:
+    request = _submitted(tmp_path)
+    _write_status(tmp_path, 1)
+    request = wglink_requests.poll(request, tmp_path, now=10.0)
+
+    # The capability file stays, unmarked: a crash. Only the missed rewrites tell.
+    late = wglink_requests.poll(request, tmp_path, now=10.0 + wglink_requests.QUIET_WITHOUT_WG_SECONDS)
+    assert late["quiet"] is False
+    gone = wglink_requests.poll(late, tmp_path, now=11.0 + wglink_requests.QUIET_WITHOUT_WG_SECONDS)
+    assert gone["quiet"] is True
+
+
+def test_the_stopped_marker_is_read_once_in_the_protocol(tmp_path: Path) -> None:
+    assert wglink_protocol.capabilities_stopped({"stoppedAt": "2026-10-25T10:00:00Z"}) is True
+    for value in ({}, {"stoppedAt": ""}, {"stoppedAt": 1}, None, "x"):
+        assert wglink_protocol.capabilities_stopped(value) is False
+    assert wglink_inbox.wg_stopped(tmp_path) is False  # no file
+
+
+def test_wgs_rhythm_keeps_a_long_solve_from_going_quiet(tmp_path: Path) -> None:
+    """WG rewrites an unfinished request every minute with a higher seq."""
+
+    request = _submitted(tmp_path)
+    folder = tmp_path / wglink_inbox.ACK_DIRECTORY
+    folder.mkdir()
+    for minute in range(1, 61):  # an hour of solving, one frequency an hour
+        (folder / "req-1.status.json").write_text(json.dumps({
+            "contract": "wg-request-status", "schemaVersion": 1, "seq": minute,
+            "requestId": "req-1", "documentName": "Horn A", "state": "solving"}))
+        now = 1.0 + 60.0 * minute
+        request = wglink_requests.poll(request, tmp_path, now=now)
+        assert request["quiet"] is False
+        assert "for a while" not in wglink_requests.view(request, now=now)["headline"]
+
+
+def test_an_equal_seq_is_taken_but_is_not_news(tmp_path: Path) -> None:
+    request = _submitted(tmp_path)
+    folder = tmp_path / wglink_inbox.ACK_DIRECTORY
+    folder.mkdir()
+    path = folder / "req-1.status.json"
+    path.write_text(json.dumps({"contract": "wg-request-status", "schemaVersion": 1, "seq": 3,
+                                "requestId": "req-1", "documentName": "Horn A", "state": "queued"}))
+    first = wglink_requests.poll(request, tmp_path, now=10.0)
+    path.write_text(json.dumps({"contract": "wg-request-status", "schemaVersion": 1, "seq": 3,
+                                "requestId": "req-1", "documentName": "Horn A", "state": "solving"}))
+
+    same = wglink_requests.poll(first, tmp_path, now=50.0)
+
+    assert same["status"]["state"] == "solving"
+    assert same["heardAt"] == 10.0
 
 
 def test_news_after_quiet_moves_the_request_on(tmp_path: Path) -> None:
@@ -779,6 +847,8 @@ def test_without_html_palettes_there_is_no_dialog_held_open(monkeypatch, tmp_pat
     fixture.timers.clear()
     for _delay, function in due:
         function()
+    _deliver_followups(fixture.module, fixture.app)
+    assert fixture.ui.messages == []  # never inside the follow-up that found it
     _deliver_followups(fixture.module, fixture.app)
     [(_title, text)] = fixture.ui.messages  # the one news worth a box
     assert "needs you" in text and "Solve anyway" in text

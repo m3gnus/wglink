@@ -71,6 +71,23 @@ following.
 - The record never carries reason text, an identifier inside text, a path or a
   traceback. `jobId` and `runNumber` are for navigation only.
 
+## WG's rhythm, and WG stopping
+
+While WG runs, it rewrites the status of every request it has not finished
+once the file is `REQUEST_STATUS_REFRESH_SECONDS` (60 s) old, raising only
+`seq` and `updatedAt`, and rewrites them all at once after a restart. It never
+rewrites a finished request. On a clean shutdown WG rewrites
+`wg-capabilities.json` with the same content plus `stoppedAt` (a UTC time
+ending in `Z`, `CAPABILITY_STOPPED_AT`; read it with `capabilities_stopped`);
+its next start writes the file without it. It never deletes the file (the
+add-in's launcher reads it to start WG), and a crash leaves it unmarked.
+
+A reader therefore counts only a higher `seq` as news. A request still under
+way that has had no new `seq` for a while is one WG has gone quiet about, never
+one that finished or failed. WGLink says so after 5 minutes, at once when the
+capability file carries `stoppedAt`, and after 120 s (two missed rewrites) for
+a request whose status WG keeps fresh, which covers a crash.
+
 ## Reading it
 
 `validate_request_status(value, request_id=...)` returns the record a reader may use,

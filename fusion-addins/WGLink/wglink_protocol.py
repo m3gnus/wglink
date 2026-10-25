@@ -1827,6 +1827,25 @@ def validate_domain_record(value: object, *, automatic_feature: bool = False) ->
 REQUEST_STATUS_CONTRACT = "wg-request-status"
 REQUEST_STATUS_SCHEMA_VERSION = 1
 REQUEST_STATUS_CAPABILITY = "requestStatus"
+#: WG's rhythm: while it runs, it rewrites the status of every request it has
+#: not finished once the file is this old (seq and updatedAt rise, nothing
+#: else changes), and at once after a restart. Finished ones are not rewritten.
+REQUEST_STATUS_REFRESH_SECONDS = 60
+#: On a clean shutdown WG rewrites ``wg-capabilities.json`` with the same
+#: content plus this key (a UTC ISO time ending in Z); its next start writes
+#: the file without it. A crash leaves the file unmarked. The file is never
+#: deleted: the add-in's launcher reads it to start WG.
+CAPABILITY_STOPPED_AT = "stoppedAt"
+
+
+def capabilities_stopped(capabilities: object) -> bool:
+    """Whether a capability file's contents say WG has shut down. Never raises."""
+
+    if not isinstance(capabilities, Mapping):
+        return False
+    value = capabilities.get(CAPABILITY_STOPPED_AT)
+    return isinstance(value, str) and bool(value.strip())
+
 REQUEST_STATUS_SUFFIX = ".status.json"
 REQUEST_STATUS_STATES = (
     "accepted", "preparing", "needsYou", "queued", "solving",
@@ -2159,8 +2178,19 @@ def _request_status_text(record: Mapping[str, Any]) -> dict[str, Any]:
         frequency = progress.get("frequency") if isinstance(progress.get("frequency"), Mapping) else None
         done = _status_int((frequency or {}).get("done"))
         total = _status_int((frequency or {}).get("total"), minimum=1)
+        channel = (frequency or {}).get("channel")
+        channel = channel if isinstance(channel, Mapping) else {}
+        index = _status_int(channel.get("index"), minimum=1)
+        count = _status_int(channel.get("count"), minimum=1)
         headline = f"{name} · Solving"
-        headline += f" · {done} of {total} frequencies" if done is not None and total is not None else "…"
+        if done is not None and total is not None:
+            # Each channel counts its own frequencies: name the channel, so
+            # the count never seems to run backwards between channels.
+            if index is not None and count is not None and count > 1:
+                headline += f" · channel {index} of {count}"
+            headline += f" · {done} of {total} frequencies"
+        else:
+            headline += "…"
     elif state == "solved":
         result = record.get("result") if isinstance(record.get("result"), Mapping) else {}
         run = _status_int(result.get("runNumber"), minimum=1)

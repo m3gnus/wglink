@@ -217,3 +217,19 @@ def test_a_return_the_preflight_rules_block_says_what_to_change():
     leaky = protocol.validate_request_status(
         _record("refused", failure={"recorded": False, "message": "The manifest was refused."}), request_id="req-1")
     assert protocol.request_status_text(leaky)["detail"] is None
+
+
+@pytest.mark.parametrize(("frequency", "headline"), [
+    ({"done": 5, "total": 8, "channel": {"index": 2, "count": 3}},
+     "Horn A · Solving · channel 2 of 3 · 5 of 8 frequencies"),
+    ({"done": 5, "total": 8, "channel": {"index": 1, "count": 1}}, "Horn A · Solving · 5 of 8 frequencies"),
+    ({"done": 5, "total": 8}, "Horn A · Solving · 5 of 8 frequencies"),
+], ids=["multi-channel", "one-channel", "no-channel"])
+def test_a_multi_channel_solve_names_its_channel(frequency, headline):
+    record = protocol.validate_request_status(_record(
+        "solving", progress={"fraction": 0.5, "frequency": frequency}))
+
+    text = protocol.request_status_text(record)
+
+    assert text["headline"] == headline
+    assert protocol.user_text_violations(text["headline"], names=("Horn A",)) == []
