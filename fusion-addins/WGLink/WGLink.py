@@ -2403,12 +2403,14 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 # The palette says what happens next; no message box.
                 _show_request_palette(open_it=True)
                 return
-            _message(
-                _summary(self.operation, report),
-                f"{PANEL_NAME} request unconfirmed"
-                if isinstance(report, dict) and report.get("delivery_unconfirmed")
-                else PANEL_NAME,
-            )
+            text = _summary(self.operation, report)
+            if text:  # an operation with nothing to say shows no message box
+                _message(
+                    text,
+                    f"{PANEL_NAME} request unconfirmed"
+                    if isinstance(report, dict) and report.get("delivery_unconfirmed")
+                    else PANEL_NAME,
+                )
         except (wglink_core.WgLinkError, wglink_author.AuthorError) as exc:
             # Only a dialog save is a transaction that keeps its dialog open on
             # failure. Send and Solve resume from a worker callback with no

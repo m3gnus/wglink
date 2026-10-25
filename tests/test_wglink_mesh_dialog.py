@@ -947,3 +947,13 @@ def test_history_io_is_advisory_and_advertised_limits_reach_the_dialog(scene, mo
     assert '#b77900' in text
     assert 'above the 1 limit' in items['mesh_validation'].formattedText
     assert not module.wglink_protocol.user_text_violations(text)
+
+
+@pytest.mark.parametrize("summary, shown", [("", []), ("Done.", [("Waveguide Generator", "Done.")])])
+def test_a_save_with_nothing_to_say_shows_no_message_box(scene, monkeypatch, summary, shown):
+    module = scene.module
+    monkeypatch.setattr(module.wglink_mesh_dialog, "_apply_mesh_dialog",
+                        lambda _inputs, _state: {"summary": summary})
+    module.CommandExecuteHandler("source").notify(types.SimpleNamespace(
+        command=types.SimpleNamespace(commandInputs=types.SimpleNamespace()), isValidResult=True))
+    assert scene.ui.messages == shown
