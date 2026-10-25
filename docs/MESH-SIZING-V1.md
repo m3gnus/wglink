@@ -125,7 +125,7 @@ silently consuming a new snapshot. If a new return is imported directly into
 an old WG and shows either diagnostic, update and restart Waveguide Generator,
 then Send again from Fusion. Do not strip mesh fields or required features.
 
-The release/pin owner handles the WGLink 0.3.2 bump, package pin, protocol
+The release/pin owner handles the WGLink 0.3.3 bump, package pin, protocol
 provenance, endpoint oracle updates and paired-package qualification; W1 does
 not change release numbers or WG's vendored files.
 

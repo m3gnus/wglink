@@ -43,7 +43,7 @@ def test_panel_commands_and_manifest_use_the_display_name():
     assert "audit" not in manifest["description"][""]
     assert "relink" not in manifest["description"][""]
     assert manifest["id"] == "0cdbb593-fc6c-4615-96b5-1f05a5e18d3a"
-    assert manifest["version"] == "0.3.2"
+    assert manifest["version"] == "0.3.3"
 
 
 def test_registration_command_and_attribute_ids_stay_compatible():

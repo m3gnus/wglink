@@ -50,7 +50,7 @@ Insert, Update, WG handoffs and return requests require advertised
 `fusionRequestDelivery >= 3` under capability schema 1. Send and Solve also
 require `solveCommandDelivery >= 4`. Test both the older-version refusal and
 Fusion-bound delivery with WG's request consumer off; product version strings are ignored.
-The Waveguide Generator add-in is version 0.3.2; WG's package pin must use the same `addinVersion`.
+The Waveguide Generator add-in is version 0.3.3; WG's package pin must use the same `addinVersion`.
 WG's R-2 test-loader and provenance
 changes are listed in the implementation guide's packaged-pair reference table.
 

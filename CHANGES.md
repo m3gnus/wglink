@@ -1,20 +1,46 @@
 # Changes
 
-## Unreleased
+## 0.3.3 — 2026-10-25
 
-- Send and Solve no longer end in a message box. A **request palette** docked
-  on the right follows the latest request: exporting, picked up, preparing,
-  waiting for the solver, solving with the frequency count, solved (with
-  **Show results in Waveguide Generator**), or what WG needs from you. It
-  opens by itself only when WG needs you; **Requests…** in the panel reopens
-  it. Technical details sit under its collapsed Diagnostics.
+- **Sources & Mesh…** now has fixed driver rows for HF, MF, LF and **Port
+  or passive opening**, wall size and named size zones. One face picker fills
+  the selected row; picking a face for another row moves it there. Colours
+  update live while picking. **Save** stores the settings in the Fusion
+  document without sending anything; **Cancel** restores the previous settings
+  and colours. Drivers from a linked WG design remain read-only.
+- A progress panel follows each **Send to WG** and **Solve in WG**, from
+  export through preparation and solving, including the frequency count.
+  **Requests…** reopens the panel and its history across documents and Fusion
+  restarts. Finished solves offer **Show results in Waveguide Generator**;
+  requests that need an answer offer the relevant action in WG.
 - Pressing Send or Solve again for an unchanged model while its request is
-  under way asks whether to send it again or show its progress; a changed
-  model, or the palette's **Send again**, sends at once. A request WG stops
-  reporting on says so calmly, with Open Waveguide Generator and Solve again.
-  A restarted add-in resumes following the request without sending it again.
-- The OK buttons read **Send** and **Solve**, and the commands say what each
-  does: Send opens the model in WG and does not solve.
+  under way asks whether to send it again or show its progress. A changed
+  model, or **Send again**, sends at once. Restarting Fusion resumes following
+  requests without sending them again, and damaged history can be recovered.
+- Send, Solve and Sources & Mesh… use preflight checks shared with WG.
+  Problems that must be fixed are separated from warnings and questions.
+  Open bodies ask for confirmation only when they were not already declared;
+  a Solve whose smallest possible mesh exceeds WG's limit offers a choice to
+  continue or open Sources & Mesh….
+- The triangle estimate follows WG's meshing rules and shows a range while
+  symmetry is uncertain, from a quarter model to the whole model. It accounts
+  for recorded cuts and measured symmetry, and shows the count WG last used
+  after a solve.
+- Dialogs and messages use calm, plain language and say what to do next.
+  Send and Solve no longer finish with a message box; technical diagnostics
+  stay in the log and the progress panel's folded **Diagnostics** section.
+- Saving, restoring and clearing source, mesh and FEM settings now use one
+  checked operation. Unreadable saved settings block Save, and a failed Save
+  restores settings and colours or explains when restoration needs attention.
+- The user guide has been rewritten around the current panel, with steps for
+  drivers, size zones, Send and Solve, request history, linked waveguides,
+  Fusion models, FEM regions and installation.
+- **Compatibility:** Send and Solve always use the newer request format and
+  require WG to advertise `solveCommandDelivery >= 4`; Solve no longer falls
+  back to the older format. Update WG first if needed. Sends and Solves left
+  in `.wglink-outbox` by an earlier session now stay queued until a compatible
+  WG starts; queued Sends are no longer removed, and queued Solves are no
+  longer converted to the old format.
 
 ## 0.3.2 — 2026-10-24
 
