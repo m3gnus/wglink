@@ -636,6 +636,19 @@ def test_preflight_accepts_the_only_visible_surface_body_as_the_exterior_shell(
     assert codes == ["open_body"]
 
 
+def test_preflight_never_asks_about_a_shell_wg_made(send_module, monkeypatch):
+    """A WG-managed waveguide surface is meant open: the classifier's verdict, not a question."""
+    shell = body("Shell", solid=False, faces=[face("HF")])
+    send_module.wglink_core._set_attribute(shell, "role", "waveguide")
+    app = _design_of(component("Speaker", [shell]), monkeypatch, send_module)
+
+    report = send_module.preflight_scope(app)
+
+    assert report["scope_error"] is None
+    assert report["open_bodies"] == [{"name": "Speaker/Shell", "declared": True}]
+    assert "open_body" not in [f["code"] for f in send_module.wglink_protocol.preflight_findings(report)]
+
+
 def test_one_visible_surface_and_one_hidden_solid_use_the_surface_as_the_exterior(
     send_module, monkeypatch
 ):

@@ -1370,6 +1370,7 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
         "groups_out_of_scope": [],
         "open_bodies": [],
         "triangles_least": None,
+        "symmetry": None,
     }
     fem_driven = False
     try:
@@ -1560,6 +1561,7 @@ def _preview_mesh(
     except (wglink_mesh.MeshSettingsError, wglink_core.WgLinkError):
         return  # Advisory: WG's own count still decides, and asks.
     report["triangles_least"] = int(estimate["triangles"])
+    report["symmetry"] = mesh["symmetry"]
 
 
 @wglink_activity.counted(wglink_activity.DOCUMENT_SIGNATURE)

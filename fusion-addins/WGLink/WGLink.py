@@ -2810,7 +2810,8 @@ def _sync_mesh_dialog(inputs, state):
             estimate_text += f". Limit {limit:,}. (approximate)"
             if count > wglink_protocol.DEFAULT_TRIANGLE_WARNING:
                 estimate_text = f'<font color="#b77900">{estimate_text}</font>'
-            ceiling = wglink_protocol.ceiling_finding(count)
+            ceiling = wglink_protocol.ceiling_finding(
+                count, symmetry=mesh["symmetry"], in_sources_and_mesh=True)
             if ceiling is not None:
                 warnings.append(wglink_protocol.finding_text(ceiling))
         except (wglink_mesh.MeshSettingsError, wglink_core.WgLinkError):

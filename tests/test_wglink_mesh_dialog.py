@@ -889,3 +889,17 @@ def test_a_fem_driven_model_saves_sources_and_mesh_without_a_source(scene):
     state.fem_driven = True
     assert module._sync_mesh_dialog(inputs, state)
     assert "no source" not in items["mesh_validation"].formattedText
+
+
+@pytest.mark.parametrize("symmetry", ["Automatic", "Off"])
+def test_the_ceiling_warning_fits_this_dialog_and_its_symmetry(scene, monkeypatch, symmetry):
+    module = scene.module
+    inputs, items, state = build(scene)
+    monkeypatch.setattr(module.wglink_mesh, "estimate_triangles", lambda *_a, **_kw: {
+        "triangles": 30000, "drawn_triangles": 30000})
+    inputs.choose("mesh_symmetry", symmetry)
+    assert module._sync_mesh_dialog(inputs, state)
+    warning = items["mesh_validation"].formattedText
+    assert "above the 22,000 limit" in warning
+    assert "Sources &amp; Mesh" not in warning and "Sources & Mesh" not in warning
+    assert ("symmetry" in warning) == (symmetry == "Automatic")

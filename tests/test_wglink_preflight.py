@@ -89,6 +89,20 @@ def test_the_ceiling_is_asked_only_for_a_solve_whose_most_reduced_count_is_over(
     assert protocol.preflight_findings({**over, "kind": "solve"}, limits={"solvedTriangles": 30000}) == []
 
 
+def test_the_ceiling_words_follow_symmetry_and_the_dialog_they_are_shown_in():
+    auto = protocol.ceiling_finding(30000)
+    assert auto["message"].startswith("Even if WG can use symmetry")
+    off = protocol.ceiling_finding(30000, symmetry="off")
+    assert off["message"].startswith("This model meshes to about 30,000")
+    assert "symmetry" not in protocol.finding_text(off)
+    inside = protocol.ceiling_finding(30000, in_sources_and_mesh=True)
+    assert "Sources & Mesh" not in protocol.finding_text(inside)
+    assert "Larger mesh sizes" in inside["remedy"]
+    [solve] = protocol.preflight_findings({"kind": "solve", "sources": [{"role": "HF", "face_count": 1}],
+                                           "triangles_least": 30000, "symmetry": "off"})
+    assert solve["message"] == off["message"] and "Sources & Mesh" in solve["remedy"]
+
+
 def test_a_scope_that_cannot_be_exported_is_the_only_finding():
     [finding] = protocol.preflight_findings({
         "scope_error": "Export refused for body 'helper'.",
