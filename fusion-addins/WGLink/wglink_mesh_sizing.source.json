@@ -1,0 +1,7 @@
+{
+  "commit": "b09819ca0545207b862da6d064a89b1f8dd57d99",
+  "note": "Vendored byte for byte from source commit b09819c.",
+  "path": "hornlab_mesher/mesh_sizing.py",
+  "repository": "https://github.com/m3gnus/hornlab-waveguide-mesher.git",
+  "sha256": "27495baedf54fdae55962b1f9a70c12420ad325a298de3d4189d50280171cb15"
+}

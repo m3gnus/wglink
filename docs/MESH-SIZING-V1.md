@@ -128,3 +128,33 @@ then Send again from Fusion. Do not strip mesh fields or required features.
 The release/pin owner handles the WGLink 0.3.2 bump, package pin, protocol
 provenance, endpoint oracle updates and paired-package qualification; W1 does
 not change release numbers or WG's vendored files.
+
+## Shared estimates and WG evidence
+
+The mesher owns sizing arithmetic. `wglink_mesh_sizing.py` is byte-for-byte
+`hornlab_mesher/mesh_sizing.py` at WG's mesher pin; its `.source.json` records
+the repository, revision, source path and SHA-256. Refresh both with WG's
+`scripts/vendor_wglink_mesh_sizing.py <mesher checkout> <WGLink checkout>`.
+Both repositories test parity. The adapter supplies `Region`s (sources, zones,
+curvature patches and rings evaluated with `graded_size_mm`) to
+`estimate_triangle_count`, and returns `full`, `half`, `quarter` drawn counts.
+`MESH_DEFAULTS.surface_deviation_mm` owns the imported chord-deviation default
+for both WG and the adapter; it is not an extra serialized mesh setting.
+
+WG advertises `meshLimits: {solvedTriangles, fullDomainWarning}` from its builder
+constants. Missing/invalid fields fall back to 22,000/18,000. The dialog shows
+a quarter-to-full range before WG supplies evidence; full counts at/below the
+limit are green, possible/definite excess is amber. The ceiling question is
+asked only if even the quarter is over. Off or a declared cut uses the entire
+drawn geometry once, with no extra reduction.
+
+On submission, `wglink_mesh_history` keeps a document identity, mesh-settings
+hash, body revisions/visibility, placements, parameters, selected scope and
+source/zone face membership with the estimate and request's manifest digest.
+On an explicit Sources & Mesh command it reads those requests' status files
+(`solved` or `needsYou(mesh_too_large)`) and learns their actual mesh. Only a
+matching document, settings and geometry uses that fraction and displays
+“Last WG mesh: …”; otherwise only the previous domain is described. No
+heartbeat surveys geometry or polls status for this feature. History is bounded
+to 50 records/30 days. Estimate/actual pairs are cached under `meshCalibration`
+in add-in diagnostics. A historical record cannot determine today's symmetry.

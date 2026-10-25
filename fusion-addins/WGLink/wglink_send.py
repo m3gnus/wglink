@@ -1407,6 +1407,7 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
             return report
         scope = {"included": []}
 
+    estimate_scope = scope
     if authoring_context is not None:
         # Authoring repairs paint even on a hidden/excluded body or before a
         # surface body is declared. Keep Send's scope refusal out of this edit
@@ -1490,8 +1491,6 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
         report["source_error"] = str(exc)
         sources = []
         fractions = {}
-    if authoring_context is None and report["source_error"] is None:
-        _preview_mesh(report, design, sources, included_bodies, source_face_keys)
     for source in sources:
         observed = source.get("observed", {})
         report["sources"].append({
@@ -1503,7 +1502,8 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
     if bool(opts.get("automatic_domain")):
         report["domain"] = {"kind": "automatic"}
         report["cut_provenance"] = read_cut_provenance(
-            design, included_pairs, walk["export_frame"], walk["geometry"]
+            design, [(item, body) for item, body in included_pairs if item in estimate_scope["included"]],
+            walk["export_frame"], walk["geometry"]
         )
     elif bool(opts.get("display_automatic_domain")):
         # An older WG still performs its established automatic cut from an
@@ -1518,6 +1518,11 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
         except wglink_core.WgLinkError as exc:
             # The preview's whole job is to say this before OK rather than after.
             report["domain_error"] = str(exc)
+    drawn = wglink_mesh.drawn_fraction(report.get("domain"), report["cut_provenance"], estimate_scope["included"])
+    if authoring_context is not None:
+        authoring_context["drawn_fraction"] = drawn
+    elif report["source_error"] is None:
+        _preview_mesh(report, design, sources, included_bodies, source_face_keys, declared_reduced=drawn < 1)
     bounds = None
     for body in measured_bodies:
         bounds = _merge_bounds(bounds, body)
@@ -1532,6 +1537,7 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
 def _preview_mesh(
     report: dict[str, Any], design: object, sources: list[dict[str, Any]],
     bodies: list[object], source_face_keys: set[tuple[str, object]],
+    *, declared_reduced: bool = False,
 ) -> None:
     """The mesh part of the preflight draft: the export's own snapshot, measured now.
 
@@ -1557,7 +1563,7 @@ def _preview_mesh(
             for body in bodies
             for face in wglink_core._items(getattr(body, "faces", None))
         )
-        estimate = wglink_mesh.least_solved_estimate(area, sources, mesh)
+        estimate = wglink_mesh.least_solved_estimate(area, sources, mesh, declared_reduced=declared_reduced)
     except (wglink_mesh.MeshSettingsError, wglink_core.WgLinkError):
         return  # Advisory: WG's own count still decides, and asks.
     report["triangles_least"] = int(estimate["triangles"])
@@ -3582,6 +3588,7 @@ def _surface_group_faces(design, entities, source_faces):
 def _mesh_snapshot(
     design: object, sources: list[dict[str, Any]], bodies: list[object],
     source_face_keys: set[tuple[str, object]], *, left_out: list[str] | None = None,
+    face_members: dict[str, list[object]] | None = None,
 ) -> dict[str, Any]:
     """Measure group paint in this scope; never reuse stale saved observations.
 
@@ -3617,6 +3624,8 @@ def _mesh_snapshot(
             left_out.append(str(group.get("name") or group_id))
     for group_id, group in groups.items():
         group["observed"] = _observed(faces_by_group[group_id], body_names)
+        if face_members is not None:
+            face_members["group:" + group_id] = faces_by_group[group_id]
     try:
         mesh = wglink_mesh.snapshot(sources, settings, surface_groups=list(groups.values()))
     except wglink_mesh.MeshSettingsError as exc:
@@ -3833,6 +3842,7 @@ def _sources(
     allow_empty: bool = False,
     source_face_keys: set[tuple[str, object]] | None = None,
     authoring_context: dict[str, Any] | None = None,
+    face_members: dict[str, list[object]] | None = None,
 ) -> list[dict[str, Any]]:
     """Every drivable source the return carries.
 
@@ -3869,6 +3879,8 @@ def _sources(
         if source_identity:
             source_id = stable_id
         source_aliases[source_id] = [stable_id, legacy_id]
+        if face_members is not None:
+            face_members["source:" + source_id] = faces
         if authoring_context is not None:
             authoring_context.setdefault("members", {})[source_id] = faces
         sources.append(
@@ -3924,6 +3936,8 @@ def _sources(
             except wglink_core.WgLinkError:
                 pass  # Old/unresolved paint remains authorable; never adopt here.
         source_aliases[source_id] = [alias for alias in (stable_id, legacy_id) if alias]
+        if face_members is not None:
+            face_members["source:" + source_id] = faces
         if authoring_context is not None:
             authoring_context.setdefault("members", {})[source_id] = faces
         sources.append(
@@ -4966,6 +4980,7 @@ def send(
         for record in records
     ]
     adopted_sources: list[tuple[str, bool]] = []
+    face_members: dict[str, list[object]] = {}
     source_face_keys: set[tuple[str, object]] = set()
     sources = _sources(
         records,
@@ -4984,9 +4999,10 @@ def send(
         adopted=adopted_sources,
         allow_empty=fem_driven,
         source_face_keys=source_face_keys,
+        face_members=face_members,
     )
     _refuse_ambiguous_fem_drivers(region_exports, sources)
-    mesh = _mesh_snapshot(design, sources, included_bodies, source_face_keys)
+    mesh = _mesh_snapshot(design, sources, included_bodies, source_face_keys, face_members=face_members)
     # After ``_sources``, deliberately: an adoption above has already written
     # its stamps, so the fingerprint is taken of the document as it now is
     # rather than of one that could not be fingerprinted at all.
@@ -5172,4 +5188,55 @@ def send(
         "save_source_identities": any(random for _role, random in adopted_sources),
         "files": manifest["files"],
         "manifest": manifest,
+        "mesh_evidence": mesh_evidence(design, included_bodies, sources, manifest.get("mesh"), face_members),
     }
+
+
+def mesh_geometry_key(design: object, scope_bodies: list[object],
+                      face_members: dict[str, list[object]] | None = None) -> object:
+    """Body revisions and placements, as in the send submission key.
+
+    Property reads only. Missing revisions disable learning, rather than
+    mistaking two unmeasurable models for the same geometry.
+    """
+    try:
+        root = design.rootComponent
+        components = [root]
+        occurrences, bodies, parameters = [], [], []
+        for occurrence in wglink_core._items(getattr(root, "allOccurrences", None)):
+            components.append(occurrence.component)
+            transform = getattr(occurrence, "transform2", None)
+            if transform is None:
+                transform = occurrence.transform
+            occurrences.append([str(occurrence.fullPathName), list(transform.asArray()),
+                                bool(occurrence.isLightBulbOn)])
+        for component in components:
+            for body in wglink_core._items(getattr(component, "bRepBodies", None)):
+                if not getattr(body, "revisionId", None) or not getattr(body, "entityToken", None):
+                    return None
+                bodies.append([str(body.entityToken), str(body.revisionId), bool(body.isVisible)])
+        for parameter in wglink_core._items(getattr(design, "allParameters", None)):
+            parameters.append([str(parameter.name), str(parameter.expression), repr(parameter.value)])
+        memberships = []
+        for key, faces in sorted((face_members or {}).items()):
+            tokens = [wglink_core._entity_token(face) for face in faces]
+            if not all(tokens):
+                return None
+            memberships.append([key, sorted(tokens)])
+        return [memberships, sorted(str(body.entityToken) for body in scope_bodies),
+                sorted(bodies), sorted(occurrences, key=str), sorted(parameters),
+                getattr(getattr(design, "timeline", None), "count", None)] if bodies else None
+    except Exception:  # noqa: BLE001 - advisory evidence must be known, never guessed
+        return None
+
+
+def mesh_evidence(design: object, bodies: list[object], sources: list, mesh: object,
+                  face_members: dict[str, list[object]]) -> dict | None:
+    if not isinstance(mesh, dict):
+        return None
+    try:
+        area = sum(_face_area(face) for body in bodies for face in wglink_core._items(body.faces))
+        return {"geometry": mesh_geometry_key(design, bodies, face_members),
+                "estimate": wglink_mesh.estimate_triangles(area, sources, mesh)}
+    except Exception:  # noqa: BLE001 - calibration never stops a submission
+        return None

@@ -13,8 +13,12 @@ from typing import Any, Mapping, Sequence
 
 if __package__:
     from . import wglink_protocol as protocol
+    from . import wglink_mesh_sizing as sizing
+    from . import wglink_mesh_history as history
 else:
     import wglink_protocol as protocol
+    import wglink_mesh_sizing as sizing
+    import wglink_mesh_history as history
 
 
 SETTINGS_ATTRIBUTE = "mesh_settings"
@@ -129,12 +133,13 @@ LEAST_SOLVED_FRACTION = 0.25
 
 def least_solved_estimate(
     total_area_mm2: float, sources: Sequence[Mapping[str, Any]], mesh: Mapping[str, Any],
+    *, declared_reduced: bool = False,
 ) -> dict[str, Any]:
     """The estimate for the least WG could solve: a quarter, or all of it with symmetry off.
 
-    The one estimate Sources & Mesh shows and Send/Solve's preflight checks.
+    Send/Solve preflight checks this lower end; Sources & Mesh shows the range.
     """
-    fraction = 1.0 if mesh.get("symmetry") == "off" else LEAST_SOLVED_FRACTION
+    fraction = 1.0 if mesh.get("symmetry") == "off" or declared_reduced else LEAST_SOLVED_FRACTION
     return estimate_triangles(total_area_mm2, sources, mesh, solved_fraction=fraction)
 
 
@@ -146,14 +151,15 @@ def estimate_triangles(
     solved_fraction: float = 1.0,
     source_perimeters_mm: Mapping[str, float] | None = None,
     curvature_regions: Sequence[Mapping[str, float]] | None = None,
-    surface_deviation_mm: float = 0.15,
+    surface_deviation_mm: float = protocol.MESH_DEFAULTS["surface_deviation_mm"],
 ) -> dict[str, Any]:
     """Approximate ``2.3 * sum(A / h²)``, including linear grading rings.
 
     Areas describe the geometry as drawn (already reduced models stay reduced).
     ``solved_fraction`` is an advisory symmetry fraction supplied by the caller,
     never a CAD symmetry verdict. Without one the estimate is for all drawn
-    geometry. ``off`` always uses all of it. Rings approximate a flat source
+    geometry. The result also includes ``full``, ``half`` and ``quarter`` counts.
+    ``off`` always uses all of it. Rings approximate a flat source
     neighbourhood, bounded by the remaining wall area; curves and overlapping
     neighbourhoods make WG's actual triangle count authoritative.
 
@@ -195,14 +201,65 @@ def estimate_triangles(
         for index in range(32):
             inner, outer = distance * index / 32, distance * (index + 1) / 32
             ring_area = perimeter * (outer - inner) + math.pi * (outer**2 - inner**2)
-            h = min(wall, size + (ceiling - size) * (inner + outer) / (2 * distance))
+            h = min(wall, sizing.graded_size_mm(
+                (inner + outer) / 2, size_min_mm=size, size_max_mm=ceiling, dist_max_mm=distance))
             rings.append((ring_area, h))
     ring_area = sum(area for area, _ in rings)
     scale = min(1.0, remaining / ring_area) if ring_area else 0.0
     regions.extend(source_regions)
     regions.extend((area * scale, size) for area, size in rings)
     regions.append((remaining - ring_area * scale, wall))
-    full = round(2.3 * sum(area / size**2 for area, size in regions))
+    full = sizing.estimate_triangle_count(sizing.Region(area, size) for area, size in regions)
     fraction = 1.0 if mesh["symmetry"] == "off" else solved_fraction
-    return {"triangles": round(full * fraction), "drawn_triangles": full,
+    return {"full": full, "half": round(full * .5), "quarter": round(full * .25),
+            "triangles": round(full * fraction), "drawn_triangles": full,
             "approximate": True, "curvature_aware": curvature_regions is not None}
+
+
+def estimate_display(estimate: Mapping[str, Any], *, symmetry: str = "auto",
+                     declared_reduced: bool = False, limits: Mapping[str, Any] | None = None,
+                     learned: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Words, colour and ceiling for the same counts every caller uses.
+
+    A learned fraction applies only to the same document, geometry and sizes.
+    Counts always describe the drawn geometry, including an already cut model.
+    """
+    limit = protocol.solved_triangle_limit(limits)
+    fraction = history.matching_fraction(learned)
+    single = symmetry == "off" or declared_reduced or fraction is not None
+    full = estimate["full"]
+    count = full if symmetry == "off" or declared_reduced else round(full * (fraction or 1.0))
+    if single:
+        text = f"About {count:,} triangles for the part {protocol.APP_NAME} solves."
+    else:
+        text = (f"About {estimate['quarter']:,} – {full:,} triangles for the part "
+                f"{protocol.APP_NAME} solves ({protocol.APP_NAME} decides whether it can use symmetry).")
+    least = full if symmetry == "off" or declared_reduced else estimate["quarter"]
+    ceiling = protocol.ceiling_finding(least, limits=limits,
+        symmetry="off" if symmetry == "off" or declared_reduced else "auto", in_sources_and_mesh=True)
+    colour = "green" if (count if single else full) <= limit else "amber"
+    if ceiling is None and not single and full > limit:
+        text += (f" This may exceed the limit if {protocol.APP_NAME} cannot use symmetry; "
+                 f"{protocol.APP_NAME} will ask before solving.")
+    warning = (limits or {}).get("fullDomainWarning", protocol.DEFAULT_TRIANGLE_WARNING)
+    if full > warning and full <= limit:
+        text += " A mesh this size may take longer to solve."
+    text += f" Limit {limit:,}."
+    previous = history.learned_text(learned)
+    if previous:
+        text += " " + previous
+    return {"text": text, "colour": colour, "ceiling": ceiling}
+
+
+def drawn_fraction(domain: Mapping[str, Any] | None, cuts: list, included: list) -> float:
+    """Declared reduction only: a cut must cover every included body.
+
+    This describes the geometry as drawn, never a prediction of WG symmetry.
+    """
+    domain = domain or {}
+    if domain.get('kind') in ('half', 'quarter'):
+        return .5 if domain['kind'] == 'half' else .25
+    ids = {row['object_id'] for row in included}
+    planes = {plane for plane in ('x0', 'y0') if ids and ids <=
+              {cut.get('body_object_id') for cut in cuts if cut.get('plane') == plane}}
+    return .5 ** len(planes)

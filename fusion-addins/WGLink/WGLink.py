@@ -961,7 +961,8 @@ def _sync_preflight(command_inputs: object, state: SendDialogState | None = None
             pass
         report = wglink_send.preflight_scope(_app(), options)
         findings = wglink_protocol.preflight_findings(
-            {**report, "kind": state.kind if state is not None else None}
+            {**report, "kind": state.kind if state is not None else None},
+            limits=wglink_inbox.wg_mesh_limits(wglink_workspace.ipc_folder()),
         )
         text = wglink_author.preflight_summary(report, findings).html()
     except (wglink_core.WgLinkError, wglink_author.AuthorError) as exc:
@@ -1382,6 +1383,7 @@ def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[s
     else:
         _begin_request(channel, request_id, DELIVERY)["outcome"] = "unconfirmed"
         report["delivery_unconfirmed"] = True
+    _remember_mesh_estimate(ipc, request_id, manifest, report)
     # Unconfirmed included: it is followed like any request, and says so.
     acknowledges = wglink_inbox.wg_acknowledges(ipc)
     current = _requests.current()
@@ -1403,6 +1405,21 @@ def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[s
         wglink_requests.withdraw(ipc, superseded)
     _arm_request_poll()
     return request_id
+
+
+def _remember_mesh_estimate(ipc, request_id, manifest_hash, report):
+    evidence = report.get("mesh_evidence")
+    manifest = report.get("manifest") or {}
+    if not evidence or not manifest.get("mesh"):
+        return
+    try:
+        assembly = manifest.get("assembly", {})
+        drawn = wglink_mesh.drawn_fraction(assembly.get("domain"), assembly.get("cut_provenance", []),
+                                          manifest["scope"]["included"])
+        wglink_mesh.history.remember(ipc, request_id, manifest_hash, _active_document_id(),
+            evidence["geometry"], manifest["mesh"], manifest["sources"], evidence["estimate"], drawn_fraction=drawn)
+    except Exception:  # noqa: BLE001 - diagnostics must not change delivery
+        _log("Could not record the mesh estimate for calibration.")
 
 
 def _start_pickup_timer(delay: float, job: object) -> None:
@@ -3054,7 +3071,8 @@ def _build_mesh_dialog(inputs, state):
         try:
             wglink_send._stamp_attributes(design)
             report = wglink_send.preflight_scope(
-                _app(), {"source_identity": _source_identity_enabled(), "display_automatic_domain": True},
+                _app(), {"source_identity": _source_identity_enabled(), "display_automatic_domain": True,
+                       "automatic_domain": _manifest_feature_enabled(wglink_inbox.AUTOMATIC_DOMAIN)},
                 authoring_context=state.context,
             )
         except wglink_send.SourceIdentityReadError as exc:
@@ -3182,28 +3200,31 @@ def _sync_mesh_dialog(inputs, state):
         if (source["size_mm"] is not None and wall is not None and math.isfinite(wall)
                 and 0 < wall < source["size_mm"] and math.isfinite(source["size_mm"])):
             warnings.append(f"Source {source['row_id']} ({source['role']}): {source['size_mm']:g} mm is coarser than the walls ({mesh['wall_size_mm']:g} mm); it will be meshed at {mesh['wall_size_mm']:g} mm.")
-    # The one estimate and ceiling Send/Solve's preflight uses (wglink_mesh,
-    # wglink_protocol.ceiling_finding); this dialog only words the count.
-    limit = wglink_protocol.solved_triangle_limit()
-    estimate_text = f"Approximate estimate is available when the settings are valid. Limit {limit:,}."
+    limits = wglink_inbox.wg_mesh_limits(wglink_workspace.ipc_folder())
+    limit = wglink_protocol.solved_triangle_limit(limits)
+    estimate_text = f"An estimate is available when the settings are valid. Limit {limit:,}."
     if not errors:
         try:
             measured, snapshot = _mesh_snapshot_values(sources, groups, mesh)
-            area = sum(wglink_send._face_area(face) for face in _mesh_faces(state.context.get("estimate_bodies", [])))
-            estimate = wglink_mesh.least_solved_estimate(area, measured, snapshot)
-            count, full = estimate["triangles"], estimate["drawn_triangles"]
-            estimate_text = f"≈ {count:,} triangles for the part WG solves"
-            if mesh["symmetry"] == "auto":
-                estimate_text += f" (assuming quarter symmetry; WG checks symmetry; up to {full:,} if none)"
-            estimate_text += f". Limit {limit:,}. (approximate)"
-            if count > wglink_protocol.DEFAULT_TRIANGLE_WARNING:
-                estimate_text = f'<font color="#b77900">{estimate_text}</font>'
-            ceiling = wglink_protocol.ceiling_finding(
-                count, symmetry=mesh["symmetry"], in_sources_and_mesh=True)
-            if ceiling is not None:
-                warnings.append(wglink_protocol.finding_text(ceiling))
-        except (wglink_mesh.MeshSettingsError, wglink_core.WgLinkError):
-            estimate_text = f"Approximate estimate unavailable for this geometry. Limit {limit:,}."
+            bodies = state.context.get("estimate_bodies", [])
+            area = sum(wglink_send._face_area(face) for face in _mesh_faces(bodies))
+            estimate = wglink_mesh.estimate_triangles(area, measured, snapshot)
+            memberships = {**{"source:" + row["id"]: row["faces"] for row in sources},
+                           **{"group:" + row["group_id"]: row["faces"] for row in groups}}
+            learned = None
+            try:
+                learned = wglink_mesh.history.learn(wglink_workspace.ipc_folder(), _active_document_id(),
+                    wglink_send.mesh_geometry_key(wglink_core._design(_app()), bodies, memberships), snapshot, measured)
+            except OSError:
+                _log("Could not update mesh calibration.")
+            display = wglink_mesh.estimate_display(estimate, symmetry=mesh["symmetry"], limits=limits,
+                declared_reduced=state.context.get("drawn_fraction", 1.0) < 1, learned=learned)
+            colour = "#b77900" if display["colour"] == "amber" else "#287a38"
+            estimate_text = f'<font color="{colour}">{html.escape(display["text"])}</font>'
+            if display["ceiling"] is not None:
+                warnings.append(wglink_protocol.finding_text(display["ceiling"]))
+        except (wglink_mesh.MeshSettingsError, wglink_core.WgLinkError, OSError):
+            estimate_text = f"An estimate is unavailable for this geometry. Limit {limit:,}."
     inputs.itemById("mesh_estimate").formattedText = estimate_text
     validation = inputs.itemById("mesh_validation")
     validation.formattedText = (("<b>Fix before saving:</b><br>" + "<br>".join(html.escape(error) for error in errors)) if errors else "")
@@ -4494,6 +4515,7 @@ def _publish_fusion_status(snapshot: dict[str, object] | None = None) -> bool:
     # records its configuration from the components rather than from notes.
     diagnostics["activation"] = dict(_activation)
     diagnostics["activity"] = dict(wglink_activity.LOG.as_payload())
+    diagnostics["meshCalibration"] = wglink_mesh.history.calibration_diagnostics()
     if _request_trace is not None:
         diagnostics["lastRequest"] = dict(_request_trace)
     if _recent_outcomes:

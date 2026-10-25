@@ -36,7 +36,7 @@ following.
   prompt?: {code, nextStep, options: [{id, label}], answerIn: "wg"},          // needsYou
   failure?: {recorded, message?, nextStep?},                // couldNotFinish
   cancelReason?: "stopped"|"replaced"|"dismissed",          // cancelled
-  result?: {jobId, runNumber, mesh?: {trianglesSolved, solvedFraction, domainKind}},  // solved
+  result?: {jobId, runNumber, mesh?: {trianglesSolved, solvedFraction, domainKind}},  // solved or needsYou(mesh_too_large)
   job?: {jobId, runNumber},                                 // the current job of the request
   notice?: "fullModel"|"cutModel"|"healed" }                // solved, calm one-liners
 ```
@@ -54,7 +54,9 @@ following.
 - `needsYou` is a real question or something only the user can do in WG; it is answered
   in WG's pop-up. `prompt.code` is a stable code for the add-in's own remedies:
   `mesh_too_large` also offers Sources & Mesh… in Fusion. `nextStep` is WG's own
-  sentence.
+  sentence. When meshing reached the triangle ceiling, `result.mesh` carries
+  the actual count and solved domain even though there is no published ingest
+  yet. Unknown domain evidence is omitted rather than inferred from the count.
 - `couldNotFinish` with `failure.recorded` is WG's own failure: WG has a developer
   record of it, and the user reads only the calm sentence from `request_status_text`
   (`could_not_prepare_text` is the one wording of the preparation case, in WG's own

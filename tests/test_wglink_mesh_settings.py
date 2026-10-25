@@ -489,7 +489,7 @@ G2_CASES = json.loads((FIXTURES / 'estimate-g2.json').read_text())['cases']
 
 @pytest.mark.parametrize('case', G2_CASES,
                          ids=lambda c: f"{c['fixture']}-{c['mode']}-groups-{c['groups']}")
-def test_estimate_within_forty_percent_of_g2(case):
+def test_estimate_within_twenty_five_percent_of_g2(case):
     # Geometry and counts from G2's own synthetic F1/F2 test helper, gmsh
     # 4.15.2. G2 uses face indices internally; the estimate consumes the same
     # measured areas with the producer's managed-paint selector spelling.
@@ -501,7 +501,7 @@ def test_estimate_within_forty_percent_of_g2(case):
                                            solved_fraction=case['solved_fraction'],
                                            curvature_regions=case['curvature_regions'])
     assert estimate['approximate'] is True
-    assert estimate['triangles'] == pytest.approx(case['triangles'], rel=.4)
+    assert estimate['triangles'] == pytest.approx(case['triangles'], rel=.25)
 
 
 def test_uniform_estimate_matches_mesher_formula_and_grading_adds_triangles():

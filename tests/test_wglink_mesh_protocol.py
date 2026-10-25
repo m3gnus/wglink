@@ -185,6 +185,7 @@ def test_builder_attaches_feature_detaches_mesh_and_preserves_suggestions(manife
 
 def test_defaults_and_presets_have_one_owner():
     assert protocol.MESH_DEFAULTS == {
+        'surface_deviation_mm': .15,
         'wall_size_mm': 25, 'grading_distance_mm': 100, 'symmetry': 'auto',
         'source_size_mm': {'HF': 6, 'MF': 15, 'LF': 25, 'PASSIVE_CARDIOID': 25},
     }

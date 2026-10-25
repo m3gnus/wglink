@@ -749,3 +749,16 @@ def write_solve_request_fields(
     path = solve_request_path(ipc_folder, payload["commandId"])
     path.parent.mkdir(parents=True, exist_ok=True)
     return _write_json_atomically(path, payload)
+
+
+def wg_mesh_limits(ipc_folder: Path | None) -> dict[str, int]:
+    """WG owns the limits; older or unreadable advertisements use protocol defaults."""
+    payload = _read_json(Path(ipc_folder) / CAPABILITIES_FILENAME) if ipc_folder is not None else None
+    valid = (isinstance(payload, Mapping) and type(payload.get("schemaVersion")) is int
+             and payload["schemaVersion"] == CAPABILITIES_SCHEMA_VERSION)
+    limits = payload.get("meshLimits") if valid else None
+    limits = limits if isinstance(limits, Mapping) else {}
+    warning = limits.get("fullDomainWarning")
+    return {"solvedTriangles": wglink_protocol.solved_triangle_limit(limits),
+            "fullDomainWarning": warning if type(warning) is int and warning > 0
+            else wglink_protocol.DEFAULT_TRIANGLE_WARNING}

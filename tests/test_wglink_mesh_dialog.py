@@ -333,21 +333,21 @@ def test_warnings_are_advisory_and_estimate_is_live_approximate_and_amber(scene,
     inputs, items, state = build(scene)
     module._mesh_select(items["mesh_source_role_1"], "LF")
     items["mesh_source_size_1"].value = 3
-    counts, calls = [18000, 18001, 22001], []
+    counts, calls = [22000, 24000, 88004], []
     def estimate(area, sources, mesh, **kwargs):
         calls.append((area, sources, mesh, kwargs))
         count = counts.pop(0)
-        return {"triangles": count, "drawn_triangles": count, "approximate": True}
+        return {"full": count, "half": round(count / 2), "quarter": round(count / 4)}
     monkeypatch.setattr(module.wglink_mesh, "estimate_triangles", estimate)
     for index in range(3):
         assert module._sync_mesh_dialog(inputs, state)
         assert ("#b77900" in items["mesh_estimate"].formattedText) == (index > 0)
-        assert "approximate" in items["mesh_estimate"].formattedText
+        assert "About" in items["mesh_estimate"].formattedText
         assert "Limit 22,000." in items["mesh_estimate"].formattedText
         assert "Source 1 (LF): 30 mm is coarser than the walls (25 mm); it will be meshed at 25 mm." in items["mesh_validation"].formattedText
     assert "above the 22,000 limit" in items["mesh_validation"].formattedText
     assert calls[0][0] == 120000
-    assert calls[0][3] == {"solved_fraction": 0.25}
+    assert calls[0][3] == {}
     assert calls[0][2]["source_size_mm"] == {"source-hf": 30}
 
 
@@ -713,19 +713,19 @@ def test_validation_names_rows_refuses_duplicate_names_and_separates_warnings(sc
 
 
 @pytest.mark.parametrize("count,full,amber,warning", [
-    (6000, 24000, False, False), (18000, 72000, False, False),
+    (5500, 22000, False, False), (6000, 24000, True, False), (18000, 72000, True, False),
     (18001, 72004, True, False), (22001, 88004, True, True),
 ])
-def test_estimate_thresholds_use_solved_part_and_do_not_repeat_full_count(scene, monkeypatch, count, full, amber, warning):
+def test_estimate_range_uses_full_for_colour_and_quarter_for_ceiling(scene, monkeypatch, count, full, amber, warning):
     module = scene.module
     inputs, items, state = build(scene)
     monkeypatch.setattr(module.wglink_mesh, "estimate_triangles", lambda *_a, **_kw: {
-        "triangles": count, "drawn_triangles": full})
+        "full": full, "half": round(full / 2), "quarter": count})
     assert module._sync_mesh_dialog(inputs, state)
     text = items["mesh_estimate"].formattedText
-    assert text.count(f"{full:,}") == 1
-    assert f"≈ {count:,} triangles for the part WG solves" in text
-    assert "assuming quarter symmetry" in text
+    assert text.count(f"{full:,}") == (2 if full == 22000 else 1)
+    assert f"About {count:,} – {full:,} triangles" in text
+    assert "decides whether it can use symmetry" in text
     assert ("#b77900" in text) == amber
     assert ("above the 22,000" in items["mesh_validation"].formattedText) == warning
     assert "mesh_summary" not in items
@@ -896,10 +896,53 @@ def test_the_ceiling_warning_fits_this_dialog_and_its_symmetry(scene, monkeypatc
     module = scene.module
     inputs, items, state = build(scene)
     monkeypatch.setattr(module.wglink_mesh, "estimate_triangles", lambda *_a, **_kw: {
-        "triangles": 30000, "drawn_triangles": 30000})
+        "full": 120000, "half": 60000, "quarter": 30000})
     inputs.choose("mesh_symmetry", symmetry)
     assert module._sync_mesh_dialog(inputs, state)
     warning = items["mesh_validation"].formattedText
     assert "above the 22,000 limit" in warning
     assert "Sources &amp; Mesh" not in warning and "Sources & Mesh" not in warning
     assert ("symmetry" in warning) == (symmetry == "Automatic")
+
+
+def test_mesh_dialog_learns_actual_count_and_invalidates_an_unsaved_face_swap(scene, monkeypatch, tmp_path):
+    from test_wglink_mesh_estimates import status
+    module = scene.module
+    scene.cabinet.revisionId = 'revision-1'
+    scene.cabinet.entityToken = 'cabinet'
+    monkeypatch.setattr(module, '_active_document_id', lambda: 'doc')
+    monkeypatch.setattr(module.wglink_workspace, 'ipc_folder', lambda **_kw: tmp_path)
+    inputs, items, state = build(scene)
+    sources, groups, mesh = module._mesh_dialog_values(inputs, state)
+    measured, snapshot = module._mesh_snapshot_values(sources, groups, mesh)
+    memberships = {'source:' + row['id']: row['faces'] for row in sources}
+    bodies = state.context['estimate_bodies']
+    evidence = module.wglink_send.mesh_evidence(scene.design, bodies, measured, snapshot, memberships)
+    module.wglink_mesh.history.remember(tmp_path, 'solve1', 'sha256:one', 'doc',
+        evidence['geometry'], snapshot, measured, evidence['estimate'])
+    status(tmp_path)
+    module._sync_mesh_dialog(inputs, state)
+    text = items['mesh_estimate'].formattedText
+    assert 'Last WG mesh: 19,812 triangles (quarter model)' in text and '–' not in text
+    # A new face selection is not painted until Save. Its BRep revision and
+    # source selector are unchanged; equal areas must still invalidate evidence.
+    scene.faces[1].area = scene.faces[0].area
+    items['mesh_source_faces_1']._entities = [scene.faces[1]]
+    module._sync_mesh_dialog(inputs, state)
+    text = items['mesh_estimate'].formattedText
+    assert '–' in text and 'Last WG mesh:' not in text
+    assert 'Last time Waveguide Generator used a quarter model.' in text
+    assert not module.wglink_protocol.user_text_violations(text)
+
+
+def test_history_io_is_advisory_and_advertised_limits_reach_the_dialog(scene, monkeypatch):
+    module = scene.module
+    inputs, items, state = build(scene)
+    monkeypatch.setattr(module.wglink_mesh.history, 'learn', lambda *_a, **_kw: (_ for _ in ()).throw(OSError('read only')))
+    monkeypatch.setattr(module.wglink_inbox, 'wg_mesh_limits', lambda *_a: {'solvedTriangles': 1, 'fullDomainWarning': 1})
+    assert module._sync_mesh_dialog(inputs, state)
+    text = items['mesh_estimate'].formattedText
+    assert 'About' in text and 'Limit 1.' in text
+    assert '#b77900' in text
+    assert 'above the 1 limit' in items['mesh_validation'].formattedText
+    assert not module.wglink_protocol.user_text_violations(text)
