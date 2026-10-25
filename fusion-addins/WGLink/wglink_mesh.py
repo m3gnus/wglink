@@ -122,6 +122,22 @@ def snapshot(
     return mesh
 
 
+#: The most reduced domain WG could plausibly solve (a quarter), which the
+#: ceiling question uses: asked only when even that is over the limit.
+LEAST_SOLVED_FRACTION = 0.25
+
+
+def least_solved_estimate(
+    total_area_mm2: float, sources: Sequence[Mapping[str, Any]], mesh: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The estimate for the least WG could solve: a quarter, or all of it with symmetry off.
+
+    The one estimate Sources & Mesh shows and Send/Solve's preflight checks.
+    """
+    fraction = 1.0 if mesh.get("symmetry") == "off" else LEAST_SOLVED_FRACTION
+    return estimate_triangles(total_area_mm2, sources, mesh, solved_fraction=fraction)
+
+
 def estimate_triangles(
     total_area_mm2: float,
     sources: Sequence[Mapping[str, Any]],

@@ -714,6 +714,18 @@ def test_s11_declared_or_managed_surface_includes_with_reason(candidate, phrase)
 
     assert plan.included[0]["body_kind"] == "surface"
     assert phrase in plan.included[0]["reason"]
+    # The verdict the preflight open_body rule reads: meant as an open shell.
+    expected = "managed" if candidate.wglink_managed else "declared"
+    assert plan.surface_basis == {plan.included[0]["object_id"]: expected}
+
+
+def test_the_only_visible_surface_is_taken_as_the_shell_without_intent():
+    plan = plan_export_scope("root", [{
+        "object_id": "shell", "name": "horn shell", "body_kind": "surface", "visible": True,
+        "component": "speaker", "external_reference": "none", "only_enclosing_exterior": True,
+    }])
+    assert plan.surface_basis == {"shell": "only_exterior"}
+    assert "surface_basis" not in plan.manifest_scope()
 
 
 def test_s12_two_unclassified_visible_surfaces_refuse_with_both_remedies():

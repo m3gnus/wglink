@@ -345,7 +345,7 @@ def test_warnings_are_advisory_and_estimate_is_live_approximate_and_amber(scene,
         assert "approximate" in items["mesh_estimate"].formattedText
         assert "Limit 22,000." in items["mesh_estimate"].formattedText
         assert "Source 1 (LF): 30 mm is coarser than the walls (25 mm); it will be meshed at 25 mm." in items["mesh_validation"].formattedText
-    assert "above the 22,000 triangle limit" in items["mesh_validation"].formattedText
+    assert "above the 22,000 limit" in items["mesh_validation"].formattedText
     assert calls[0][0] == 120000
     assert calls[0][3] == {"solved_fraction": 0.25}
     assert calls[0][2]["source_size_mm"] == {"source-hf": 30}

@@ -1386,8 +1386,11 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
         report["fem_region_error"] = str(exc)
     report["fem_driven"] = fem_driven
     _mark_solver_anchor(walk["candidates"], anchor)
+    surface_basis: dict[str, str] = {}
     try:
-        scope = plan_export_scope(walk["selection"], walk["candidates"]).manifest_scope()
+        scope_plan = plan_export_scope(walk["selection"], walk["candidates"])
+        surface_basis = dict(scope_plan.surface_basis)
+        scope = scope_plan.manifest_scope()
     except WgReturnError as exc:
         report["scope_error"] = str(exc)
         report["scope_reason_codes"] = list(dict.fromkeys(
@@ -1432,14 +1435,13 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
         for item, _body in included_pairs
     ]
     # Fusion's own verdict, read once per survey: a body that is not a closed
-    # solid exports as a surface body. One the user declared (Declare Body…)
-    # is meant as it is, and the open_body rule does not ask about it.
-    declarations = {
-        str(candidate.get("object_id")): candidate.get("declaration")
-        for candidate in walk["candidates"]
-    }
+    # solid exports as a surface body. The scope classifier says why it is in
+    # the export (``ScopePlan.surface_basis``): one the user declared, or a
+    # WG-made shell, is meant as it is, and the open_body rule asks only about
+    # the rest.
     report["open_bodies"] = [
-        {"name": summary["name"], "declared": bool(declarations.get(str(item.get("object_id"))))}
+        {"name": summary["name"],
+         "declared": surface_basis.get(str(item.get("object_id"))) in {"declared", "managed"}}
         for summary, (item, _body) in zip(report["included"], included_pairs)
         if summary["body_kind"] == "surface"
     ]
@@ -1554,9 +1556,7 @@ def _preview_mesh(
             for body in bodies
             for face in wglink_core._items(getattr(body, "faces", None))
         )
-        estimate = wglink_mesh.estimate_triangles(
-            area, sources, mesh, solved_fraction=1.0 if mesh["symmetry"] == "off" else 0.25
-        )
+        estimate = wglink_mesh.least_solved_estimate(area, sources, mesh)
     except (wglink_mesh.MeshSettingsError, wglink_core.WgLinkError):
         return  # Advisory: WG's own count still decides, and asks.
     report["triangles_least"] = int(estimate["triangles"])
@@ -3604,14 +3604,17 @@ def _mesh_snapshot(
             if _face_key(face) in source_face_keys:
                 raise wglink_core.WgLinkError("A face cannot be in both a source and a surface group.")
             faces_by_group[group_id].append(face)
-    for group_id, group in list(groups.items()):
-        faces = faces_by_group[group_id]
-        if not faces:
-            del groups[group_id]
-            if left_out is not None:
-                left_out.append(str(group.get("name") or group_id))
-            continue
-        group["observed"] = _observed(faces, body_names)
+    empty = [group_id for group_id in groups if not faces_by_group[group_id]]
+    elsewhere = _groups_painted_in_design(design, empty) if empty else set()
+    for group_id in empty:
+        group = groups.pop(group_id)
+        if group_id not in elsewhere:
+            # No faces anywhere: the group's paint is gone, which the user fixes.
+            raise wglink_core.WgLinkError(f"Surface group {group['name']!r} has no faces in this export. Open Sources & Mesh… and select its faces again.")
+        if left_out is not None:
+            left_out.append(str(group.get("name") or group_id))
+    for group_id, group in groups.items():
+        group["observed"] = _observed(faces_by_group[group_id], body_names)
     try:
         mesh = wglink_mesh.snapshot(sources, settings, surface_groups=list(groups.values()))
     except wglink_mesh.MeshSettingsError as exc:
@@ -3619,6 +3622,26 @@ def _mesh_snapshot(
     for source in sources:
         source["suggested_resolution_mm"] = mesh["source_size_mm"][source["id"]]
     return mesh
+
+
+def _groups_painted_in_design(design: object, group_ids: list[str]) -> set[str]:
+    """Which of these surface groups have painted faces anywhere in the design.
+
+    Read through the root scope walk, the one enumeration of the design's
+    bodies (hidden ones included), only when a group has no faces in the
+    exported scope: then it was painted outside the selected subtree.
+    """
+
+    wanted = {f"WGMESH_{group_id}": group_id for group_id in group_ids}
+    found: set[str] = set()
+    for body in _scope_walk(design, "root")["bodies"].values():
+        for face in wglink_core._items(getattr(body, "faces", None)):
+            group_id = wanted.get(wglink_core._appearance_name(face) or "")
+            if group_id is not None:
+                found.add(group_id)
+                if len(found) == len(wanted):
+                    return found
+    return found
 
 
 #: How far from perpendicular a throat axis may sit to its own throat plane

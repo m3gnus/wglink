@@ -251,13 +251,15 @@ vendors byte for byte). Each finding is one of three kinds:
   driver is a FEM region's moving surface needs no source, in Sources & Mesh…
   and in Send alike.
 - **Asked on OK.** One pop-up lists them. A body that is not a closed solid
-  offers **Send anyway**, unless you classified it with Declare Body…. A Solve whose approximate count is over the solved
+  offers **Send anyway**, unless you declared it with Declare Body… or it is a
+  shell WG made. A Solve whose approximate count is over the solved
   triangle limit even for the smallest domain WG could use offers **Solve
   anyway** or **Change mesh resolution**, which opens Sources & Mesh…. Solve
   anyway travels with the request, so WG does not ask again; a WG that does
   not read it asks as before.
-- **Noted.** A saved surface group with no faces in the selected subtree is
-  left out of that export.
+- **Noted.** A saved surface group painted only outside the selected subtree is
+  left out of that export. A group with no painted faces anywhere is a fix-first
+  finding: select its faces again in Sources & Mesh….
 
 ### Source identity
 

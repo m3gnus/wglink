@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime
 import json
 from typing import Any
@@ -148,6 +148,12 @@ class ScopePlan:
     fem_air_volumes: tuple[dict[str, Any], ...]
     refusals: tuple[dict[str, Any], ...]
     status: str
+    #: Why each included surface body (not a closed solid) is in the export,
+    #: by object id: ``declared`` (Declare Body… → Exterior shell), ``managed``
+    #: (a WG-made waveguide or enclosure shell) or ``only_exterior`` (the only
+    #: visible body, taken as the shell). Never written to the manifest; the
+    #: preflight ``open_body`` rule asks only about ``only_exterior``.
+    surface_basis: Mapping[str, str] = field(default_factory=dict)
 
     def manifest_scope(self) -> dict[str, Any]:
         """Return the schema object, refusing if any terminal rule failed."""
@@ -328,6 +334,7 @@ def plan_export_scope(
     skipped: list[tuple[dict[str, Any], Mapping[str, Any]]] = []
     fem_air_volumes: list[dict[str, Any]] = []
     refusals: list[dict[str, Any]] = []
+    surface_basis: dict[str, str] = {}
     degraded = False
     construction: dict[str, Any] | None = None
     body_role_declared = any(
@@ -619,6 +626,9 @@ def plan_export_scope(
             and candidate.get("visible") is True
             and (declared_shell or managed_shell)
         ):
+            surface_basis[str(_scope_identity(candidate, index).get("object_id"))] = (
+                "declared" if declared_shell else "managed"
+            )
             included.append(
                 _included_record(
                     candidate,
@@ -644,6 +654,7 @@ def plan_export_scope(
                 candidate.get("only_enclosing_exterior") is True
                 and not body_role_declared
             ):
+                surface_basis[str(_scope_identity(candidate, index).get("object_id"))] = "only_exterior"
                 included.append(
                     _included_record(
                         candidate,
@@ -722,6 +733,7 @@ def plan_export_scope(
         fem_air_volumes=tuple(fem_air_volumes),
         refusals=tuple(refusals),
         status="degraded" if degraded else "clean",
+        surface_basis=surface_basis,
     )
 
 

@@ -435,22 +435,35 @@ def test_group_unique_or_explicit_all_instances_paints_measures_and_clears(monke
     assert back.override is None and not back.attributes.values
 
 
-def test_a_saved_group_with_no_faces_in_scope_is_left_out_and_noted(monkeypatch, send_module):
-    """A group painted outside the selected subtree is not an error (group_out_of_scope)."""
+def test_a_group_painted_only_outside_the_scope_is_left_out_and_noted(monkeypatch, send_module):
+    """Painted outside the selected subtree: a note (group_out_of_scope), not an error."""
     app, design, exterior, _, back = document(monkeypatch, send_module)
+    back.appearance = types.SimpleNamespace(name='WGMESH_back', id='WGMESH_back')
     send_module.save_mesh_settings(design, fixture_mesh())
     left_out = []
     sources = send_module._sources([], [exterior])
-    snapshot = send_module._mesh_snapshot(design, sources, [exterior], set(), left_out=left_out)
+    # The exported scope holds none of its faces; the design does.
+    snapshot = send_module._mesh_snapshot(design, sources, [], set(), left_out=left_out)
     assert snapshot['surface_groups'] == []
     assert left_out == [fixture_mesh()['surface_groups'][0]['name']]
-    report = send_module.preflight_scope(app)
-    assert report['groups_out_of_scope'] == left_out
-    findings = send_module.wglink_protocol.preflight_findings(report)
+    findings = send_module.wglink_protocol.preflight_findings(
+        {'sources': [{'role': 'HF', 'face_count': 1}], 'groups_out_of_scope': left_out})
     assert [(f['code'], f['severity']) for f in findings] == [('group_out_of_scope', 'note')]
 
 
-@pytest.mark.parametrize('kind', ['unknown', 'linked-source'])
+def test_a_group_with_no_faces_anywhere_blocks_on_every_path(monkeypatch, tmp_path, send_module):
+    """Its paint is gone: the preview blocks, and send and the fingerprint refuse."""
+    app, design, exterior, _, back = document(monkeypatch, send_module)
+    send_module.save_mesh_settings(design, fixture_mesh())
+    report = send_module.preflight_scope(app)
+    assert 'select its faces again' in report['mesh_error']
+    assert report['groups_out_of_scope'] == []
+    codes = [f['code'] for f in send_module.wglink_protocol.preflight_findings(report)]
+    assert codes == ['mesh_settings_invalid']
+    assert 'select its faces again' in send_module.return_state(app, {})['reason']
+
+
+@pytest.mark.parametrize('kind', ['empty', 'unknown', 'linked-source'])
 def test_group_errors_refuse_before_step_export(monkeypatch, tmp_path, send_module, kind):
     app, design, exterior, _, back = document(monkeypatch, send_module)
     settings = fixture_mesh()

@@ -2794,25 +2794,27 @@ def _sync_mesh_dialog(inputs, state):
         if (source["size_mm"] is not None and wall is not None and math.isfinite(wall)
                 and 0 < wall < source["size_mm"] and math.isfinite(source["size_mm"])):
             warnings.append(f"Source {source['row_id']} ({source['role']}): {source['size_mm']:g} mm is coarser than the walls ({mesh['wall_size_mm']:g} mm); it will be meshed at {mesh['wall_size_mm']:g} mm.")
-    estimate_text = "Approximate estimate is available when the settings are valid. Limit 22,000."
+    # The one estimate and ceiling Send/Solve's preflight uses (wglink_mesh,
+    # wglink_protocol.ceiling_finding); this dialog only words the count.
+    limit = wglink_protocol.solved_triangle_limit()
+    estimate_text = f"Approximate estimate is available when the settings are valid. Limit {limit:,}."
     if not errors:
         try:
             measured, snapshot = _mesh_snapshot_values(sources, groups, mesh)
             area = sum(wglink_send._face_area(face) for face in _mesh_faces(state.context.get("estimate_bodies", [])))
-            estimate = wglink_mesh.estimate_triangles(
-                area, measured, snapshot, solved_fraction=0.25 if mesh["symmetry"] == "auto" else 1.0
-            )
+            estimate = wglink_mesh.least_solved_estimate(area, measured, snapshot)
             count, full = estimate["triangles"], estimate["drawn_triangles"]
             estimate_text = f"≈ {count:,} triangles for the part WG solves"
             if mesh["symmetry"] == "auto":
                 estimate_text += f" (assuming quarter symmetry; WG checks symmetry; up to {full:,} if none)"
-            estimate_text += ". Limit 22,000. (approximate)"
-            if count > 18000:
+            estimate_text += f". Limit {limit:,}. (approximate)"
+            if count > wglink_protocol.DEFAULT_TRIANGLE_WARNING:
                 estimate_text = f'<font color="#b77900">{estimate_text}</font>'
-            if count > 22000:
-                warnings.append("The approximate estimate for the part WG solves is above the 22,000 triangle limit. Larger sizes give fewer triangles.")
+            ceiling = wglink_protocol.ceiling_finding(count)
+            if ceiling is not None:
+                warnings.append(wglink_protocol.finding_text(ceiling))
         except (wglink_mesh.MeshSettingsError, wglink_core.WgLinkError):
-            estimate_text = "Approximate estimate unavailable for this geometry. Limit 22,000."
+            estimate_text = f"Approximate estimate unavailable for this geometry. Limit {limit:,}."
     inputs.itemById("mesh_estimate").formattedText = estimate_text
     validation = inputs.itemById("mesh_validation")
     validation.formattedText = (("<b>Fix before saving:</b><br>" + "<br>".join(html.escape(error) for error in errors)) if errors else "")
