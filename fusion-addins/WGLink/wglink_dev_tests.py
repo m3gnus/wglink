@@ -331,7 +331,11 @@ def _text(inputs: Any, input_id: str) -> str | None:
 
 
 def sources_mesh_baseline(context: Any) -> Callable[[Run], Iterator[None]]:
-    """Today's Sources & Mesh… on a scratch box: Add Source, pick the top face, Save, reopen.
+    """Sources & Mesh… on a scratch box, driven through its own handlers.
+
+    Pick the top face for HF and Save (it must carry the HF appearance), reopen
+    and see it picked, add a size zone, move a face between rows and back,
+    Save again and check both appearances.
 
     Runs in a new unsaved design and closes it without saving, so the user's
     own document is never edited; its state is compared before and after.
@@ -384,50 +388,88 @@ def sources_mesh_baseline(context: Any) -> Callable[[Run], Iterator[None]]:
                 return entry
 
             record("scratch box")
+            dialog_module = wglink["wglink_mesh_dialog"]
+            side = max((f for f in _items(body.faces) if f != face), key=lambda f: float(f.pointOnFace.x))
+
+            def driver_row(state, role):
+                return next(row for row, record_ in state.sources.items()
+                            if record_["role"] == role and not record_.get("instance_id"))
+
+            def faces_in(state, kind, row):
+                return list((state.sources if kind == "source" else state.groups)[row]["faces"])
+
+            def click(handler, inputs, input_id):
+                notify_changed(handler, inputs.itemById(input_id))
+
+            def pick(handler, inputs, *entities):
+                picker = inputs.itemById(dialog_module.PICKER)
+                picker.hasFocus = True
+                for entity in entities:
+                    run.check("Fusion accepted a scripted pick", bool(picker.addSelection(entity)))
+                notify_changed(handler, picker)
+
+            def save(state) -> Iterator[None]:
+                state.command.doExecute(True)
+                for _ in range(10):
+                    yield
+                    if ui.activeCommand != source_id:
+                        return
+                raise ScenarioFailed("Save (doExecute) did not close Sources & Mesh…")
+
+            # 1. The baseline: pick the top face for HF and Save; it must turn the HF colour.
             yield from open_dialog("first")
             handler, state = latest_dialog_state(context, "MeshInputChangedHandler")
             inputs = state.command.commandInputs
-            record("opened", inputs, sources=len(state.sources))
-            notify_changed(handler, inputs.itemById("mesh_add_source"))
-            row = max(state.sources)
-            picker = inputs.itemById(f"mesh_source_faces_{row}")
-            run.check("new source row is HF",
-                      inputs.itemById(f"mesh_source_role_{row}").selectedItem.name == "HF")
-            picker.hasFocus = True
-            run.check("Fusion accepted the pick", bool(picker.addSelection(face)))
-            notify_changed(handler, picker)
+            hf = driver_row(state, "HF")
+            record("opened", inputs, target=list(state.target))
+            run.check("the picker starts on the HF row", state.target == ("source", hf))
+            pick(handler, inputs, face)
             yield
-            step = record("HF face picked", inputs, selectionCount=picker.selectionCount)
-            run.check("picker holds the face", step["selectionCount"] == 1)
-
-            state.command.doExecute(True)
-            for _ in range(10):
-                yield
-                if ui.activeCommand != source_id:
-                    break
-            else:
-                raise ScenarioFailed("Save (doExecute) did not close Sources & Mesh…")
+            step = record("HF face picked", inputs, hfFaces=len(faces_in(state, "source", hf)))
+            run.check("HF row holds the face", step["hfFaces"] == 1)
+            yield from save(state)
             yield
             step = record("saved")
             run.check("face carries the HF appearance after Save", step["faceAppearance"] == role_name,
                       step["faceAppearance"])
-            run.check("Save reported success", any("Saved" in text for _title, text in messages), messages)
+            run.check("no message box after Save", not messages, messages)
 
+            # 2. Reopen: the HF row holds the face and the picker shows it.
             yield from open_dialog("reopen")
             handler, state = latest_dialog_state(context, "MeshInputChangedHandler")
             inputs = state.command.commandInputs
-            rows = {row_id: record_["role"] for row_id, record_ in state.sources.items()}
-            hf_rows = [row_id for row_id, role in rows.items()
-                       if wglink["wglink_author"].resolve_source_choice(role) == "HF"]
-            picker = inputs.itemById(f"mesh_source_faces_{hf_rows[0]}") if hf_rows else None
-            picked = []
-            if picker is not None:
-                picked = [picker.selection(i).entity for i in range(picker.selectionCount)]
+            hf = driver_row(state, "HF")
+            picker = inputs.itemById(dialog_module.PICKER)
+            shown = [picker.selection(i).entity for i in range(picker.selectionCount)]
             yield
-            step = record("reopened", inputs, sources=rows, selectionCount=len(picked))
-            run.check("reopened dialog has the HF source", bool(hf_rows), rows)
-            run.check("reopened HF picker shows the saved face",
-                      len(picked) == 1 and picked[0] == face, len(picked))
+            step = record("reopened", inputs, target=list(state.target), selectionCount=len(shown))
+            run.check("reopened HF row holds the saved face", faces_in(state, "source", hf) == [face])
+            run.check("reopened picker shows the HF face", len(shown) == 1 and shown[0] == face, len(shown))
+
+            # 3. A size zone; a face picked for another row moves, and says so.
+            click(handler, inputs, "mesh_add_group_Coarse")
+            zone = next(reversed(state.groups))
+            run.check("a new zone becomes the target", state.target == ("group", zone))
+            pick(handler, inputs, side, face)
+            yield
+            step = record("zone picks", inputs, notice=state.notice,
+                          zoneFaces=len(faces_in(state, "group", zone)), hfFaces=len(faces_in(state, "source", hf)))
+            run.check("the HF face moved into the zone", (step["zoneFaces"], step["hfFaces"]) == (2, 0), step)
+            run.check("the move is announced", "Moved 1 face from HF" in state.notice, state.notice)
+            click(handler, inputs, f"mesh_pick_source_{hf}")
+            pick(handler, inputs, face)
+            yield
+            step = record("HF face moved back", inputs, notice=state.notice,
+                          zoneFaces=len(faces_in(state, "group", zone)), hfFaces=len(faces_in(state, "source", hf)))
+            run.check("the face moved back to HF", (step["zoneFaces"], step["hfFaces"]) == (1, 1), step)
+            group_name = wglink["wglink_author"].group_appearance_name(state.groups[zone]["group_id"])
+            yield from save(state)
+            yield
+            step = record("saved with a zone", sideAppearance=_appearance(side))
+            run.check("HF face still carries the HF appearance", step["faceAppearance"] == role_name)
+            run.check("zone face carries its zone appearance", step["sideAppearance"] == group_name,
+                      step["sideAppearance"])
+            run.check("still no message box", not messages, messages)
             ui.terminateActiveCommand()
             yield
         finally:

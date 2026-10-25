@@ -47,6 +47,20 @@ class AuthorError(Exception):
 
 SOURCE_ROLES = wglink_protocol.SOURCE_ROLES
 DEFAULT_SOURCE_ROLE = "HF"
+# What a person reads for each role id; the ids themselves never change.
+SOURCE_ROLE_LABELS = {
+    "HF": "HF – high-frequency driver",
+    "MF": "MF – mid-frequency driver",
+    "LF": "LF – low-frequency driver",
+    "PASSIVE_CARDIOID": "Port or passive opening",
+}
+
+
+def source_role_label(role: object) -> str:
+    """The display label of a role id (legacy spellings included)."""
+
+    canonical = wglink_protocol.LEGACY_SOURCE_ROLE_ALIASES.get(str(role), str(role))
+    return SOURCE_ROLE_LABELS.get(canonical, str(role))
 CLEAR_SOURCE_LABEL = "Clear WG source"
 
 # ``PORT_EXIT`` was the original name for the passive-cardioid port role.

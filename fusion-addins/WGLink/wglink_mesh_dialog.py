@@ -37,6 +37,8 @@ MESH_DIALOG_TITLE = "Sources & Mesh — Waveguide Generator"
 
 
 class MeshDialogState:
+    """The dialog's truth. Rows hold their faces; the one picker only shows the target's."""
+
     def __init__(self):
         self.construction_failed = False
         self.sources = {}
@@ -50,6 +52,18 @@ class MeshDialogState:
         # A FEM region with a moving surface drives the model without a source.
         self.fem_driven = False
         self.activated = False
+        # ("source" | "group", row_id) whose faces the picker shows and edits.
+        self.target = None
+        # Zone row ids in table order, for deleting a table row.
+        self.group_order = []
+        self.notice = ""
+        # Read-only texts as last set, so an unchanged text is not set again.
+        self.shown = {}
+
+
+PICKER = "mesh_faces"
+DRIVERS_TABLE = "mesh_sources_table"
+ZONES_TABLE = "mesh_groups_table"
 
 
 def _mesh_faces(entities):
@@ -58,10 +72,6 @@ def _mesh_faces(entities):
         for face in wglink_core._items(entity.faces, strict=True) if hasattr(entity, "faces") else [entity]:
             faces.setdefault(wglink_send._face_key(face), face)
     return list(faces.values())
-
-
-def _mesh_members(inputs, prefix, row_id):
-    return _mesh_faces(host._selected_entities(inputs, f"mesh_{prefix}_faces_{row_id}"))
 
 
 def _mesh_dropdown(inputs, input_id, name, choices, selected):
@@ -73,84 +83,198 @@ def _mesh_dropdown(inputs, input_id, name, choices, selected):
     return dropdown
 
 
-def _mesh_select(dropdown, label):
-    for index in range(dropdown.listItems.count):
-        item = dropdown.listItems.item(index)
-        if item.name == label:
-            if not item.isSelected:
-                item.isSelected = True  # Fusion deselects the previous item.
-            return
-
-
-def _mesh_button(inputs, input_id, name):
+def _mesh_button(inputs, input_id, name, *, full_width=True):
     button = inputs.addBoolValueInput(input_id, name, False, "", False)
-    button.isFullWidth = True
+    button.text = name
+    button.isFullWidth = full_width
     return button
 
 
+def _rows(state, kind):
+    return state.sources if kind == "source" else state.groups
+
+
+def _row_label(kind, record):
+    if kind == "group":
+        return f"Zone '{record.get('name') or 'unnamed'}'"
+    label = wglink_author.source_role_label(record["role"])
+    return f"{label} (from the WG design)" if record.get("instance_id") else label
+
+
+def _count_text(kind, record, target):
+    faces = len(record["faces"])
+    text = _face_count_text(faces) if faces else ("not used" if kind == "source" else "no faces")
+    return f"<b>{text} ◀</b>" if target else html.escape(text)
+
+
 def _add_mesh_row(inputs, state, kind, record=None, faces=()):
+    """One table row: label or name, mesh size, face count, Pick faces (and ✕ for a zone)."""
+
     record = dict(record or {})
     row_id = state.next_id
     state.next_id += 1
     is_source = kind == "source"
-    rows = state.sources if is_source else state.groups
     linked = bool(record.get("instance_id")) if is_source else False
-    rows[row_id] = {**record, "row_id": row_id, "original_faces": list(faces)}
-    parent = inputs.itemById("mesh_sources" if is_source else "mesh_groups").children
-    role = wglink_author.resolve_source_choice(record.get("role", "HF")) if is_source else None
-    title = f"Source {row_id}" if is_source else f"Surface group {row_id}"
-    group = parent.addGroupCommandInput(f"mesh_{kind}_{row_id}", title)
-    group.isExpanded = True
-    children = group.children
+    rows = _rows(state, kind)
+    rows[row_id] = {**record, "row_id": row_id, "original_faces": list(faces), "faces": list(faces)}
+    table = inputs.itemById(DRIVERS_TABLE if is_source else ZONES_TABLE)
+    cells = table.commandInputs
+    index = table.rowCount
     if is_source:
-        dropdown = _mesh_dropdown(children, f"mesh_source_role_{row_id}", "Role",
-                                  wglink_author.SOURCE_ROLES, role)
-        dropdown.isEnabled = not linked
-        if linked:
-            children.addTextBoxCommandInput(f"mesh_linked_{row_id}", "",
-                                           "from the linked WG design", 1, True)
+        role = wglink_author.resolve_source_choice(record.get("role", "HF"))
+        rows[row_id]["role"] = role
+        name = cells.addTextBoxCommandInput(f"mesh_source_label_{row_id}", "",
+                                            html.escape(_row_label(kind, rows[row_id])), 1, True)
         size = record.get("size_mm", wglink_protocol.default_source_size_mm(role))
     else:
-        children.addStringValueInput(f"mesh_group_name_{row_id}", "Name", record.get("name", ""))
+        name = cells.addStringValueInput(f"mesh_group_name_{row_id}", "", record.get("name", ""))
         size = record.get("size_mm", wglink_protocol.MESH_PRESETS["Fine"])
-        preset = next((f"{name} {value:g} mm" for name, value in wglink_protocol.MESH_PRESETS.items()
-                       if value == size), "Custom")
-        _mesh_dropdown(children, f"mesh_group_preset_{row_id}", "Preset",
-                       [*(f"{name} {value:g} mm" for name, value in wglink_protocol.MESH_PRESETS.items()), "Custom"], preset)
         rows[row_id].setdefault("group_id", uuid.uuid4().hex)
-    selection = children.addSelectionInput(
-        f"mesh_{kind}_faces_{row_id}", "Faces" if is_source else "Faces or bodies",
-        "Select the faces that drive this source." if is_source else "Select faces or bodies for this surface group.",
-    )
-    host._add_selection_filters(selection, *(('Faces',) if is_source else ('Faces', 'SolidBodies', 'SurfaceBodies')))
-    selection.setSelectionLimits(0, 0)
-    if linked:
-        # Fusion does not disable selection inputs with isEnabled. Keep linked
-        # membership in the record and show a read-only face count instead.
-        selection.isVisible = False
-        children.addTextBoxCommandInput(f"mesh_linked_faces_{row_id}", "Faces", str(len(faces)), 1, True)
-    elif state.activated:
-        _restore_mesh_selections(selection, rows[row_id])
-        selection.hasFocus = True
-    value = children.addValueInput(f"mesh_{kind}_size_{row_id}", "Mesh size", "mm", host._mm_input(size))
+        state.group_order.append(row_id)
+    value = cells.addValueInput(f"mesh_{kind}_size_{row_id}", "", "mm", host._mm_input(size))
     value.isEnabled = not linked
+    value.tooltip = ("Mesh size on this driver's faces. Smaller is more accurate but slower."
+                     if is_source else "Mesh size on this zone's faces.")
+    count = cells.addTextBoxCommandInput(f"mesh_{kind}_count_{row_id}", "", "", 1, True)
+    row_inputs = [name, value, count]
     if not linked:
-        _mesh_button(children, f"mesh_remove_{kind}_{row_id}", "Remove")
+        # Linked membership comes from WG; there is nothing to pick here.
+        row_inputs.append(_mesh_button(cells, f"mesh_pick_{kind}_{row_id}", "Pick faces", full_width=False))
+    if not is_source:
+        remove = _mesh_button(cells, f"mesh_remove_group_{row_id}", "✕", full_width=False)
+        remove.tooltip = "Remove this zone. Its faces go back to the wall size."
+        row_inputs.append(remove)
+    for column, item in enumerate(row_inputs):
+        table.addCommandInput(item, index, column)
     return row_id
 
 
-def _restore_mesh_selections(selection, record):
-    # Stable API: discard preselection once on activate, then restore saved faces.
-    selection.clearSelection()
-    missing = []
-    for face in record["original_faces"]:
-        try:
-            selected = selection.addSelection(face)
-        except Exception:
-            selected = False
-        if not selected:
-            missing.append(wglink_send._face_key(face))
-    record["unselected_saved_faces"] = set(missing)
+def _next_zone_name(state, preset):
+    names = {str(record.get("name", "")).casefold() for record in state.groups.values()}
+    serial = 1
+    while f"{preset} zone {serial}".casefold() in names:
+        serial += 1
+    return f"{preset} zone {serial}"
+
+
+def _set_target(inputs, state, kind, row_id):
+    """Point the one picker at a row: clear it, load that row's faces, focus it."""
+
+    state.target = (kind, row_id)
+    record = _rows(state, kind)[row_id]
+    picker = inputs.itemById(PICKER)
+    restoring, state.restoring = state.restoring, True
+    try:
+        picker.clearSelection()
+        for face in record["faces"]:
+            picker.addSelection(face)
+        for table_id, table_kind in ((DRIVERS_TABLE, "source"), (ZONES_TABLE, "group")):
+            table = inputs.itemById(table_id)
+            if table_kind != kind:
+                table.selectedRow = -1
+            elif kind == "group":
+                table.selectedRow = state.group_order.index(row_id)
+            else:
+                table.selectedRow = list(state.sources).index(row_id)
+        picker.hasFocus = True
+    finally:
+        state.restoring = restoring
+    inputs.itemById("mesh_target").formattedText = (
+        f"Picking faces for: <b>{html.escape(_row_label(kind, record))}</b>")
+
+
+def _face_count_text(count):
+    return f"{count} {wglink_protocol._plural(count, 'face', 'faces')}"
+
+
+def _read_zone_names(inputs, state):
+    """Zone names as typed, so notices and labels use what the user sees."""
+
+    for row_id, record in state.groups.items():
+        item = inputs.itemById(f"mesh_group_name_{row_id}")
+        if item is not None:
+            record["name"] = str(item.value).strip()
+
+
+def _picked(inputs, state):
+    """Apply the picker's contents to the target row.
+
+    A face picked here that another row holds moves here, and the notice says
+    so. A whole body (zones only) adds its faces that no other row holds; a
+    linked source's faces never move, they change in WG.
+    """
+
+    _read_zone_names(inputs, state)
+    kind, row_id = state.target
+    target = _rows(state, kind)[row_id]
+    owners = {wglink_send._face_key(face): (other_kind, record)
+              for other_kind in ("source", "group")
+              for other_id, record in _rows(state, other_kind).items()
+              if (other_kind, other_id) != state.target for face in record["faces"]}
+    entities = host._selected_entities(inputs, PICKER)
+    bodies = [entity for entity in entities if hasattr(entity, "faces")]
+    notices, reload_picker = [], bool(bodies)
+    body_faces = []
+    if bodies and kind == "source":
+        notices.append("A driver takes faces, not whole bodies.")
+    elif bodies:
+        body_faces = _mesh_faces(bodies)
+        stayed = [face for face in body_faces if wglink_send._face_key(face) in owners]
+        if stayed:
+            notices.append(f"{_face_count_text(len(stayed))} of that body already in other rows stayed there.")
+    candidates = _mesh_faces([
+        *(entity for entity in entities if not hasattr(entity, "faces")),
+        *(face for face in body_faces if wglink_send._face_key(face) not in owners),
+    ])
+    kept, moved = [], {}
+    for face in candidates:
+        key = wglink_send._face_key(face)
+        owner_kind, owner = owners.get(key, (None, None))
+        if owner is not None and owner.get("instance_id"):
+            notices.append(f"{_row_label(owner_kind, owner)} keeps its faces; change them in WG.")
+            reload_picker = True
+            continue
+        if owner is not None:
+            owner["faces"] = [member for member in owner["faces"] if wglink_send._face_key(member) != key]
+            label = _row_label(owner_kind, owner)
+            moved[label] = moved.get(label, 0) + 1
+        kept.append(face)
+    target["faces"] = kept
+    notices.extend(f"Moved {_face_count_text(count)} from {label} to {_row_label(kind, target)}."
+                   for label, count in moved.items())
+    state.notice = " ".join(notices)
+    if reload_picker:
+        # Show exactly what the row now holds: faces, never a body or a refused face.
+        _set_target(inputs, state, kind, row_id)
+
+
+def _check_saved_faces(inputs, state):
+    """On activate: which saved faces Fusion can still select, row by row, with the one picker."""
+
+    picker = inputs.itemById(PICKER)
+    for kind in ("source", "group"):
+        for record in _rows(state, kind).values():
+            if record.get("instance_id"):
+                continue
+            picker.clearSelection()  # also drops faces preselected before opening
+            selectable, missing = [], []
+            for face in record["original_faces"]:
+                try:
+                    selected = picker.addSelection(face)
+                except Exception:
+                    selected = False
+                (selectable if selected else missing).append(face)
+            record["faces"] = selectable
+            record["unselected_saved_faces"] = {wglink_send._face_key(face) for face in missing}
+    picker.clearSelection()
+
+
+def _initial_target(state):
+    for kind in ("source", "group"):
+        for row_id, record in _rows(state, kind).items():
+            if record["faces"] and not record.get("instance_id"):
+                return kind, row_id
+    return "source", next(row_id for row_id, record in state.sources.items() if not record.get("instance_id"))
 
 
 MESH_DIALOG_RETRY = "Close and reopen Sources & Mesh… to retry before saving."
@@ -180,18 +304,38 @@ def _build_mesh_dialog(inputs, state):
         sources = state.context.get("sources", [])
         mesh = wglink_mesh.snapshot(sources, saved)
         for input_id, title, expanded in (
-            ("mesh_sources", "Sources", True), ("mesh_walls", "Walls", True),
-            ("mesh_groups", "Surface Groups", True), ("mesh_advanced", "Advanced", False),
+            ("mesh_sources", "Drivers", True), ("mesh_walls", "Walls", True),
+            ("mesh_groups", "Size zones", True), ("mesh_advanced", "Advanced", False),
             ("mesh_estimate_section", "Estimate", True), ("mesh_validation_section", "Validation", True),
         ):
             group = inputs.addGroupCommandInput(input_id, title)
             group.isExpanded = expanded
-        for kind, container, label in (("source", "mesh_sources", "Source"), ("group", "mesh_groups", "Group")):
-            children = inputs.itemById(container).children
-            if kind == "group":
-                children.addTextBoxCommandInput("mesh_group_note", "",
-                    "Optional: faces or bodies meshed finer or coarser than the walls.", 2, True)
-            _mesh_button(children, f"mesh_add_{kind}", f"Add {label}")
+            if input_id == "mesh_groups":
+                group.children.addTextBoxCommandInput(
+                    "mesh_group_note", "",
+                    "Optional: make parts of the model finer or coarser than the walls.", 1, True)
+            if input_id in ("mesh_sources", "mesh_groups"):
+                is_source = input_id == "mesh_sources"
+                table = group.children.addTableCommandInput(
+                    DRIVERS_TABLE if is_source else ZONES_TABLE, title, 0, "5:2:3:2" if is_source else "5:2:3:2:1")
+                table.maximumVisibleRows = 6 if is_source else 4
+                table.minimumVisibleRows = 4 if is_source else 1
+                table.isFullWidth = True
+                if not is_source:
+                    for preset, size in wglink_protocol.MESH_PRESETS.items():
+                        add = _mesh_button(table.commandInputs, f"mesh_add_group_{preset}",
+                                           f"+ {preset} zone ({size:g} mm)", full_width=False)
+                        table.addToolbarCommandInput(add)
+            if input_id == "mesh_groups":
+                # The one face picker, right under the tables it fills.
+                inputs.addTextBoxCommandInput("mesh_target", "", "", 1, True).isFullWidth = True
+                picker = inputs.addSelectionInput(
+                    PICKER, "Faces",
+                    "Click faces in the model; click a selected face again to remove it. "
+                    "A zone also takes whole bodies.")
+                host._add_selection_filters(picker, "Faces", "SolidBodies", "SurfaceBodies")
+                picker.setSelectionLimits(0, 0)
+                inputs.addTextBoxCommandInput("mesh_notice", "", "", 2, True).isFullWidth = True
         walls = inputs.itemById("mesh_walls").children
         wall = walls.addValueInput("mesh_wall", "Walls", "mm", host._mm_input(mesh["wall_size_mm"]))
         wall.tooltip = "Mesh size for every surface that is not a source or in a surface group."
@@ -205,11 +349,21 @@ def _build_mesh_dialog(inputs, state):
         estimate = inputs.itemById("mesh_estimate_section").children
         estimate.addTextBoxCommandInput("mesh_estimate", "", "", 4, True)
         inputs.itemById("mesh_validation_section").children.addTextBoxCommandInput("mesh_validation", "", "", 4, True)
+        # One fixed row per role, in the protocol's order; a saved source fills
+        # its role's row. Linked sources keep their own read-only rows.
         for source in sources:
             record = {**source, "size_mm": mesh["source_size_mm"][source["id"]]}
-            faces = state.context["members"].get(source["id"], [])
+            state.original_sources.append(
+                {**record, "original_faces": list(state.context["members"].get(source["id"], []))})
+        for role in wglink_protocol.MESH_DEFAULTS["source_size_mm"]:
+            saved_rows = [source for source in state.original_sources if not source.get("instance_id")
+                          and wglink_author.resolve_source_choice(source["role"]) == role]
+            record = {**saved_rows[0], "role": role} if saved_rows else {"role": role}
+            faces = [face for source in saved_rows for face in source["original_faces"]]
             _add_mesh_row(inputs, state, "source", record, faces)
-            state.original_sources.append({**record, "original_faces": list(faces)})
+        for source in state.original_sources:
+            if source.get("instance_id"):
+                _add_mesh_row(inputs, state, "source", source, source["original_faces"])
         all_faces = _mesh_faces(state.context.get("bodies", []))
         definitions = list(saved["surface_groups"] if saved is not None else [])
         painted = {}
@@ -237,17 +391,17 @@ def _build_mesh_dialog(inputs, state):
 def _mesh_dialog_values(inputs, state):
     sources, groups = [], []
     for row_id, record in state.sources.items():
-        faces = (record["original_faces"] if record.get("instance_id") or not state.activated
-                 else _mesh_members(inputs, "source", row_id))
-        role = (wglink_author.resolve_source_choice(record["role"]) if record.get("instance_id")
-                else host._selected_name(inputs, f"mesh_source_role_{row_id}", "HF"))
-        sources.append(wglink_mesh.normalize_source({**record, "id": record.get("id", f"new-{row_id}"), "role": role,
-                        "faces": faces, "size_mm": (record["size_mm"] if record.get("instance_id")
+        # A driver row is a source when it has faces, is linked, or still owes
+        # saved faces Fusion could not select (Save must not silently drop them).
+        if not (record["faces"] or record.get("instance_id") or record.get("unselected_saved_faces")):
+            continue
+        sources.append(wglink_mesh.normalize_source({**record, "id": record.get("id", f"new-{row_id}"),
+                        "faces": list(record["faces"]), "size_mm": (record["size_mm"] if record.get("instance_id")
                             else host._mm_value(inputs, f"mesh_source_size_{row_id}"))}))
+    _read_zone_names(inputs, state)
     for row_id, record in state.groups.items():
-        groups.append({**record, "name": str(inputs.itemById(f"mesh_group_name_{row_id}").value).strip(),
-                       "size_mm": host._mm_value(inputs, f"mesh_group_size_{row_id}"),
-                       "faces": (_mesh_members(inputs, "group", row_id) if state.activated else record["original_faces"])})
+        groups.append({**record, "size_mm": host._mm_value(inputs, f"mesh_group_size_{row_id}"),
+                       "faces": list(record["faces"])})
     return sources, groups, {
         "wall_size_mm": host._mm_value(inputs, "mesh_wall"),
         "grading_distance_mm": host._mm_value(inputs, "mesh_grading"),
@@ -265,8 +419,7 @@ def _mesh_dialog_errors(sources, groups, mesh, state):
             missing = row.get("unselected_saved_faces", set()) - selected
             rows.append({
                 "kind": kind,
-                "label": (f"Source {row['row_id']} ({row['role']})" if kind == "source"
-                          else f"Group {row['row_id']} ({row['name'] or 'unnamed'})"),
+                "label": _row_label(kind, row),
                 "role": row.get("role"), "name": row.get("name"), "linked": bool(row.get("instance_id")),
                 "size_mm": row["size_mm"], "face_keys": selected,
                 "missing_saved_faces": min(len(missing), max(0, len(row["original_faces"]) - len(selected))),
@@ -289,7 +442,21 @@ def _mesh_snapshot_values(sources, groups, mesh):
     return measured, result
 
 
+def _show(inputs, state, input_id, text):
+    """Set a read-only text only when it changes: Fusion reports each set as an input change."""
+
+    item = inputs.itemById(input_id)
+    if item is not None and state.shown.get(input_id) != text:
+        state.shown[input_id] = text
+        item.formattedText = text
+
+
 def _sync_mesh_dialog(inputs, state):
+    for kind in ("source", "group"):
+        for row_id, record in _rows(state, kind).items():
+            _show(inputs, state, f"mesh_{kind}_count_{row_id}",
+                  _count_text(kind, record, state.target == (kind, row_id)))
+    _show(inputs, state, "mesh_notice", html.escape(state.notice))
     sources, groups, mesh = _mesh_dialog_values(inputs, state)
     errors = _mesh_dialog_errors(sources, groups, mesh, state)
     warnings = []
@@ -297,7 +464,7 @@ def _sync_mesh_dialog(inputs, state):
     for source in sources:
         if (source["size_mm"] is not None and wall is not None and math.isfinite(wall)
                 and 0 < wall < source["size_mm"] and math.isfinite(source["size_mm"])):
-            warnings.append(f"Source {source['row_id']} ({source['role']}): {source['size_mm']:g} mm is coarser than the walls ({mesh['wall_size_mm']:g} mm); it will be meshed at {mesh['wall_size_mm']:g} mm.")
+            warnings.append(f"{_row_label('source', source)}: {source['size_mm']:g} mm is coarser than the walls ({mesh['wall_size_mm']:g} mm); it will be meshed at {mesh['wall_size_mm']:g} mm.")
     limits = wglink_inbox.wg_mesh_limits(wglink_workspace.ipc_folder())
     limit = wglink_protocol.solved_triangle_limit(limits)
     estimate_text = f"An estimate is available when the settings are valid. Limit {limit:,}."
@@ -405,10 +572,20 @@ def _save_mesh_dialog(design, app, state, sources, groups, mesh):
         if len(matches) != 1:
             raise wglink_author.AuthorError(f"Could not save {source['role']} source. Review its faces in Sources & Mesh….")
         source["id"] = matches[0]["id"]
+    # A source this dialog never showed (its paint could not be read when the
+    # dialog opened) must not be dropped from the saved settings by this Save.
+    shown = {(source.get("instance_id"), source["role"]) for source in sources}
+    unseen = [current for current in context.get("sources", [])
+              if (current.get("instance_id"), wglink_author.resolve_source_choice(current["role"])) not in shown]
+    if unseen:
+        raise wglink_author.AuthorError(
+            f"{_row_label('source', {**unseen[0], 'role': wglink_author.resolve_source_choice(unseen[0]['role'])})} "
+            "is in this document but was not shown here.")
     _, snapshot = _mesh_snapshot_values(sources, groups, mesh)
     wglink_send.save_mesh_settings(design, snapshot)
     host._source_authoring_generation += 1
-    return {"summary": "Saved sources and mesh settings in this document."}
+    # No confirmation box: the dialog closing is the confirmation.
+    return {"summary": ""}
 
 
 class MeshInputChangedHandler(adsk.core.InputChangedEventHandler):
@@ -424,40 +601,41 @@ class MeshInputChangedHandler(adsk.core.InputChangedEventHandler):
             command = args.input.parentCommand
             inputs = command.commandInputs if command is not None else host._command_inputs(args.inputs)
             input_id = args.input.id
-            for kind, rows in (("source", self.state.sources), ("group", self.state.groups)):
-                if input_id == f"mesh_add_{kind}":
-                    record = None
-                    if kind == "source":
-                        used = {host._selected_name(inputs, f"mesh_source_role_{row}", "HF") for row in rows}
-                        record = {"role": next((role for role in wglink_protocol.MESH_DEFAULTS["source_size_mm"] if role not in used), "HF")}
-                    _add_mesh_row(inputs, self.state, kind, record)
-                elif input_id.startswith(f"mesh_remove_{kind}_"):
-                    row = int(input_id.rsplit("_", 1)[1])
-                    if not rows[row].get("instance_id"):
-                        inputs.itemById(f"mesh_{kind}_{row}").deleteMe()
-                        del rows[row]
-            if input_id.startswith("mesh_group_preset_"):
+            state = self.state
+            if input_id == PICKER:
+                if state.activated and state.target is not None:
+                    _picked(inputs, state)
+            elif input_id.startswith("mesh_add_group_"):
+                preset = input_id[len("mesh_add_group_"):]
+                row = _add_mesh_row(inputs, state, "group", {
+                    "name": _next_zone_name(state, preset), "size_mm": wglink_protocol.MESH_PRESETS[preset]})
+                _set_target(inputs, state, "group", row)
+            elif input_id.startswith("mesh_remove_group_"):
                 row = int(input_id.rsplit("_", 1)[1])
-                name = host._selected_name(inputs, input_id, "Custom").split()[0]
-                if name in wglink_protocol.MESH_PRESETS:
-                    inputs.itemById(f"mesh_group_size_{row}").value = wglink_protocol.MESH_PRESETS[name] / 10
-            elif input_id.startswith("mesh_group_size_"):
-                row = int(input_id.rsplit("_", 1)[1])
-                size = host._mm_value(inputs, input_id)
-                label = next((f"{name} {value:g} mm" for name, value in wglink_protocol.MESH_PRESETS.items() if value == size), "Custom")
-                _mesh_select(inputs.itemById(f"mesh_group_preset_{row}"), label)
+                inputs.itemById(ZONES_TABLE).deleteRow(state.group_order.index(row))
+                state.group_order.remove(row)
+                del state.groups[row]
+                if state.target == ("group", row):
+                    _set_target(inputs, state, *_initial_target(state))
             elif input_id == "mesh_reset":
                 defaults = wglink_protocol.MESH_DEFAULTS
                 inputs.itemById("mesh_wall").value = defaults["wall_size_mm"] / 10
                 inputs.itemById("mesh_grading").value = defaults["grading_distance_mm"] / 10
-                for row, source in self.state.sources.items():
+                for row, source in state.sources.items():
                     if not source.get("instance_id"):
-                        role = host._selected_name(inputs, f"mesh_source_role_{row}", "HF")
-                        inputs.itemById(f"mesh_source_size_{row}").value = wglink_protocol.default_source_size_mm(role) / 10
-                for row in self.state.groups:
+                        inputs.itemById(f"mesh_source_size_{row}").value = (
+                            wglink_protocol.default_source_size_mm(source["role"]) / 10)
+                for row in state.groups:
                     inputs.itemById(f"mesh_group_size_{row}").value = wglink_protocol.MESH_PRESETS["Fine"] / 10
-                    label = f"Fine {wglink_protocol.MESH_PRESETS['Fine']:g} mm"
-                    _mesh_select(inputs.itemById(f"mesh_group_preset_{row}"), label)
+            else:
+                # Pick faces, or editing a row's name or size, makes that row the target.
+                for kind in ("source", "group"):
+                    prefix = f"mesh_pick_{kind}_", f"mesh_{kind}_size_", f"mesh_{kind}_name_"
+                    if state.activated and input_id.startswith(prefix):
+                        row = int(input_id.rsplit("_", 1)[1])
+                        record = _rows(state, kind).get(row)
+                        if record is not None and not record.get("instance_id") and state.target != (kind, row):
+                            _set_target(inputs, state, kind, row)
             _sync_mesh_dialog(inputs, self.state)
         except Exception as exc:
             host._report_error("Updating Sources & Mesh…", f"{host.PANEL_NAME} error", exc)
@@ -491,20 +669,10 @@ class MeshDialogActivateHandler(adsk.core.CommandEventHandler):
         state.restoring = True
         try:
             inputs = args.command.commandInputs
-            for kind, rows in (("source", state.sources), ("group", state.groups)):
-                for row_id, record in rows.items():
-                    if record.get("instance_id"):
-                        continue
-                    selection = inputs.itemById(f"mesh_{kind}_faces_{row_id}")
-                    _restore_mesh_selections(selection, record)
+            _check_saved_faces(inputs, state)
             state.activated = True
-            # Hidden linked rows cannot receive focus. Choose an editable row
-            # once; subsequent clicks, Orbit/Pan and validation keep user focus.
-            editable = [inputs.itemById(f"mesh_{kind}_faces_{row_id}")
-                        for kind, rows in (("source", state.sources), ("group", state.groups))
-                        for row_id, record in rows.items() if not record.get("instance_id")]
-            if editable:
-                editable[0].hasFocus = True
+            # Once: later activations (Orbit/Pan) keep the user's target and focus.
+            _set_target(inputs, state, *_initial_target(state))
             _sync_mesh_dialog(inputs, state)
         finally:
             state.restoring = False

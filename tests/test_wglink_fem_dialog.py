@@ -580,6 +580,36 @@ def _building_inputs(module, *, phase="running"):
             items[input_id] = item
             return item
 
+        def addTableCommandInput(self, input_id, name, _columns, ratio):
+            # Fusion: cells are inputs made through the table's own collection
+            # and placed with addCommandInput; deleteRow deletes a row's inputs
+            # and shifts the rows below it up.
+            class Table(Input):
+                @property
+                def rowCount(self):
+                    return 1 + max((row for row, _ in self.cells), default=-1)
+
+            table = Table(input_id, name, self)
+            table._readonly["commandInputs"] = Inputs(table)
+            table.columnRatio, table.selectedRow, table.cells, table.toolbar = ratio, -1, {}, []
+
+            def add(item, row, column, *_span):
+                table.cells[(row, column)] = item
+                return True
+
+            def delete_row(row):
+                for key in sorted(table.cells):
+                    if key[0] == row:
+                        table.cells.pop(key).deleteMe()
+                for key in sorted(key for key in table.cells if key[0] > row):
+                    table.cells[(key[0] - 1, key[1])] = table.cells.pop(key)
+                return True
+
+            table.addCommandInput, table.deleteRow = add, delete_row
+            table.addToolbarCommandInput = lambda item: table.toolbar.append(item) or True
+            items[input_id] = table
+            return table
+
         def addSelectionInput(self, input_id, name, _prompt):
             item = Selection(input_id, name, self)
             _SelectionInput.__init__(item, [])
@@ -618,7 +648,7 @@ def test_dialog_builds_defaults_and_updates_kind_and_lining_visibility(fixture):
     assert items["fem_resistivity_1"].isEnabled
     for kind in ("moving", "interface", "plane-wave-termination"):
         label = next(label for label, value in module.wglink_fem.KIND_CHOICES if value == kind)
-        module.wglink_mesh_dialog._mesh_select(items["fem_kind_1"], label)
+        next(entry for entry in items["fem_kind_1"]._entries if entry.name == label).isSelected = True
         module.FemInputChangedHandler(state)._changed(types.SimpleNamespace(
             input=items["fem_kind_1"], inputs=inputs,
         ))

@@ -459,3 +459,10 @@ def test_fem_preflight_uses_driven_boolean_not_region_text(author, name):
     assert author.NO_SOURCE_WARNING in summary.warnings
     driven = author.preflight_summary(clean_scope(sources=[], fem_regions=["FEM region: Chamber"], fem_driven=True))
     assert driven.warnings == ()
+
+
+def test_every_source_role_has_one_display_label(author):
+    assert set(author.SOURCE_ROLE_LABELS) == set(author.SOURCE_ROLES)
+    assert author.source_role_label("PASSIVE_CARDIOID") == "Port or passive opening"
+    assert author.source_role_label("PORT_EXIT") == "Port or passive opening"
+    assert author.source_role_label("HF") == "HF – high-frequency driver"

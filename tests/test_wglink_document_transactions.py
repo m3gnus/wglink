@@ -7,7 +7,7 @@ import pytest
 
 from test_wglink_fem_dialog import _inputs, _state, _building_inputs
 from test_wglink_addin_lifecycle import _dialog_inputs, _chosen, _SelectionInput
-from test_wglink_mesh_dialog import build, change, scene  # noqa: F401
+from test_wglink_mesh_dialog import MF, add_zone, build, change, pick, scene, target  # noqa: F401
 from test_wglink_mesh_settings import AppearanceFace
 from test_wglink_send import Attributes, body, component
 
@@ -269,9 +269,9 @@ def document(scene, monkeypatch):
     # Seed non-default source sizing, group override history, and FEM metadata.
     inputs, items, state = build(scene)
     items["mesh_source_size_1"].value = 1.1
-    change(scene, inputs, items, state, "mesh_add_group")
-    items["mesh_group_name_2"].value = "Old panel"
-    items["mesh_group_faces_2"].addSelection(faces[1])
+    zone = add_zone(scene, inputs, items, state)
+    items[f"mesh_group_name_{zone}"].value = "Old panel"
+    pick(scene, inputs, items, state, faces[1])
     module.wglink_mesh_dialog._apply_mesh_dialog(inputs, state)
     module._apply_fem_region(_inputs(module, fem_air, fem_faces), _state(module, 1, 2))
     second_state = _state(module, 1, 2)
@@ -316,12 +316,12 @@ def operation(scene, path):
     if path == "mesh-save-and-restore":
         inputs, items, state = build(scene)
         items["mesh_source_size_1"].value = 2.2
-        change(scene, inputs, items, state, "mesh_remove_group_2")
-        change(scene, inputs, items, state, "mesh_add_source")
-        items["mesh_source_faces_3"].addSelection(faces[1])
-        change(scene, inputs, items, state, "mesh_add_group")
-        items["mesh_group_name_4"].value = "New panel"
-        items["mesh_group_faces_4"].addSelection(faces[2])
+        change(scene, inputs, items, state, f"mesh_remove_group_{next(iter(state.groups))}")
+        target(scene, inputs, items, state, "source", MF)
+        pick(scene, inputs, items, state, faces[1])
+        zone = add_zone(scene, inputs, items, state)
+        items[f"mesh_group_name_{zone}"].value = "New panel"
+        pick(scene, inputs, items, state, faces[2])
         return module.wglink_mesh_dialog._apply_mesh_dialog(inputs, state)
     if path.startswith("fem-"):
         air, faces = scene.fem_air, scene.fem_faces
