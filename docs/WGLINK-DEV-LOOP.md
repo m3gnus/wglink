@@ -105,6 +105,33 @@ at the moment it runs, and refuses if that measurement disagrees with the token
 WG is holding or cannot be taken at all — a cached token cannot agree with
 itself into a rebuild of the user's sketches and parameters.
 
+## Running scripted checks inside Fusion
+
+A dev-synced add-in (the `wglink_dev.json` marker is present) also runs a small
+test runner. A worker thread watches `<ipc>/.dev-tests/requests/` and does
+nothing except fire a custom event. Every scenario step runs in that event's
+handler, on Fusion's main thread. Results are written to
+`<ipc>/.dev-tests/results/<id>.json`, and viewport screenshots go in
+`results/<id>/`:
+
+    python scripts/fusion_dev_test.py --ipc <ipc> --scenario noop
+    python scripts/fusion_dev_test.py --ipc <ipc> --scenario sources-mesh-baseline --wait 120
+    python scripts/fusion_dev_test.py --ipc <ipc> --scenario reload --modules wglink_mesh
+
+`<ipc>` is the add-in's IPC folder, which is WG's data folder plus `ipc/wglink`.
+The script exits with 0 if the scenario passed, 1 if it failed or hit an
+error, and 2 if no result arrived in time.
+
+- `sources-mesh-baseline` creates an unsaved scratch design containing a box.
+  It drives Sources & Mesh… through the dialog's own handlers: Add Source,
+  pick the top face as HF, then Save. It checks that the face carries the HF
+  appearance, reopens the dialog, and checks that the face is shown as picked.
+  It then closes the scratch design without saving, and confirms the user's
+  own document is unchanged.
+- `reload` reloads the runner, plus any helper modules you name, inside
+  Fusion. That saves a restart after a dev sync. `WGLink.py` itself still
+  needs Stop and Run.
+
 ## Going back to the managed install
 
 Reinstall from Waveguide Generator (Help → Install Fusion add-in), or run WG's

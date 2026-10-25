@@ -3517,6 +3517,9 @@ def _initialize_authoring_dialog(command, operation):
         handlers = ((command.activate, FemDialogActivateHandler(state)),
                     (command.inputChanged, FemInputChangedHandler(state)),
                     (command.validateInputs, FemValidateInputsHandler(state)))
+    # The live Command, for scripted dev checks (wglink_dev_tests) that drive
+    # this dialog through its own handlers.
+    state.command = command
     # Keep events inert during construction too: Fusion may dispatch them while
     # inputs are being added, or while the outer reporter displays an error.
     state.construction_failed = True
@@ -5742,6 +5745,7 @@ def _stop_watch(app: object) -> None:
     global _watch_event, _watch_handler, _watch_stop, _watch_thread
     global _handoff_attempted_id, _return_request_attempted_id, _request_trace
     global _claims_swept, _wg_outdated_noticed
+    _stop_dev_tests(app)
     _stop_followups(app)
     _deferred_file_claims.clear()
     if _watch_stop is not None:
@@ -5803,6 +5807,75 @@ def _manage_dropdown(panel: object) -> object | None:
         )
     except Exception:  # noqa: BLE001 - fall back to the flat panel
         return None
+
+
+DEV_TESTS_MODULE = "wglink_dev_tests"
+DEV_TESTS_EVENT_ID = f"hornlab_wglink_dev_tests_{_watch_session_id}"
+_dev_tests: dict[str, object] = {}
+
+
+def _dev_tests_enabled() -> bool:
+    """Only a dev-synced install (scripts/dev_sync_wglink.py writes the marker)."""
+
+    return (ADDIN_DIR / f"{DEV_TESTS_MODULE}.py").is_file() and (
+        ADDIN_DIR / "wglink_dev.json"
+    ).is_file()
+
+
+class DevTestsEventHandler(adsk.core.CustomEventHandler):
+    def notify(self, _args: object) -> None:
+        runner = _dev_tests.get("runner")
+        if runner is not None:
+            runner.tick()  # records its own errors; never raises
+
+
+def _start_dev_tests(app: object, ui: object) -> None:
+    """Start the terminal-driven test runner in a dev sync; never blocks start-up."""
+
+    if not _dev_tests_enabled():
+        return
+    try:
+        ipc = wglink_workspace.ipc_folder(create=True)
+        if ipc is None:
+            _log(f"[{PANEL_NAME}] the dev test runner has no IPC folder")
+            return
+        dev_tests = importlib.import_module(f"{_registration_package_name}.{DEV_TESTS_MODULE}")
+        context = types.SimpleNamespace(
+            app=_app, design=lambda: wglink_core._design(_app()), ui=ui,
+            package=_registration_package_name, handlers=_handlers, wglink=globals(),
+            log=_log, runner=None,
+        )
+        runner = dev_tests.Runner(ipc, dev_tests.scenarios(context), _log)
+        context.runner = runner
+        event = app.registerCustomEvent(DEV_TESTS_EVENT_ID)
+        if event is None:
+            return
+        handler = DevTestsEventHandler()
+        event.add(handler)
+        watcher = dev_tests.Watcher(app, DEV_TESTS_EVENT_ID, runner)
+        _dev_tests.update(runner=runner, event=event, handler=handler, watcher=watcher)
+        watcher.thread.start()
+        _log(f"[{PANEL_NAME}] dev test runner watching {dev_tests.folders(ipc)[0]}")
+    except Exception as exc:  # noqa: BLE001 - a dev-only runner must not stop the add-in
+        _log(f"[{PANEL_NAME}] the dev test runner did not start: {exc}\n{traceback.format_exc()}")
+
+
+def _stop_dev_tests(app: object) -> None:
+    watcher = _dev_tests.get("watcher")
+    if watcher is not None:
+        watcher.stop()
+    event, handler = _dev_tests.get("event"), _dev_tests.get("handler")
+    if event is not None and handler is not None:
+        try:
+            event.remove(handler)
+        except Exception:  # noqa: BLE001
+            pass
+    if event is not None and app:
+        try:
+            app.unregisterCustomEvent(DEV_TESTS_EVENT_ID)
+        except Exception:  # noqa: BLE001
+            pass
+    _dev_tests.clear()
 
 
 def _clear_registration_state() -> None:
@@ -5893,6 +5966,7 @@ def _build_owner(app: object, ui: object) -> None:
                     _controls.append(manage)
             target = manage.controls if manage is not None else _panel.controls
             _controls.append(target.addCommand(definition))
+        _start_dev_tests(app, ui)
         if not _start_watch(app):
             raise RuntimeError("Fusion refused the Waveguide Generator add-in's owner event")
         if not _activate_ipc_lease():
