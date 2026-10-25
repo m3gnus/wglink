@@ -562,19 +562,17 @@ def _show(inputs, state, input_id, text):
     item = inputs.itemById(input_id)
     if item is not None and state.shown.get(input_id) != text:
         state.shown[input_id] = text
-        item.formattedText = text
+        restoring, state.restoring = state.restoring, True
+        try:
+            item.formattedText = text
+        finally:
+            state.restoring = restoring
 
 
 def _sync_mesh_dialog(inputs, state):
-    """Render under the same guard as programmatic picker/table restoration."""
-    restoring, state.restoring = state.restoring, True
-    try:
-        return _render_mesh_dialog(inputs, state)
-    finally:
-        state.restoring = restoring
-
-
-def _render_mesh_dialog(inputs, state):
+    # Only our routed table-cell setters need the restoration guard. Fusion
+    # can call executePreview synchronously from estimate/validation setters;
+    # guarding the entire render would suppress those legitimate previews.
     for kind in ("source", "group"):
         for row_id, record in _rows(state, kind).items():
             _show(inputs, state, f"mesh_{kind}_count_{row_id}",

@@ -233,6 +233,37 @@ def test_rendered_count_setter_events_cannot_take_the_picker_target(scene):
     assert state.restoring is True
 
 
+def test_estimate_setter_can_run_a_live_preview_during_validation_render(scene):
+    module = scene.module
+    dialog = module.wglink_mesh_dialog
+    inputs, items, state = build(scene)
+    target(scene, inputs, items, state, "source", MF)
+    pick(scene, inputs, items, state, scene.faces[1])
+    preview = dialog.MeshPreviewHandler(state)
+    handler = dialog.MeshInputChangedHandler(state)
+    events = []
+    generations = (module.wglink_send._source_authoring_generation,
+                   module.wglink_send._mesh_authoring_generation)
+    def on_changed(args):
+        if args.input.id == "mesh_estimate":
+            events.append(state.restoring)
+            # Observed in Fusion: this setter synchronously raises executePreview.
+            preview.notify(types.SimpleNamespace(
+                command=types.SimpleNamespace(commandInputs=inputs), isValidResult=True))
+        elif args.input.id.startswith("mesh_source_count_"):
+            handler.notify(args)
+    inputs.command.onInputChanged = on_changed
+    inputs.command.text_change_events = True
+    state.shown.pop(f"mesh_source_count_{HF}")
+    dialog._sync_mesh_dialog(inputs, state)
+    assert events == [False]
+    assert scene.faces[1].appearance.name == "MF"
+    assert state.preview_failure is None
+    assert state.target == ("source", MF)
+    assert (module.wglink_send._source_authoring_generation,
+            module.wglink_send._mesh_authoring_generation) == generations
+
+
 def _dialog_command(inputs):
     class Event:
         def __init__(self):
