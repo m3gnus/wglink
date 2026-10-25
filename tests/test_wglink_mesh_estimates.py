@@ -47,7 +47,7 @@ def test_range_colours_and_least_ceiling(full, colour, ceiling):
 @pytest.mark.parametrize('symmetry,declared', [('off', False), ('auto', True)])
 def test_off_and_declared_show_one_number_and_never_reduce_twice(symmetry, declared):
     display = model.estimate_display({'full': 24000, 'half': 12000, 'quarter': 6000},
-                                      symmetry=symmetry, declared_reduced=declared)
+                                      symmetry=symmetry, drawn_fraction=.25 if declared else 1.0)
     assert 'About 24,000 triangles' in display['text'] and '–' not in display['text']
     assert 'symmetry' not in display['text']
     assert display['ceiling'] is not None
@@ -118,7 +118,7 @@ def test_cuts_cover_whole_drawn_scope():
     assert model.drawn_fraction({'kind': 'automatic'}, cuts, [{'object_id': 'b1'}]) == .25
     assert model.drawn_fraction({}, cuts, [{'object_id': 'b1'}, {'object_id': 'b2'}]) == 1
     mesh = protocol.default_mesh([])
-    assert model.least_solved_estimate(10000, [], mesh, declared_reduced=True)['triangles'] == model.estimate_triangles(10000, [], mesh)['full']
+    assert model.least_solved_estimate(10000, [], mesh, drawn_fraction=.25)['triangles'] == model.estimate_triangles(10000, [], mesh)['full']
 
 
 def test_body_revision_visibility_placement_and_parameters_invalidate_learning(monkeypatch, send_module):
@@ -148,6 +148,15 @@ def test_matching_evidence_can_reduce_a_drawn_half_further_without_double_reduci
     status(tmp_path, fraction=.25)
     learned = history.learn(tmp_path, 'doc', ['body'], mesh, [])
     assert history.matching_fraction(learned) == .5
-    display = model.estimate_display(estimate, declared_reduced=True, learned=learned)
+    display = model.estimate_display(estimate, drawn_fraction=.5, learned=learned)
     assert 'About 20,000 triangles' in display['text'] and '–' not in display['text']
     assert learned['calibration']['estimated'] == 20000
+
+
+@pytest.mark.parametrize('drawn,least', [(1, 10000), (.5, 20000), (.25, 40000)])
+def test_ceiling_counts_the_physical_quarter_once(drawn, least):
+    estimate = {'full': 40000, 'half': 20000, 'quarter': 10000}
+    display = model.estimate_display(estimate, drawn_fraction=drawn)
+    assert (display['ceiling'] is not None) == (least > 22000)
+    assert model.least_solved_fraction('auto', drawn) * estimate['full'] == least
+    assert model.least_solved_fraction('off', drawn) == 1

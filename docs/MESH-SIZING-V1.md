@@ -145,8 +145,10 @@ WG advertises `meshLimits: {solvedTriangles, fullDomainWarning}` from its builde
 constants. Missing/invalid fields fall back to 22,000/18,000. The dialog shows
 a quarter-to-full range before WG supplies evidence; full counts at/below the
 limit are green, possible/definite excess is amber. The ceiling question is
-asked only if even the quarter is over. Off or a declared cut uses the entire
-drawn geometry once, with no extra reduction.
+asked only if even the quarter is over. Off or a declared cut displays one count for the drawn geometry. A half
+can still become a quarter in WG: the least possible physical quarter is
+counted once for the ceiling, and a matching measured fraction is applied
+relative to the geometry as drawn.
 
 On submission, `wglink_mesh_history` keeps a document identity, mesh-settings
 hash, body revisions/visibility, placements, parameters, selected scope and

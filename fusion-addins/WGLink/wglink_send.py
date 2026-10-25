@@ -1522,7 +1522,7 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
     if authoring_context is not None:
         authoring_context["drawn_fraction"] = drawn
     elif report["source_error"] is None:
-        _preview_mesh(report, design, sources, included_bodies, source_face_keys, declared_reduced=drawn < 1)
+        _preview_mesh(report, design, sources, included_bodies, source_face_keys, drawn_fraction=drawn)
     bounds = None
     for body in measured_bodies:
         bounds = _merge_bounds(bounds, body)
@@ -1537,7 +1537,7 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
 def _preview_mesh(
     report: dict[str, Any], design: object, sources: list[dict[str, Any]],
     bodies: list[object], source_face_keys: set[tuple[str, object]],
-    *, declared_reduced: bool = False,
+    *, drawn_fraction: float = 1.0,
 ) -> None:
     """The mesh part of the preflight draft: the export's own snapshot, measured now.
 
@@ -1563,7 +1563,7 @@ def _preview_mesh(
             for body in bodies
             for face in wglink_core._items(getattr(body, "faces", None))
         )
-        estimate = wglink_mesh.least_solved_estimate(area, sources, mesh, declared_reduced=declared_reduced)
+        estimate = wglink_mesh.least_solved_estimate(area, sources, mesh, drawn_fraction=drawn_fraction)
     except (wglink_mesh.MeshSettingsError, wglink_core.WgLinkError):
         return  # Advisory: WG's own count still decides, and asks.
     report["triangles_least"] = int(estimate["triangles"])

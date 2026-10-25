@@ -3218,7 +3218,7 @@ def _sync_mesh_dialog(inputs, state):
             except OSError:
                 _log("Could not update mesh calibration.")
             display = wglink_mesh.estimate_display(estimate, symmetry=mesh["symmetry"], limits=limits,
-                declared_reduced=state.context.get("drawn_fraction", 1.0) < 1, learned=learned)
+                drawn_fraction=state.context.get("drawn_fraction", 1.0), learned=learned)
             colour = "#b77900" if display["colour"] == "amber" else "#287a38"
             estimate_text = f'<font color="{colour}">{html.escape(display["text"])}</font>'
             if display["ceiling"] is not None:

@@ -131,15 +131,20 @@ def snapshot(
 LEAST_SOLVED_FRACTION = 0.25
 
 
+def least_solved_fraction(symmetry: str, drawn_fraction: float = 1.0) -> float:
+    """The physical quarter relative to drawn geometry; Off uses all of it."""
+    return 1.0 if symmetry == "off" else min(1.0, LEAST_SOLVED_FRACTION / drawn_fraction)
+
+
 def least_solved_estimate(
     total_area_mm2: float, sources: Sequence[Mapping[str, Any]], mesh: Mapping[str, Any],
-    *, declared_reduced: bool = False,
+    *, drawn_fraction: float = 1.0,
 ) -> dict[str, Any]:
     """The estimate for the least WG could solve: a quarter, or all of it with symmetry off.
 
     Send/Solve preflight checks this lower end; Sources & Mesh shows the range.
     """
-    fraction = 1.0 if mesh.get("symmetry") == "off" or declared_reduced else LEAST_SOLVED_FRACTION
+    fraction = least_solved_fraction(mesh.get("symmetry"), drawn_fraction)
     return estimate_triangles(total_area_mm2, sources, mesh, solved_fraction=fraction)
 
 
@@ -217,7 +222,7 @@ def estimate_triangles(
 
 
 def estimate_display(estimate: Mapping[str, Any], *, symmetry: str = "auto",
-                     declared_reduced: bool = False, limits: Mapping[str, Any] | None = None,
+                     drawn_fraction: float = 1.0, limits: Mapping[str, Any] | None = None,
                      learned: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Words, colour and ceiling for the same counts every caller uses.
 
@@ -226,7 +231,7 @@ def estimate_display(estimate: Mapping[str, Any], *, symmetry: str = "auto",
     """
     limit = protocol.solved_triangle_limit(limits)
     fraction = history.matching_fraction(learned)
-    single = symmetry == "off" or declared_reduced or fraction is not None
+    single = symmetry == "off" or drawn_fraction < 1.0 or fraction is not None
     full = estimate["full"]
     count = full if symmetry == "off" else round(full * (fraction or 1.0))
     if single:
@@ -234,9 +239,9 @@ def estimate_display(estimate: Mapping[str, Any], *, symmetry: str = "auto",
     else:
         text = (f"About {estimate['quarter']:,} – {full:,} triangles for the part "
                 f"{protocol.APP_NAME} solves ({protocol.APP_NAME} decides whether it can use symmetry).")
-    least = full if symmetry == "off" or declared_reduced else estimate["quarter"]
+    least = round(full * least_solved_fraction(symmetry, drawn_fraction))
     ceiling = protocol.ceiling_finding(least, limits=limits,
-        symmetry="off" if symmetry == "off" or declared_reduced else "auto", in_sources_and_mesh=True)
+        symmetry="off" if symmetry == "off" or drawn_fraction < 1.0 else "auto", in_sources_and_mesh=True)
     colour = "green" if (count if single else full) <= limit else "amber"
     if ceiling is None and not single and full > limit:
         text += (f" This may exceed the limit if {protocol.APP_NAME} cannot use symmetry; "
