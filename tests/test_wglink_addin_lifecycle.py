@@ -4494,7 +4494,8 @@ def test_a_refused_automatic_insert_is_not_retried_every_tick(
     assert not marker.exists()
     assert ui.messages == [(
         "Waveguide Generator",
-        f"Waveguide Generator could not use this model. This has been recorded.\n\n{module._HANDOFF_RETRY_HINT}",
+        "Waveguide Generator could not use this model. Review the model in Fusion before trying again. "
+        f"The details have been recorded.\n\n{module._HANDOFF_RETRY_HINT}",
     )]
 
 
