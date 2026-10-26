@@ -589,7 +589,8 @@ def _sync_mesh_dialog(inputs, state):
             warnings.append(f"{_row_label('source', source)}: {source['size_mm']:g} mm is coarser than the walls ({mesh['wall_size_mm']:g} mm); it will be meshed at {mesh['wall_size_mm']:g} mm.")
     limits = wglink_inbox.wg_mesh_limits(wglink_workspace.ipc_folder())
     limit = wglink_protocol.solved_triangle_limit(limits)
-    estimate_text = f"An estimate is available when the settings are valid. Limit {limit:,}."
+    limit_text = "" if limit is None else f" Limit {limit:,}."
+    estimate_text = f"An estimate is available when the settings are valid.{limit_text}"
     if not errors:
         try:
             measured, snapshot = _mesh_snapshot_values(sources, groups, mesh)
@@ -606,12 +607,14 @@ def _sync_mesh_dialog(inputs, state):
                 state.services.log("Could not update mesh calibration.")
             display = wglink_mesh.estimate_display(estimate, symmetry=mesh["symmetry"], limits=limits,
                 drawn_fraction=state.context.get("drawn_fraction", 1.0), learned=learned)
-            colour = "#b77900" if display["colour"] == "amber" else "#287a38"
-            estimate_text = f'<font color="{colour}">{html.escape(display["text"])}</font>'
+            colour = {"amber": "#b77900", "green": "#287a38"}.get(display["colour"])
+            estimate_text = html.escape(display["text"])
+            if colour:
+                estimate_text = f'<font color="{colour}">{estimate_text}</font>'
             if display["ceiling"] is not None:
                 warnings.append(wglink_protocol.finding_text(display["ceiling"]))
         except (wglink_mesh.MeshSettingsError, wglink_core.WgLinkError, OSError):
-            estimate_text = f"An estimate is unavailable for this geometry. Limit {limit:,}."
+            estimate_text = f"An estimate is unavailable for this geometry.{limit_text}"
     inputs.itemById("mesh_estimate").formattedText = estimate_text
     if errors and not state.touched and [finding["code"] for finding in findings] == ["no_drive"]:
         # A fresh model has nothing wrong yet: say what to do, not what is missing.

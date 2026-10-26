@@ -20,6 +20,9 @@ import wglink_inbox as inbox  # noqa: E402
 import wglink_protocol as protocol  # noqa: E402
 
 
+LIMITS = {'solvedTriangles': 22000, 'fullDomainWarning': 18000}
+
+
 def test_sizing_manifest_and_uniform_count():
     source = json.loads((ADDIN / 'wglink_mesh_sizing.source.json').read_text())
     assert hashlib.sha256((ADDIN / 'wglink_mesh_sizing.py').read_bytes()).hexdigest() == source['sha256']
@@ -33,7 +36,7 @@ def test_sizing_manifest_and_uniform_count():
                                                (88000, 'amber', False), (88004, 'amber', True)])
 def test_range_colours_and_least_ceiling(full, colour, ceiling):
     estimate = {'full': full, 'half': round(full / 2), 'quarter': round(full / 4)}
-    display = model.estimate_display(estimate)
+    display = model.estimate_display(estimate, limits=LIMITS)
     assert display['colour'] == colour
     assert (display['ceiling'] is not None) == ceiling
     assert f"{estimate['quarter']:,} – {full:,}" in display['text']
@@ -47,23 +50,43 @@ def test_range_colours_and_least_ceiling(full, colour, ceiling):
 @pytest.mark.parametrize('symmetry,declared', [('off', False), ('auto', True)])
 def test_off_and_declared_show_one_number_and_never_reduce_twice(symmetry, declared):
     display = model.estimate_display({'full': 24000, 'half': 12000, 'quarter': 6000},
-                                      symmetry=symmetry, drawn_fraction=.25 if declared else 1.0)
+                                      symmetry=symmetry, drawn_fraction=.25 if declared else 1.0, limits=LIMITS)
     assert 'About 24,000 triangles' in display['text'] and '–' not in display['text']
     assert 'symmetry' not in display['text']
     assert display['ceiling'] is not None
 
 
-@pytest.mark.parametrize('payload,expected', [(None, (22000, 18000)),
-    ({'schemaVersion': 1, 'meshLimits': {'solvedTriangles': 30000, 'fullDomainWarning': 26000}}, (30000, 26000)),
-    ({'schemaVersion': 9, 'meshLimits': {'solvedTriangles': 3}}, (22000, 18000)),
-    ({'schemaVersion': 1, 'meshLimits': {'solvedTriangles': True, 'fullDomainWarning': -1}}, (22000, 18000))])
-def test_capability_fallback_and_shared_preflight(tmp_path, payload, expected):
+@pytest.mark.parametrize('payload,expected', [(None, {}),
+    ({'schemaVersion': 1, 'meshLimits': {'solvedTriangles': 30000, 'fullDomainWarning': 26000}},
+     {'solvedTriangles': 30000, 'fullDomainWarning': 26000}),
+    ({'schemaVersion': 1, 'meshLimits': {'solvedTriangles': 30000}}, {'solvedTriangles': 30000}),
+    ({'schemaVersion': 1, 'meshLimits': {}}, {}),
+    ({'schemaVersion': 9, 'meshLimits': {'solvedTriangles': 3}}, {}),
+    ({'schemaVersion': 1, 'meshLimits': {'solvedTriangles': True, 'fullDomainWarning': -1}}, {}),
+    ({'schemaVersion': 1, 'meshLimits': {'solvedTriangles': '22000', 'fullDomainWarning': 1.5}}, {})])
+def test_only_advertised_valid_limits_are_used_and_unknown_claims_nothing(tmp_path, payload, expected):
     if payload:
         (tmp_path / inbox.CAPABILITIES_FILENAME).write_text(json.dumps(payload))
     limits = inbox.wg_mesh_limits(tmp_path)
-    assert tuple(limits.values()) == expected
+    assert limits == expected
     draft = {'kind': 'solve', 'sources': [{'role': 'HF'}], 'triangles_least': 25000}
-    assert bool(protocol.preflight_findings(draft, limits=limits)) == (25000 > expected[0])
+    ceiling = expected.get('solvedTriangles')
+    assert bool(protocol.preflight_findings(draft, limits=limits)) == (ceiling is not None and 25000 > ceiling)
+    assert protocol.solved_triangle_limit(limits) == ceiling
+    display = model.estimate_display({'full': 88004, 'half': 44002, 'quarter': 22001}, limits=limits)
+    if ceiling is None:
+        assert display['colour'] is None and display['ceiling'] is None
+        assert 'Limit' not in display['text'] and 'limit' not in display['text']
+        assert 'longer to solve' not in display['text']
+    else:
+        assert display['colour'] == 'amber' and f'Limit {ceiling:,}.' in display['text']
+
+
+def test_warning_note_needs_both_advertised_values():
+    estimate = {'full': 20000, 'half': 10000, 'quarter': 5000}
+    assert 'longer to solve' in model.estimate_display(estimate, limits=LIMITS)['text']
+    assert 'longer to solve' not in model.estimate_display(estimate, limits={'solvedTriangles': 22000})['text']
+    assert 'longer to solve' not in model.estimate_display(estimate, limits={'fullDomainWarning': 18000})['text']
 
 
 def status(folder, *, state='solved', count=19812, fraction=.25, manifest='sha256:one', request='solve1'):
@@ -156,7 +179,7 @@ def test_matching_evidence_can_reduce_a_drawn_half_further_without_double_reduci
 @pytest.mark.parametrize('drawn,least', [(1, 10000), (.5, 20000), (.25, 40000)])
 def test_ceiling_counts_the_physical_quarter_once(drawn, least):
     estimate = {'full': 40000, 'half': 20000, 'quarter': 10000}
-    display = model.estimate_display(estimate, drawn_fraction=drawn)
+    display = model.estimate_display(estimate, drawn_fraction=drawn, limits=LIMITS)
     assert (display['ceiling'] is not None) == (least > 22000)
     assert model.least_solved_fraction('auto', drawn) * estimate['full'] == least
     assert model.least_solved_fraction('off', drawn) == 1

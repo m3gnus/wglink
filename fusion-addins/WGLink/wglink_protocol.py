@@ -171,10 +171,6 @@ def default_mesh(sources: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 PREFLIGHT_BLOCK = 'block'
 PREFLIGHT_ASK = 'ask'
 PREFLIGHT_NOTE = 'note'
-#: The solved-triangle ceiling when WG does not advertise its own, and the
-#: count above which an estimate is shown amber (WG's full-domain warning).
-DEFAULT_SOLVED_TRIANGLE_LIMIT = 22000
-DEFAULT_TRIANGLE_WARNING = 18000
 #: The solve-request field naming the WG holds the user already answered.
 ACKNOWLEDGED_FIELD = 'acknowledged'
 #: ``ask`` finding -> the WG hold its "anyway" answer settles.
@@ -331,11 +327,15 @@ def preflight_findings(draft: Mapping[str, Any], *, limits: Mapping[str, Any] | 
     return sorted(findings, key=lambda finding: order[finding['severity']])
 
 
-def solved_triangle_limit(limits: Mapping[str, Any] | None = None) -> int:
-    """The solved-triangle ceiling: WG's advertised one, else the fallback."""
-    limit = (limits or {}).get('solvedTriangles')
-    return limit if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0 \
-        else DEFAULT_SOLVED_TRIANGLE_LIMIT
+def advertised_limit(limits: Mapping[str, Any] | None, key: str) -> int | None:
+    """One triangle limit WG advertises, or None: WG owns the numbers, never a default here."""
+    value = (limits or {}).get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def solved_triangle_limit(limits: Mapping[str, Any] | None = None) -> int | None:
+    """The solved-triangle ceiling WG advertises, or None when it does not (or sends a bad one)."""
+    return advertised_limit(limits, 'solvedTriangles')
 
 
 #: The ceiling's remedy inside Sources & Mesh, where the sizes are on screen.
@@ -346,13 +346,15 @@ def ceiling_finding(least: object, *, limits: Mapping[str, Any] | None = None,
                     symmetry: str = 'auto', in_sources_and_mesh: bool = False) -> dict[str, Any] | None:
     """The ``mesh_ceiling`` finding for the fewest triangles WG could solve, or None.
 
+    With no advertised ceiling there is nothing to compare against: None.
+
     ``symmetry`` is the mesh settings' (``'auto'`` or ``'off'``): with it off
     the count is the whole model's, and the words do not mention symmetry.
     Sources & Mesh shows it as a warning, with the remedy for that dialog;
     Solve asks it on OK.
     """
     limit = solved_triangle_limit(limits)
-    if not isinstance(least, int) or isinstance(least, bool) or least <= limit:
+    if limit is None or not isinstance(least, int) or isinstance(least, bool) or least <= limit:
         return None
     prefix = 'This model' if symmetry == 'off' else f'Even if {APP_NAME} can use symmetry, this model'
     finding = preflight_finding('mesh_ceiling', (

@@ -226,6 +226,9 @@ def estimate_display(estimate: Mapping[str, Any], *, symmetry: str = "auto",
                      learned: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Words, colour and ceiling for the same counts every caller uses.
 
+    Without an advertised limit the words state no limit, the colour is None
+    and there is no ceiling or slow-solve note: nothing to compare against.
+
     A learned fraction applies only to the same document, geometry and sizes.
     Counts always describe the drawn geometry, including an already cut model.
     """
@@ -242,14 +245,15 @@ def estimate_display(estimate: Mapping[str, Any], *, symmetry: str = "auto",
     least = round(full * least_solved_fraction(symmetry, drawn_fraction))
     ceiling = protocol.ceiling_finding(least, limits=limits,
         symmetry="off" if symmetry == "off" or drawn_fraction < 1.0 else "auto", in_sources_and_mesh=True)
-    colour = "green" if (count if single else full) <= limit else "amber"
-    if ceiling is None and not single and full > limit:
+    colour = None if limit is None else "green" if (count if single else full) <= limit else "amber"
+    if ceiling is None and not single and limit is not None and full > limit:
         text += (f" This may exceed the limit if {protocol.APP_NAME} cannot use symmetry; "
                  f"{protocol.APP_NAME} will ask before solving.")
-    warning = (limits or {}).get("fullDomainWarning", protocol.DEFAULT_TRIANGLE_WARNING)
-    if full > warning and full <= limit:
+    warning = protocol.advertised_limit(limits, "fullDomainWarning")
+    if limit is not None and warning is not None and warning < full <= limit:
         text += " A mesh this size may take longer to solve."
-    text += f" Limit {limit:,}."
+    if limit is not None:
+        text += f" Limit {limit:,}."
     previous = history.learned_text(learned)
     if previous:
         text += " " + previous

@@ -23,6 +23,7 @@ from test_wglink_addin_lifecycle import (
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/fixtures"
+LIMITS = {"solvedTriangles": 22000, "fullDomainWarning": 18000}
 CASES = json.loads((FIXTURES / "preflight-v1/cases.json").read_text("utf-8"))
 sys.path.insert(0, str(ROOT / "fusion-addins/WGLink"))
 import wglink_protocol as protocol  # noqa: E402
@@ -81,7 +82,7 @@ def test_every_preflight_word_passes_the_shared_user_text_guard():
     drafts.append({"sources": []})
     for draft in drafts:
         texts += [protocol.finding_text(f) for f in protocol.preflight_findings(draft)]
-    texts += [protocol.finding_text(protocol.ceiling_finding(30000, symmetry=symmetry, in_sources_and_mesh=inside))
+    texts += [protocol.finding_text(protocol.ceiling_finding(30000, limits=LIMITS, symmetry=symmetry, in_sources_and_mesh=inside))
               for symmetry in ("auto", "off") for inside in (False, True)]
     mesh = {"wall_size_mm": 0, "grading_distance_mm": 100.0}
     rows = [{"kind": "source", "label": "Source 1 (HF)", "role": "HF", "size_mm": 6.0, "face_keys": {"a"},
@@ -106,26 +107,29 @@ def test_every_rule_has_a_known_severity_and_the_ceiling_is_answered_by_its_hold
 def test_the_ceiling_is_asked_only_for_a_solve_whose_most_reduced_count_is_over():
     over = {"sources": [{"role": "HF", "face_count": 1}], "triangles_least": 22001}
     assert protocol.preflight_findings({**over, "kind": "send"}) == []
-    [finding] = protocol.preflight_findings({**over, "kind": "solve"})
+    [finding] = protocol.preflight_findings({**over, "kind": "solve"}, limits=LIMITS)
     assert (finding["code"], finding["severity"]) == ("mesh_ceiling", "ask")
     assert "22,001" in finding["message"] and "22,000" in finding["message"]
     assert "Sources & Mesh" in finding["remedy"]
-    assert protocol.preflight_findings({**over, "kind": "solve", "triangles_least": 22000}) == []
-    # WG's own advertised limit wins over the fallback.
+    assert protocol.preflight_findings({**over, "kind": "solve", "triangles_least": 22000}, limits=LIMITS) == []
+    # WG's own advertised limit decides; with none advertised there is nothing to compare against.
     assert protocol.preflight_findings({**over, "kind": "solve"}, limits={"solvedTriangles": 30000}) == []
+    for unknown in (None, {}, {"solvedTriangles": True}, {"solvedTriangles": 0}, {"solvedTriangles": "22000"}):
+        assert protocol.preflight_findings({**over, "kind": "solve"}, limits=unknown) == []
+        assert protocol.ceiling_finding(10 ** 9, limits=unknown) is None
 
 
 def test_the_ceiling_words_follow_symmetry_and_the_dialog_they_are_shown_in():
-    auto = protocol.ceiling_finding(30000)
+    auto = protocol.ceiling_finding(30000, limits=LIMITS)
     assert auto["message"].startswith("Even if Waveguide Generator can use symmetry")
-    off = protocol.ceiling_finding(30000, symmetry="off")
+    off = protocol.ceiling_finding(30000, limits=LIMITS, symmetry="off")
     assert off["message"].startswith("This model meshes to about 30,000")
     assert "symmetry" not in protocol.finding_text(off)
-    inside = protocol.ceiling_finding(30000, in_sources_and_mesh=True)
+    inside = protocol.ceiling_finding(30000, limits=LIMITS, in_sources_and_mesh=True)
     assert "Sources & Mesh" not in protocol.finding_text(inside)
     assert "Larger mesh sizes" in inside["remedy"]
     [solve] = protocol.preflight_findings({"kind": "solve", "sources": [{"role": "HF", "face_count": 1}],
-                                           "triangles_least": 30000, "symmetry": "off"})
+                                           "triangles_least": 30000, "symmetry": "off"}, limits=LIMITS)
     assert solve["message"] == off["message"] and "Sources & Mesh" in solve["remedy"]
 
 
@@ -239,9 +243,14 @@ def test_the_preview_caches_the_shared_verdict_and_shows_the_remedy(monkeypatch)
     })
     box = types.SimpleNamespace(formattedText="")
     state = module.SendDialogState("solve")
+    monkeypatch.setattr(module.wglink_inbox, "wg_mesh_limits", lambda _folder: LIMITS)
     module._sync_preflight(_dialog_inputs(preflight=box), state)
     assert [finding["code"] for finding in state.findings] == ["no_drive", "mesh_ceiling"]
     assert protocol.PREFLIGHT_RULES["no_drive"][1] in box.formattedText.replace("&amp;", "&")
+    # No advertised limit: nothing to compare against, so no ceiling finding.
+    monkeypatch.setattr(module.wglink_inbox, "wg_mesh_limits", lambda _folder: {})
+    module._sync_preflight(_dialog_inputs(preflight=box), state)
+    assert [finding["code"] for finding in state.findings] == ["no_drive"]
 
 
 def _ceiling(module, operation="solve"):

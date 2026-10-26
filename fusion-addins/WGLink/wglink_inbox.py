@@ -750,13 +750,12 @@ def write_solve_request_fields(
 
 
 def wg_mesh_limits(ipc_folder: Path | None) -> dict[str, int]:
-    """WG owns the limits; older or unreadable advertisements use protocol defaults."""
+    """The limits WG advertises, valid ones only; a missing or unreadable advertisement gives none."""
     payload = _read_json(Path(ipc_folder) / CAPABILITIES_FILENAME) if ipc_folder is not None else None
     valid = (isinstance(payload, Mapping) and type(payload.get("schemaVersion")) is int
              and payload["schemaVersion"] == CAPABILITIES_SCHEMA_VERSION)
     limits = payload.get("meshLimits") if valid else None
     limits = limits if isinstance(limits, Mapping) else {}
-    warning = limits.get("fullDomainWarning")
-    return {"solvedTriangles": wglink_protocol.solved_triangle_limit(limits),
-            "fullDomainWarning": warning if type(warning) is int and warning > 0
-            else wglink_protocol.DEFAULT_TRIANGLE_WARNING}
+    found = {key: wglink_protocol.advertised_limit(limits, key)
+             for key in ("solvedTriangles", "fullDomainWarning")}
+    return {key: value for key, value in found.items() if value is not None}

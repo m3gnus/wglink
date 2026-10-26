@@ -142,7 +142,8 @@ curvature patches and rings evaluated with `graded_size_mm`) to
 for both WG and the adapter; it is not an extra serialized mesh setting.
 
 WG advertises `meshLimits: {solvedTriangles, fullDomainWarning}` from its builder
-constants. Missing/invalid fields fall back to 22,000/18,000. The dialog shows
+constants. WGLink has no limits of its own: a missing or invalid field is unknown, and then the
+dialog states no limit, shows no limit colour, and asks no ceiling question. The dialog shows
 a quarter-to-full range before WG supplies evidence; full counts at/below the
 limit are green, possible/definite excess is amber. The ceiling question is
 asked only if even the quarter is over. Off or a declared cut displays one count for the drawn geometry. A half

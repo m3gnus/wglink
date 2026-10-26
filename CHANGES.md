@@ -1,5 +1,11 @@
 # Changes
 
+## Unreleased
+
+- WGLink no longer carries its own triangle limits. It shows and applies only the limits Waveguide Generator
+  advertises; when WG advertises none (an older version), the estimate states no limit, has no limit colour
+  and Solve asks no mesh-ceiling question.
+
 ## 0.3.3 — 2026-10-25
 
 - **Sources & Mesh…** now has fixed driver rows for HF, MF, LF and **Port

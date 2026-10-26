@@ -12,10 +12,21 @@ from test_wglink_mesh_settings import AppearanceFace, FailingMeshAttributes
 from test_wglink_send import Attributes, Collection, body, component
 
 
+def advertise_limits(fixture, limits):
+    """WG owns the triangle limits: the capabilities file carries them, or nothing does."""
+    path = fixture.ipc / fixture.module.wglink_inbox.CAPABILITIES_FILENAME
+    payload = json.loads(path.read_text())
+    payload.pop("meshLimits", None)
+    if limits is not None:
+        payload["meshLimits"] = limits
+    path.write_text(json.dumps(payload))
+
+
 @pytest.fixture
 def scene(monkeypatch, tmp_path):
     fixture = _boundary(monkeypatch, tmp_path, "WGLink_mesh_dialog", coordination=False)
     module = fixture.module
+    advertise_limits(fixture, {"solvedTriangles": 22000, "fullDomainWarning": 18000})
     inherited = types.SimpleNamespace(name="body paint", id="body-paint")
     faces = [AppearanceFace(inherited) for _ in range(3)]
     for member, area in zip(faces, (100, 500, 600)):
@@ -1113,6 +1124,26 @@ def test_mesh_dialog_learns_actual_count_and_invalidates_an_unsaved_face_swap(sc
     text = items['mesh_estimate'].formattedText
     assert '–' in text and 'Last WG mesh:' not in text
     assert 'Last time Waveguide Generator used a quarter model.' in text
+    assert not module.wglink_protocol.user_text_violations(text)
+
+
+@pytest.mark.parametrize("limits", [None, {}, {"solvedTriangles": True, "fullDomainWarning": -1},
+                                    {"solvedTriangles": "22000"}, {"solvedTriangles": 0}])
+def test_no_valid_advertised_limit_means_no_limit_claim_comparison_or_colour(scene, monkeypatch, limits):
+    module = scene.module
+    advertise_limits(scene, limits)
+    inputs, items, state = build(scene)
+    items["mesh_source_size_1"].value = 3
+    assert module.wglink_mesh_dialog._sync_mesh_dialog(inputs, state)
+    text = items["mesh_estimate"].formattedText
+    assert "About" in text and "imit" not in text
+    assert "<font" not in text
+    monkeypatch.setattr(module.wglink_mesh, "estimate_triangles", lambda *_a, **_kw: {
+        "full": 10 ** 7, "half": 5 * 10 ** 6, "quarter": 25 * 10 ** 5})
+    assert module.wglink_mesh_dialog._sync_mesh_dialog(inputs, state)
+    text = items["mesh_estimate"].formattedText
+    assert "imit" not in text and "<font" not in text and "exceed" not in text
+    assert "limit" not in items["mesh_validation"].formattedText
     assert not module.wglink_protocol.user_text_violations(text)
 
 
