@@ -479,7 +479,7 @@ def _selection(design: object, value: object) -> tuple[object, object, object, s
     if not _is_identity_placement(
         _occurrence_placement(entity)
     ) and _child_occurrences(entity, component):
-        raise wglink_text.problem("scope_selection", f"Occurrence {path!r} is placed away from the assembly origin and "
+        raise wglink_text.problem("scope_placement", f"Occurrence {path!r} is placed away from the assembly origin and "
             "contains sub-assemblies, and Fusion can only export a component in "
             "its own frame. Leave Assembly scope empty to send the whole root "
             "assembly, select one of the sub-assemblies on its own, or move the "
@@ -1088,7 +1088,7 @@ def _scope_walk(design: object, selection_value: object) -> dict[str, Any]:
             # document changed under the dialog. Refusing again here is cheap,
             # and the alternative is measuring a child's native geometry in the
             # wrong frame.
-            raise wglink_text.problem("scope_selection", "The selected occurrence is placed away from the assembly origin "
+            raise wglink_text.problem("scope_placement", "The selected occurrence is placed away from the assembly origin "
                 "and contains sub-assemblies; its bodies cannot be measured in "
                 "the frame the STEP is written in. Leave Assembly scope empty to "
                 "send the whole root assembly.")
@@ -4826,7 +4826,7 @@ def _cleanup_stale_publish_artifacts(
 
 def _publish(temp: Path, target: Path, overwrite: bool) -> None:
     if target.exists() and not overwrite:
-        raise wglink_text.problem("export_folder", f"Return bundle already exists: {target}. Pass options['overwrite']=true to replace it.")
+        raise wglink_text.problem("export_exists", f"Return bundle already exists: {target}. Pass options['overwrite']=true to replace it.")
     if not target.exists():
         os.replace(temp, target)
         return
@@ -4874,9 +4874,9 @@ def send(
     fem_regions_enabled = bool(options.get("fem_regions"))
     if walk["fem_regions"] and not fem_regions_enabled:
         if confirm_clear_fem is None:
-            raise wglink_text.problem("fem_setup", wglink_fem.UNAVAILABLE_MESSAGE)
+            raise wglink_text.problem("fem_unavailable", wglink_fem.UNAVAILABLE_MESSAGE)
         if not confirm_clear_fem():
-            raise wglink_core.WgLinkError("Send cancelled. FEM declarations were kept.")
+            raise wglink_text.problem("fem_cancelled", "Send cancelled. FEM declarations were kept.")
         bodies_to_clear = [item["body"] for item in walk["fem_regions"]]
         clear_fem_regions(bodies_to_clear)
         walk = _scope_walk(design, options.get("selection"))
@@ -5024,7 +5024,7 @@ def send(
     temp: Path | None = None
     try:
         if target.exists() and not target.is_dir():
-            raise wglink_text.problem("export_folder", f"Return target exists but is not a bundle folder: {target}.")
+            raise wglink_text.problem("export_exists", f"Return target exists but is not a bundle folder: {target}.")
         try:
             temp = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=output))
         except Exception as exc:  # noqa: BLE001
@@ -5130,9 +5130,8 @@ def send(
             wglink_protocol.preflight_findings(wglink_protocol.manifest_draft(manifest))
         )
         if blockers:
-            raise wglink_core.WgLinkError(
-                " ".join(wglink_protocol.finding_text(finding) for finding in blockers)
-            )
+            text = " ".join(wglink_protocol.finding_text(finding) for finding in blockers)
+            raise wglink_text.UserFacing("preflight", text, detail=text)
         (temp / "wgreturn.json").write_text(
             dumps_return_manifest(manifest), encoding="utf-8"
         )
@@ -5148,7 +5147,7 @@ def send(
     except Exception as exc:  # noqa: BLE001 - one head-less filesystem boundary
         if temp is not None:
             shutil.rmtree(temp, ignore_errors=True)
-        raise wglink_text.problem("export_folder", f"Could not publish return bundle {target}: {exc}.") from exc
+        raise wglink_text.problem("export_publish", f"Could not publish return bundle {target}: {exc}.") from exc
     finally:
         reservation.unlink(missing_ok=True)
 

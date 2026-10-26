@@ -314,6 +314,10 @@ def test_a_wg_without_the_capability_refuses_a_design_with_regions(send_module, 
             {"output_folder": str(tmp_path), "capture_document": False},
         )
     assert str(refusal.value) == fem.UNAVAILABLE_MESSAGE
+    assert refusal.value.code == "fem_unavailable"
+    message = send_module.wglink_text.user_message(refusal.value, logger=lambda _: None)
+    assert "does not offer FEM regions" in message
+    assert "Update it or turn FEM regions on" in message
     assert list(tmp_path.iterdir()) == []
 
 

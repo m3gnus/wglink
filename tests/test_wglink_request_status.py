@@ -136,6 +136,32 @@ def test_the_forbidden_terms_match_whole_words_only():
     assert protocol.user_text_violations("Source PASSIVE_CARDIOID") == ["PASSIVE_CARDIOID"]
 
 
+@pytest.mark.parametrize("sentence", [
+    "Return to Fusion and review the options.",
+    "In the event of an error, return to Fusion.",
+    "A byte of information is missing from this description.",
+])
+def test_ordinary_words_survive_status_validation_and_display(sentence):
+    record = protocol.validate_request_status(_record("needsYou", prompt={
+        "nextStep": sentence, "options": [{"id": "review", "label": "Review options"}],
+    }))
+    text = protocol.request_status_text(record)
+    assert text["detail"] == sentence
+    assert text["options"] == ["Review options"]
+
+
+@pytest.mark.parametrize("sentence", [
+    "The return folder is missing.", "The return is missing.",
+    "The event handler stopped.", "The custom event was lost.",
+    "Set options['overwrite'].", "KeyError: unknown value.",
+    "The byte limit is too small.", "The file is 128 bytes.",
+])
+def test_technical_uses_of_ambiguous_words_still_stay_out_of_status(sentence):
+    record = protocol.validate_request_status(_record("needsYou", prompt={"nextStep": sentence}))
+    assert record["prompt"]["nextStep"] is None
+    assert protocol.request_status_text(record)["detail"] is None
+
+
 HOSTILE = [
     {"prompt": {"options": 5}}, {"prompt": {"options": True}}, {"prompt": "hi"},
     {"prompt": {"code": {"a": 1}, "nextStep": ["x"]}},

@@ -79,6 +79,17 @@ def _outbox(ipc: Path) -> list[dict]:
 # -- C2/C3: the writer and the versioning rule ---------------------------------
 
 
+def test_both_delivery_checks_use_the_same_outdated_remedy(tmp_path: Path) -> None:
+    _advertise(tmp_path, 2)
+    payload = json.loads((tmp_path / wglink_inbox.CAPABILITIES_FILENAME).read_text())
+    payload["fusionRequestDelivery"] = 2
+    (tmp_path / wglink_inbox.CAPABILITIES_FILENAME).write_text(json.dumps(payload))
+    for check in (wglink_inbox.require_wg_delivery, wglink_inbox.require_fusion_delivery):
+        with pytest.raises(wglink_inbox.WgOutdatedError) as refusal:
+            check(tmp_path)
+        assert str(refusal.value) == wglink_inbox.WG_OUTDATED_MESSAGE
+
+
 def test_a_send_for_a_wg_that_reads_schema_4_is_a_receive_snapshot_without_return_id(
     tmp_path: Path,
 ) -> None:

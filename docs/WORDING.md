@@ -27,11 +27,15 @@ uses `user_message`; other exceptions show “Waveguide Generator could not
 <action> <document>. This has been recorded.” The log retains the exception
 chain, stable diagnostic code and current request id when one exists.
 Headless callers still receive the original diagnostic from `str(exc)`.
+Known link errors without a more specific category also ask the user to review
+the model in Fusion. Incomplete or unverified updates say to use Undo.
 
 Shared preflight rules, driver labels and progress text remain owned by
 `wglink_protocol.py`, which WG vendors byte for byte. Keep schema versions,
 role ids, validation and canonical payloads unchanged when editing prose.
 Reuse its `user_text_violations` guard rather than adding another word list.
+Words such as “return” and “options” are checked in their technical context,
+so ordinary instructions such as “return to Fusion” remain visible.
 
 `tests/test_wglink_text.py` exercises every failure category and three
 internal exception types through Fusion FakeUI. Existing export, preflight,

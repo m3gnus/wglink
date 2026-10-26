@@ -40,6 +40,32 @@ def core(monkeypatch):
     return module
 
 
+@pytest.mark.parametrize("design, code, remedy", [
+    (None, "no_design", "Open or create a design"),
+    (types.SimpleNamespace(designType=0), "design_history", "Capture Design History"),
+])
+def test_design_preconditions_give_their_actual_remedy(core, design, code, remedy):
+    core.adsk.fusion.Design = types.SimpleNamespace(cast=lambda value: value)
+    core.adsk.fusion.DesignTypes = types.SimpleNamespace(ParametricDesignType=1)
+    with pytest.raises(core.WgLinkError) as refusal:
+        core._design(types.SimpleNamespace(activeProduct=design))
+    assert refusal.value.code == code
+    assert remedy in core.wglink_text.user_message(refusal.value, logger=lambda _: None)
+
+
+def test_unreadable_wg_model_says_what_to_do_and_keeps_the_diagnostic(core, monkeypatch):
+    def unreadable(_path):
+        raise core.WgLinkError("manifest has a private diagnostic")
+    monkeypatch.setattr(core, "read_bundle", unreadable)
+    with pytest.raises(core.WgLinkError) as refusal:
+        core._read_owned_bundle("invalid")
+    assert refusal.value.code == "model_unreadable"
+    assert str(refusal.value) == "manifest has a private diagnostic"
+    message = core.wglink_text.user_message(refusal.value, logger=lambda _: None)
+    assert "model could not be read" in message and "Send the model" in message
+    assert "private diagnostic" not in message
+
+
 def test_selected_sections_contains_exactly_the_planned_real_rings(core):
     grid = {
         "n_phi": 4,
@@ -2569,13 +2595,15 @@ def test_verify_failure_leaves_applied_journal_and_requires_recovery(
     with pytest.raises(
         core.WgLinkError,
         match="Update applied but not verified — recovery required",
-    ):
+    ) as refusal:
         core.update(object(), None, {
             "instance_id": "wgi_one",
             "operation_id": "req-7",
             "progress_path": str(tmp_path / "progress.json"),
         })
 
+    assert refusal.value.code == "update_unverified"
+    assert "Undo the update" in core.wglink_text.user_message(refusal.value, logger=lambda _: None)
     assert core.applying_operation(design)["phase"] == "applied"
     assert "evidence" not in [kind for kind, _value in calls]
     assert design.timeline.markerPosition == 7
@@ -2636,12 +2664,15 @@ def test_an_update_interrupted_after_its_first_write_leaves_the_applying_marker(
 
     monkeypatch.setattr(core, "_push_parameters", fusion_fails_midway)
 
-    with pytest.raises(core.WgLinkError, match="rebuild failed"):
+    with pytest.raises(core.WgLinkError, match="rebuild failed") as refusal:
         core.update(object(), None, {
             "instance_id": "wgi_one",
             "operation_id": "req-7",
             "progress_path": str(tmp_path / "progress.json"),
         })
+
+    assert refusal.value.code == "update_interrupted"
+    assert "Use Undo" in core.wglink_text.user_message(refusal.value, logger=lambda _: None)
 
     assert "evidence" not in [kind for kind, _ in calls]
     applying = core.applying_operation(design)

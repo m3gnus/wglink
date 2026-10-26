@@ -34,6 +34,10 @@ PROBLEMS = {
     "unclassified_visible_surface": ("A visible surface body has no purpose set.", "If it is a helper, hide the body itself in the browser; otherwise select it and use Advanced → Declare Body… → Exterior shell."),
     "scope_invalid": ("This model has no usable exterior in the selected scope.", "Review the visible bodies and Assembly scope, then send again."),
     "scope_selection": ("This selection cannot be sent on its own.", "Leave Assembly scope empty to send the whole assembly."),
+    "scope_placement": ("The selected assembly is away from the origin and contains sub-assemblies.", "Leave Assembly scope empty to send the whole model, or move the selected assembly to the origin."),
+    "no_design": ("No Fusion design is open.", "Open or create a design, then try again."),
+    "design_history": ("This Fusion design does not have a timeline.", "Right-click the root component in the browser, choose Capture Design History, then try again."),
+    "model_unreadable": ("The WG model could not be read.", "Send the model from Waveguide Generator again."),
     "anchor_choice": ("This model needs a reference WG link.", "Choose a Reference link in the Send or Solve dialog."),
     "copied_link": ("This model contains copies of the same WG link.", "Remove the unwanted copy or insert a fresh link from WG."),
     "link_placement": ("The position of a WG link could not be read.", "Check its component and placement in Fusion, then send again."),
@@ -50,9 +54,12 @@ PROBLEMS = {
     "domain_setup": ("The model does not match the chosen half or quarter.", "Check the cut or send the full model."),
     "export_body_count": ("Fusion exported a different number of bodies from those selected.", "Check body visibility in the browser, then send again."),
     "export_folder": ("This model could not be saved for WG.", "Check that the WGLink folder is writable, then send again."),
+    "export_exists": ("A file already exists where this model needs to be saved.", "Send again or choose another WGLink folder."),
+    "export_publish": ("This model could not be saved for WG.", "Check the model and the WGLink folder, then send again."),
     "export_busy": ("This model is already being sent.", "Wait for it to finish, then try again."),
     "mesh_outdated": (wglink_protocol.MESH_SIZING_UNAVAILABLE_MESSAGE, ""),
     "fem_unavailable": ("This Waveguide Generator does not offer FEM regions.", "Update it or turn FEM regions on, then try again."),
+    "fem_cancelled": ("Send was cancelled. The FEM declarations were kept.", "Send again when you are ready."),
     "already_linked": ("This WG design is already linked in the active Fusion document.", "Select the link in WG’s CAD Link panel and send the update from there."),
     "expired": ("The model is ready, but the time to insert it has expired.", "Send the model from WG again."),
     "wg_outdated": ("This Waveguide Generator needs updating to work with Fusion.", "Update Waveguide Generator; it installs the matching Fusion add-in."),
@@ -65,6 +72,8 @@ PROBLEMS = {
     "delivery": ("Waveguide Generator could not receive this model.", "Send or Solve again from Fusion."),
     "solve_settings": ("Some solve settings in the Waveguide Generator panel cannot be used.", "Correct the highlighted settings in the panel, then solve again."),
     "recovery": ("The model's previous update was interrupted.", "Undo the interrupted update or insert a fresh copy from WG."),
+    "update_interrupted": ("The model's update stopped before it was complete.", "Use Undo in Fusion before trying again."),
+    "update_unverified": ("The model's update was applied, but could not be checked.", "Undo the update or insert a fresh copy from WG before trying again."),
 }
 
 COMMANDS = {
@@ -154,6 +163,9 @@ def user_message(value: BaseException | str | None, *, action: str = "use", docu
             text = " ".join(filter(None, (known.text, known.next_step)))
             if not wglink_protocol.user_text_violations(text, names=(document, *names)):
                 return text
+        elif isinstance(value, WgLinkError):
+            return (f"Waveguide Generator could not {action} {document}. "
+                    "Review the model in Fusion before trying again. The details have been recorded.")
     elif isinstance(value, str):
         if not wglink_protocol.user_text_violations(value, names=(document, *names)):
             return value

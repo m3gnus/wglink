@@ -26,9 +26,10 @@ import adsk.core
 import adsk.fusion
 
 if __package__:
-    from . import wglink_protocol
+    from . import wglink_protocol, wglink_text
 else:
     import wglink_protocol
+    import wglink_text
 if __package__:
     from . import wglink_activity, wglink_locator, wglink_workspace
     from .wglink_bundle import (
@@ -202,7 +203,10 @@ def link_display_name(payload: Mapping[str, Any]) -> str:
 def _read_owned_bundle(path: str | os.PathLike[str]) -> object:
     """Load validated JSON, then release any owned zip extraction immediately."""
 
-    bundle = read_bundle(path)
+    try:
+        bundle = read_bundle(path)
+    except WgLinkError as exc:
+        raise wglink_text.problem("model_unreadable", exc) from exc
     bundle.close()
     return bundle
 
@@ -229,9 +233,9 @@ def _handoff_bundle(path: object, options: dict[str, Any]) -> object:
 def _design(app: adsk.core.Application) -> adsk.fusion.Design:
     design = adsk.fusion.Design.cast(getattr(app, "activeProduct", None))
     if design is None:
-        raise WgLinkError("No active Fusion design. Open or create a design and try again.")
+        raise wglink_text.problem("no_design", "No active Fusion design. Open or create a design and try again.")
     if design.designType != adsk.fusion.DesignTypes.ParametricDesignType:
-        raise WgLinkError(
+        raise wglink_text.problem("design_history",
             "The Waveguide Generator add-in requires a parametric design with a timeline. In the Browser, "
             "right-click the root component and choose 'Capture Design History', "
             "then try again."
@@ -4189,7 +4193,7 @@ def update(
         except Exception as exc:  # noqa: BLE001 - never mask the rebuild failure
             tag_failure = str(exc)
         tag_note = f" Tag repair also failed: {tag_failure}." if tag_failure else ""
-        raise WgLinkError(
+        raise wglink_text.problem("update_interrupted",
             f"Waveguide Generator rebuild failed after {report['sections_done']} sections: {failure}. "
             f"Fusion has no transaction for this operation; use Undo to recover.{tag_note}"
         ) from failure
@@ -4209,7 +4213,7 @@ def update(
             prepared,
         )
     except Exception as exc:  # noqa: BLE001 - applied state must remain recoverable
-        raise WgLinkError(
+        raise wglink_text.problem("update_unverified",
             "Update applied but not verified — recovery required. Undo the update "
             f"or repair the link before trying again. Verification failed: {exc}"
         ) from exc

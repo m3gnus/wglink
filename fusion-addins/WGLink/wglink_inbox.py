@@ -80,7 +80,6 @@ else:
 
 WG_NOT_COLLECTING_MESSAGE = " ".join(wglink_text.PROBLEMS["wg_not_collecting"])
 WG_OUTDATED_MESSAGE = " ".join(wglink_text.PROBLEMS["wg_outdated"])
-WG_FUSION_OUTDATED_MESSAGE = WG_OUTDATED_MESSAGE
 
 
 # The same three causes, for requests a restart found still waiting (A8 brief 5):
@@ -372,10 +371,10 @@ def _require_capabilities(ipc_folder: Path, outdated_message: str) -> Mapping[st
 def require_fusion_delivery(ipc_folder: Path) -> None:
     """Require only WG's Fusion-bound channel, independent of its Solve consumer."""
 
-    payload = _require_capabilities(ipc_folder, WG_FUSION_OUTDATED_MESSAGE)
+    payload = _require_capabilities(ipc_folder, WG_OUTDATED_MESSAGE)
     value = payload.get(FUSION_REQUEST_DELIVERY)
     if isinstance(value, bool) or not isinstance(value, int) or value < DELIVERY_VERSION:
-        raise WgOutdatedError(WG_FUSION_OUTDATED_MESSAGE)
+        raise WgOutdatedError(WG_OUTDATED_MESSAGE)
 
 
 def require_wg_delivery(ipc_folder: Path) -> None:

@@ -14,7 +14,7 @@ sys.path.insert(0, str(ADDIN))
 import wglink_text as wording  # noqa: E402
 
 
-@pytest.mark.parametrize("code", [*wording.PROBLEMS, "authoring", "fem_validation",
+@pytest.mark.parametrize("code", [*wording.PROBLEMS, "authoring", "fem_validation", "preflight",
                                   "KeyError", "RuntimeError", "OSError"])
 @pytest.mark.parametrize("boundary", ["_message", "_modal", "_report_error"])
 def test_failure_matrix_keeps_detail_and_request_in_log(monkeypatch, code, boundary):
@@ -25,7 +25,7 @@ def test_failure_matrix_keeps_detail_and_request_in_log(monkeypatch, code, bound
     detail = "manifest selector PASSIVE_CARDIOID determinant request id raw-detail"
     if code in text.PROBLEMS:
         exc = text.problem(code, detail)
-    elif code in {"authoring", "fem_validation"}:
+    elif code in {"authoring", "fem_validation", "preflight"}:
         exc = text.UserFacing(code, "The selected faces could not be used.",
                               "Select their faces again.", detail=detail)
     else:
@@ -59,7 +59,20 @@ def test_matrix_covers_every_explicit_user_facing_code():
             name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
             if name in {"UserFacing", "problem"} and node.args and isinstance(node.args[0], ast.Constant):
                 codes.add(node.args[0].value)
-    assert codes <= {*wording.PROBLEMS, "authoring", "fem_validation"}
+    assert codes <= {*wording.PROBLEMS, "authoring", "fem_validation", "preflight"}
+
+
+def test_plain_wglink_error_has_a_next_step_without_exposing_its_diagnostic(monkeypatch):
+    ui = _UI(_Panels(), _Definitions(reserve_ids=False))
+    shell = _load_instance(monkeypatch, "WGLink_wording_legacy_error", ui)
+    monkeypatch.setattr(shell.wglink_text, "context", lambda: ("Horn A", "request-1"))
+    exc = shell.wglink_core.WgLinkError("bundle manifest secret diagnostic")
+    shell._message(exc, action="update")
+    message = ui.messages[0][1]
+    assert "could not update Horn A" in message
+    assert "Review the model in Fusion before trying again" in message
+    assert "secret diagnostic" not in message
+    assert "secret diagnostic" in "\n".join(ui.text_palette.written)
 
 
 def test_wrapped_safety_message_keeps_its_remedy_and_diagnostic(monkeypatch):

@@ -1206,6 +1206,47 @@ def test_return_name_reservation_is_atomic_without_a_published_target(
     second_reservation.unlink()
 
 
+def test_an_existing_publish_target_does_not_suggest_folder_permissions(send_module, tmp_path):
+    target = tmp_path / "Speaker.wgreturn"
+    target.mkdir()
+    temp = tmp_path / "temporary"
+    temp.mkdir()
+    with pytest.raises(send_module.wglink_core.WgLinkError) as refusal:
+        send_module._publish(temp, target, overwrite=False)
+    assert refusal.value.code == "export_exists"
+    message = send_module.wglink_text.user_message(refusal.value, logger=lambda _: None)
+    assert "already exists" in message
+    assert "writable" not in message
+    assert temp.is_dir() and target.is_dir()
+
+
+@pytest.mark.parametrize("failure, expected_code, visible", [
+    ("preflight", "preflight", "This model has no driver yet."),
+    ("publish", "export_publish", "Check the model and the WGLink folder"),
+])
+def test_a_late_export_problem_keeps_its_cause_and_remedy(
+    send_module, tmp_path, monkeypatch, failure, expected_code, visible,
+):
+    root = component("Speaker", [body("cabinet", faces=[face("LF")])])
+    design = types.SimpleNamespace(rootComponent=root, exportManager=ContractExportManager(),
+                                   findAttributes=lambda _group, _name: Collection())
+    app = types.SimpleNamespace(version="1", activeDocument=types.SimpleNamespace(name="Speaker"))
+    monkeypatch.setattr(send_module.wglink_core, "_design", lambda _app: design)
+    if failure == "preflight":
+        finding = send_module.wglink_protocol.preflight_finding(
+            "no_drive", send_module.wglink_protocol.NO_DRIVE_MESSAGE)
+        monkeypatch.setattr(send_module.wglink_protocol, "preflight_findings", lambda _draft: [finding])
+    else:
+        def cannot_publish(*_args):
+            raise OSError("private filesystem detail")
+        monkeypatch.setattr(send_module, "_publish", cannot_publish)
+    with pytest.raises(send_module.wglink_core.WgLinkError) as refusal:
+        send_module.send(app, {"output_folder": str(tmp_path), "capture_document": False})
+    assert refusal.value.code == expected_code
+    assert visible in send_module.wglink_text.user_message(refusal.value, logger=lambda _: None)
+    assert not list(tmp_path.iterdir())
+
+
 def test_stale_publish_cleanup_recovers_backup_and_removes_debris(
     send_module, tmp_path: Path,
 ) -> None:
@@ -2084,6 +2125,10 @@ def test_a_placed_occurrence_with_sub_assemblies_is_refused_with_a_real_remedy(
     assert "Leave Assembly scope empty" in message
     assert "move the occurrence back onto the assembly origin" in message
     assert "ground" not in message.casefold()
+    assert refusal.value.code == "scope_placement"
+    visible = send_module.wglink_text.user_message(refusal.value, logger=lambda _: None)
+    assert "away from the origin" in visible
+    assert "move the selected assembly to the origin" in visible
     assert manager.geometries == []
     assert not list(tmp_path.iterdir())
 
@@ -3758,8 +3803,10 @@ def test_a_moved_parent_holding_sub_assemblies_is_refused_in_the_walk_too(
     with pytest.raises(
         send_module.wglink_core.WgLinkError,
         match="contains sub-assemblies; its bodies cannot be measured",
-    ):
+    ) as refusal:
         send_module._scope_walk(design, occurrence)
+    assert refusal.value.code == "scope_placement"
+    assert "away from the origin" in send_module.wglink_text.user_message(refusal.value, logger=lambda _: None)
 
 
 def test_an_unresolvable_wrapper_is_refused_in_words_a_modeller_can_act_on(send_module):
