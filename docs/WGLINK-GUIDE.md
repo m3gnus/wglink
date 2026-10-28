@@ -47,11 +47,11 @@ upgrades and support harder; remove the extra registration and restart Fusion.
 
 | Command | What it does |
 |---|---|
-| **Sources & Mesh…** | Set up sources and mesh, then Send or Solve. |
-| **Send to WG** | Open this model in WG to inspect or set up. Does not solve. |
+| **Sources & Mesh…** | Set up sources and mesh, then Solve. |
 | **Solve in WG** | Send and solve now. |
-| **Requests…** | Show the progress of your latest Send or Solve, and earlier ones. |
-| **Manage Link…** | A menu of the less frequent commands below. |
+| **Show Panel** | Show the Waveguide Generator panel: Sources & Mesh, Solve, the solve settings, and the progress of each run. |
+| **Advanced** | A menu of the less frequent commands below. |
+| Send to WG | Open this model in WG to inspect or set up. Does not solve. |
 | Declare Body… | Mark a body as **Exterior shell** (solve its outer surface) or **Exclude** (leave it out); **Clear declaration** goes back to automatic. |
 | Declare FEM Region… | Mark a solid body of air as a FEM region (section 7). |
 | Insert | Insert a WG design as a managed link. Usually not needed: WG's **Send to CAD** inserts it for you. You can give the link a **Link name** of your own. |
@@ -123,7 +123,7 @@ why and sends nothing; start WG yourself and try again.
 
 The **Waveguide Generator** panel docks on the right whenever you click Send
 or Solve, and opens by itself when WG needs you. Close it whenever you like;
-**Requests…** opens it again. It shows each request:
+**Show Panel** opens it again. It shows each request:
 
 - "<model> is open in Waveguide Generator." after a Send;
 - "Preparing the simulation…", "Waiting for the solver to start.", then
@@ -136,8 +136,16 @@ or Solve, and opens by itself when WG needs you. Close it whenever you like;
   the developers." when WG hit a problem of its own.
 
 If WG has not picked a model up after a while, the panel says so and offers
-**Send again**. The list shows **This document** or **All documents**;
-**Clear finished** removes finished entries. It keeps the last 50 requests
+**Send again**. Its top row has **Sources & Mesh…** and **Solve in WG**, so
+the everyday commands are one click away while you watch a run.
+
+**Solve settings** in the panel show the start and end frequency, the number of
+frequencies and their spacing this model's last solve used. Change any of them
+and the next **Solve in WG** uses your values; Waveguide Generator keeps them as
+this model's settings, so you see the same values in WG. A blank field keeps
+WG's value. **Keep WG's settings** drops your changes before they are sent.
+Driver choices and the rest of the settings stay in WG. The list shows
+this document's requests; **Clear finished** removes finished entries. It keeps the last 50 requests
 from the last 30 days, also across a Fusion restart; a restart never sends
 anything again. Technical detail is under the folded **Diagnostics**.
 
@@ -208,7 +216,7 @@ that placed it. (Fusion's **Ground** does not move it back.)
 
 FEM regions solve bounded air (a rear chamber, a port, a phase plug, a
 compression-driver cavity) and couple it to the outside field. Model each air
-volume as **one closed solid body**, then run **Manage Link… → Declare FEM
+volume as **one closed solid body**, then run **Advanced → Declare FEM
 Region…** on it:
 
 1. Select the air body. A body declared before reloads its settings.

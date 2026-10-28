@@ -31,7 +31,7 @@ PROBLEMS = {
     "mirrored_placement": ("This model contains a mirrored WG link.", "Insert a fresh copy from WG and move or rotate it into position."),
     "scaled_placement": ("This model contains a scaled or skewed WG link.", "Remove the scale or skew and send again."),
     "body_inclusion": ("Fusion would send different bodies from those selected.", "Hide unwanted bodies themselves in the browser, then send again."),
-    "unclassified_visible_surface": ("A visible surface body has no purpose set.", "If it is a helper, hide the body itself in the browser; otherwise select it and use Manage Link… → Declare Body… → Exterior shell."),
+    "unclassified_visible_surface": ("A visible surface body has no purpose set.", "If it is a helper, hide the body itself in the browser; otherwise select it and use Advanced → Declare Body… → Exterior shell."),
     "scope_invalid": ("This model has no usable exterior in the selected scope.", "Review the visible bodies and Assembly scope, then send again."),
     "scope_selection": ("This selection cannot be sent on its own.", "Leave Assembly scope empty to send the whole assembly."),
     "anchor_choice": ("This model needs a reference WG link.", "Choose a Reference link in the Send or Solve dialog."),
@@ -63,6 +63,7 @@ PROBLEMS = {
     "workspace": ("This model has no usable WGLink folder.", "Choose the folder in WG under Settings → CAD Link, then try again."),
     "delivery_write": ("This model was saved, but Waveguide Generator has not received it.", "Check that the WGLink folder is writable, then send again."),
     "delivery": ("Waveguide Generator could not receive this model.", "Send or Solve again from Fusion."),
+    "solve_settings": ("Some solve settings in the Waveguide Generator panel cannot be used.", "Correct the highlighted settings in the panel, then solve again."),
     "recovery": ("The model's previous update was interrupted.", "Undo the interrupted update or insert a fresh copy from WG."),
 }
 
@@ -71,6 +72,21 @@ COMMANDS = {
         "hornlab_wglink_set_source",
         "Sources & Mesh…",
         "Set up sources and mesh, then Send or Solve",
+    ),
+    "solve": (
+        "hornlab_wglink_solve",
+        "Solve in WG",
+        "Send and solve now.",
+    ),
+    "requests": (
+        "hornlab_wglink_requests",
+        "Show Panel",
+        "Show the Waveguide Generator panel: Sources & Mesh, Solve, and the progress of each run.",
+    ),
+    "send": (
+        "hornlab_wglink_send",
+        "Send to WG",
+        "Open this model in WG to inspect or set up. Does not solve.",
     ),
     "declare": (
         "hornlab_wglink_declare_body",
@@ -83,11 +99,6 @@ COMMANDS = {
         "Mark a solid body of air as a FEM region and name its driver, interface "
         "and termination faces for a coupled FEM/BEM solve.",
     ),
-    "solve": (
-        "hornlab_wglink_solve",
-        "Solve in WG",
-        "Send and solve now.",
-    ),
     "insert": (
         "hornlab_wglink_insert",
         "Insert",
@@ -98,20 +109,10 @@ COMMANDS = {
         "Update",
         "Rebuild a managed link in place from its current WG model.",
     ),
-    "send": (
-        "hornlab_wglink_send",
-        "Send to WG",
-        "Open this model in WG to inspect or set up. Does not solve.",
-    ),
     "detach": (
         "hornlab_wglink_detach",
         "Detach",
         "Remove Waveguide Generator link data without changing bodies or features.",
-    ),
-    "requests": (
-        "hornlab_wglink_requests",
-        "Requests…",
-        "Show the progress of your latest Send or Solve.",
     ),
 }
 

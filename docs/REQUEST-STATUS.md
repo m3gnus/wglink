@@ -38,7 +38,9 @@ following.
   cancelReason?: "stopped"|"replaced"|"dismissed",          // cancelled
   result?: {jobId, runNumber, mesh?: {trianglesSolved, solvedFraction, domainKind}},  // solved or needsYou(mesh_too_large)
   job?: {jobId, runNumber},                                 // the current job of the request
-  notice?: "fullModel"|"cutModel"|"healed" }                // solved, calm one-liners
+  notice?: "fullModel"|"cutModel"|"healed",                 // solved, calm one-liners
+  settings?: {frequencyStartHz?, frequencyEndHz?, frequencyCount?,
+              frequencySpacing?: "log"|"linear"} }          // the sweep this request's solve uses
 ```
 
 - `requestId` = `operationId` = the request's `commandId`. Records are per request, so a
@@ -72,6 +74,30 @@ following.
   (`request_status_terminal`): nothing more happens unless someone acts.
 - The record never carries reason text, an identifier inside text, a path or a
   traceback. `jobId` and `runNumber` are for navigation only.
+- `settings` is the frequency sweep of the setup the request's solve was prepared
+  with, once WG has chosen it. A field WG cannot state (a setup with an explicit
+  frequency list has no spacing) is left out; a reader drops a field it cannot use.
+
+## Solve settings from Fusion
+
+WG owns every solve setting: it records a setup per model and source inventory
+and solves with the latest. WG advertises `solveSettings: 1` when it reads a
+Solve request's optional `solveSettings` (the same four fields as the status
+record's `settings`, any subset, checked by `request_solve_settings`). Before
+preparing that Solve, WG applies the fields to the model's current setup (WG's
+defaults for a first-time model), records the result as the model's setup -- the
+user's own choice, exactly as an edit in WG's CAD workspace -- and prepares with
+it. A field that changes the start, end or count replaces an explicit frequency
+list. Settings WG cannot use refuse the preparation with a calm sentence; they
+never fall back silently. Any changed sweep field replaces an explicit
+frequency list with the requested grid, retaining its endpoints and count
+where those fields were not changed.
+
+The panel shows, per field, what the document's newest solve used (the status
+record's `settings`, else what the add-in sent with it) and holds only the edits
+not yet sent, in memory, per document. A Solve carries them and the panel then
+forgets them; a Send never carries them. The panel's settings appear only for a
+WG that advertises the capability.
 
 ## WG's rhythm, and WG stopping
 
@@ -136,9 +162,8 @@ restart record is imported once and removed only after the history is durable.
 History retains the newest 50 entries. Finished entries expire after 30 days;
 unfinished entries remain within that cap and read **Check in WG** after 30
 days. They also read calmly when their previously observed status is missing.
-Restart reads all unfinished entries without submitting any request. A document
-activation resets the palette to **This document**; **All documents** changes
-only the list filter. **Clear finished** removes only terminal entries. Polling
+Restart reads all unfinished entries without submitting any request. The panel lists
+the active document's requests. **Clear finished** removes only terminal entries. Polling
 updates history for other documents too; a new needs-you state opens the palette.
 An unclaimed request withdrawn because a later press replaced it stays in history
 as cancelled/replaced.

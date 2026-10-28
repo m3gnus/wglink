@@ -113,14 +113,14 @@ COMMANDS = wglink_text.COMMANDS
 # Sources & Mesh is promoted even though it is authoring rather than an export:
 # a model with no painted source face cannot be sent at all, and the convention
 # is invisible -- it used to be "rename a Fusion appearance to exactly HF".
-# Filed under a dropdown named "Manage Link…" it would read as maintenance
+# Filed under a dropdown named "Advanced" it would read as maintenance
 # for an existing link, which is exactly what a from-scratch model does not
 # have. Declare Body stays in the dropdown: it is the remedy for one refusal,
 # and that refusal names it.
 #
-# Requests… reopens the progress palette a user closed; it has to be where
+# Show Panel reopens the progress palette a user closed; it has to be where
 # Send and Solve are, or a closed palette is a lost one.
-PROMOTED_COMMANDS = ("source", "solve", "send", "requests")
+PROMOTED_COMMANDS = ("source", "solve", "requests")
 
 _handlers: list[object] = []
 _definitions: list[object] = []
@@ -1188,7 +1188,8 @@ def _write_wg_request(ipc: Path, **fields: object) -> tuple[Path, bool]:
 
 
 def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[str, ...] = (),
-                  request_id: str | None = None, superseded: dict[str, object] | None = None) -> str:
+                  request_id: str | None = None, superseded: dict[str, object] | None = None,
+                  solve_settings: dict[str, object] | None = None) -> str:
     """Hand the return this command just published to WG: one file, one id.
 
     Send and Solve both come here and differ only in ``kind`` (M1 transfer
@@ -1221,6 +1222,7 @@ def _submit_to_wg(report: dict[str, object], kind: str, *, acknowledged: tuple[s
             manifest_sha256=manifest,
             requested_at=wglink_inbox.utc_timestamp(),
             acknowledged=acknowledged,
+            solve_settings=solve_settings if channel == "solveCommand" else None,
         )
     except (wglink_inbox.WgOutdatedError, wglink_inbox.WgNotCollectingError) as exc:
         _begin_request(channel, request_id, DELIVERY)["outcome"] = "refused"
@@ -1556,6 +1558,133 @@ _requests_hint: str | None = None
 _requests_palette_unavailable = False
 # The last outcome reported in Text Commands where palettes are unavailable.
 _requests_fallback_said: str | None = None
+# The solve settings changed in the panel and not yet sent, by document id.
+# WG owns the settings: this holds only edits, until the next Solve carries
+# them (``wglink_protocol.SOLVE_SETTINGS_FIELD``) and WG records them.
+_pending_settings: dict[str, dict[str, object]] = {}
+_SETTINGS_HZ = ("frequencyStartHz", "frequencyEndHz")
+
+
+def _settings_used(document_id: str | None = None) -> dict[str, object]:
+    document_id = document_id if document_id is not None else _active_document_id()
+    return wglink_requests.settings_used(_requests.entries(), document_id)
+
+
+def _read_setting(key: str, text: object) -> object | None:
+    """A panel field as typed: None when empty, else the number or choice, or the
+    text itself when it is no number, so the check names it."""
+
+    text = str(text if text is not None else "").strip()
+    if not text:
+        return None
+    if key == "frequencySpacing":
+        return text
+    try:
+        number = float(text.replace(",", "."))
+    except ValueError:
+        return text
+    if key == "frequencyCount":
+        return int(number) if number.is_integer() else number
+    return number
+
+
+def _set_pending_settings(document_id: str, values: object) -> None:
+    """The panel's settings form, as a follow-up: keep what differs from WG's."""
+
+    if not document_id or not isinstance(values, dict):
+        return
+    used = _settings_used(document_id)
+    pending: dict[str, object] = {}
+    for key in wglink_protocol.SOLVE_SETTINGS_LABELS:
+        value = _read_setting(key, values.get(key))
+        if value is not None and value != used.get(key):
+            pending[key] = value
+    if pending:
+        _pending_settings[document_id] = pending
+    else:
+        _pending_settings.pop(document_id, None)
+    _show_request_palette()
+
+
+def _settings_problems(document_id: str) -> list[str]:
+    pending = _pending_settings.get(document_id) or {}
+    return wglink_protocol.solve_settings_problems({**_settings_used(document_id), **pending})
+
+
+def _settings_to_send() -> dict[str, object]:
+    """The panel's edits for this document's Solve; refused while one is unusable.
+
+    Only to a WG that reads them: an older WG solves with its own settings,
+    and the edits wait.
+    """
+
+    document_id = _active_document_id() or ""
+    ipc = wglink_workspace.ipc_folder()
+    if ipc is None or not wglink_requests.can_change_settings(ipc):
+        return {}
+    # An inbox request that this press replaces may never reach WG. Carry
+    # its edits forward from the existing request history before withdrawing it.
+    previous = _requests.current()
+    inherited = {}
+    if (wglink_requests.replaces(previous, {"kind": wglink_requests.SOLVE, "documentId": document_id})
+            and wglink_requests.request_path(ipc, previous).is_file()):
+        inherited = previous.get("sentSettings") or {}
+    pending = {**inherited, **(_pending_settings.get(document_id) or {})}
+    if not pending:
+        return {}
+    problems = wglink_protocol.solve_settings_problems({**_settings_used(document_id), **pending})
+    if problems:
+        raise wglink_text.problem("solve_settings", ", ".join(problems))
+    return wglink_protocol.request_solve_settings(pending)
+
+
+def _settings_sent(document_id: object, sent: dict[str, object]) -> None:
+    """WG has them now: forget the edits unless they changed while sending."""
+
+    key = str(document_id or "")
+    pending = _pending_settings.get(key)
+    if pending is None:
+        return
+    for field, value in sent.items():
+        if field in pending and pending[field] == value:
+            pending.pop(field)
+    if not pending:
+        _pending_settings.pop(key, None)
+
+
+def _settings_view(document_id: str | None) -> dict[str, object] | None:
+    """The panel's settings form, or None where WG cannot take changes."""
+
+    ipc = wglink_workspace.ipc_folder()
+    if not document_id or ipc is None or not wglink_requests.can_change_settings(ipc):
+        return None
+    used = _settings_used(document_id)
+    pending = _pending_settings.get(document_id) or {}
+    fields = []
+    for key, label in wglink_protocol.SOLVE_SETTINGS_LABELS.items():
+        fields.append({
+            "id": key,
+            "label": label + (" (Hz)" if key in _SETTINGS_HZ else ""),
+            "value": pending.get(key, used.get(key)),
+            "used": used.get(key),
+            "changed": key in pending,
+            **({"choices": [{"id": "log", "label": "Logarithmic"}, {"id": "linear", "label": "Linear"}]}
+               if key == "frequencySpacing" else {}),
+        })
+    problems = _settings_problems(document_id)
+    return {
+        "title": "Solve settings",
+        "documentId": document_id,
+        "fields": fields,
+        "changed": bool(pending),
+        "note": ("Your changes go with the next Solve; Waveguide Generator keeps them for this model."
+                 if pending else
+                 "The settings this model's last solve used. Change any of them for the next Solve."
+                 if used else
+                 "Blank fields keep Waveguide Generator's settings for this model."),
+        "problem": f"Cannot be used: {', '.join(problems)}." if problems else None,
+        "reset": "Keep WG's settings" if pending else None,
+    }
 
 
 def _active_document_name() -> str:
@@ -1628,6 +1757,7 @@ def _submission_key(operation: str, inputs: object) -> str:
         str(getattr(selection, "entityToken", selection)),
         _anchor_id(_selected_name(inputs, "anchor_instance_id", "")),
         revision, sorted(marks), settings,
+        _pending_settings.get(_active_document_id() or "") if operation == "solve" else None,
     ], default=str)
 
 
@@ -1664,6 +1794,12 @@ def _request_view() -> dict[str, object]:
                      "kindLabel": wglink_protocol.REQUEST_HISTORY_TEXT["solve" if entry.get("kind") == wglink_requests.SOLVE else "send"],
                      "submittedAt": entry.get("submittedAt") or entry.get("pressedAt")})
     found.update(historyNotes=[_requests_hint] if _requests_hint else [], entries=rows, allDocuments=_requests.all_documents, labels=wglink_protocol.REQUEST_HISTORY_TEXT)
+    # The palette is where a user starts the two everyday commands, so they
+    # sit above the history; Clear finished tidies it.
+    found["toolbar"] = [{"id": PALETTE_COMMAND_PREFIX + operation, "label": COMMANDS[operation][1]}
+                        for operation in PALETTE_COMMANDS]
+    found["toolbar"].append({"id": "clearFinished", "label": wglink_protocol.REQUEST_HISTORY_TEXT["clearFinished"]})
+    found["settings"] = _settings_view(document_id)
     if _requests_hint:
         found["notes"] = list(found.get("notes") or []) + [_requests_hint]
     return found
@@ -1683,17 +1819,24 @@ class RequestsPaletteHTMLHandler(getattr(adsk.core, "HTMLEventHandler", object))
             if action == "ready":
                 _requests_palette_ready = True
                 args.returnData = json.dumps(_request_view())
+            elif action == "settings":
+                data = json.loads(str(getattr(args, "data", "") or "{}"))
+                document_id = data.get("documentId") if isinstance(data, dict) else None
+                values = data.get("values") if isinstance(data, dict) else None
+                if isinstance(document_id, str) and document_id:
+                    _schedule_followup(lambda: _set_pending_settings(document_id, values))
             elif action == "action":
                 data = json.loads(str(getattr(args, "data", "") or "{}"))
                 action_id = str(data.get("id") or "") if isinstance(data, dict) else ""
                 request_id = str(data.get("requestId") or "") if isinstance(data, dict) else ""
-                _schedule_followup(lambda: _request_action(action_id, request_id))
+                document_id = str(data.get("documentId") or _active_document_id() or "") if isinstance(data, dict) else ""
+                _schedule_followup(lambda: _request_action(action_id, request_id, document_id))
         except Exception:  # noqa: BLE001 - a palette message must not raise into Fusion
             _log(f"[{PANEL_NAME}] request palette\n{traceback.format_exc()}")
 
 
 class RequestsPaletteClosedHandler(getattr(adsk.core, "UserInterfaceGeneralEventHandler", object)):
-    """The user closed the palette: look less often; Requests… reopens it."""
+    """The user closed the palette: look less often; Show Panel reopens it."""
 
     def notify(self, _args: object) -> None:
         _requests.visible = False
@@ -1796,17 +1939,25 @@ def _close_request_palette() -> None:
     _requests_palette_handlers.clear()
 
 
+#: The commands the palette's own buttons start, as ``command:<operation>``.
+PALETTE_COMMANDS = ("source", "solve")
+PALETTE_COMMAND_PREFIX = "command:"
 _OPEN_WG_ACTIONS = {wglink_protocol.REQUEST_STATUS_OPEN_WG["id"],
                     wglink_protocol.REQUEST_STATUS_SHOW_RESULTS["id"]}
 
 
-def _request_action(action_id: str, request_id: str = "") -> None:
+def _request_action(action_id: str, request_id: str = "", document_id: str | None = None) -> None:
     """A palette button, as a follow-up on the main thread."""
 
     global _requests_hint, _force_new_request
     request = _requests.get(request_id) if request_id else _requests.current()
-    if action_id == "thisDocument" or action_id == "allDocuments":
-        _requests.all_documents = action_id == "allDocuments"
+    if action_id.startswith(PALETTE_COMMAND_PREFIX):
+        operation = action_id[len(PALETTE_COMMAND_PREFIX):]
+        if operation in PALETTE_COMMANDS:
+            _execute_command(operation)
+        return
+    if action_id == "resetSettings":
+        _pending_settings.pop(document_id if document_id is not None else _active_document_id() or "", None)
         _show_request_palette()
         return
     if action_id == "clearFinished":
@@ -2136,6 +2287,8 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             elif self.operation == "update":
                 report = wglink_core.update(_app(), None, options)
             elif self.operation in {"send", "solve"}:
+                # The panel's edits go with a Solve; checked before anything is exported.
+                solve_settings = _settings_to_send() if self.operation == "solve" else {}
                 superseded = _requests.current()
                 followed = wglink_requests.new_request(
                     str(uuid.uuid4()),
@@ -2145,6 +2298,8 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                     document_id=_active_document_id(),
                     submission_key=self.submission_key,
                 )
+                if solve_settings:
+                    followed["sentSettings"] = dict(solve_settings)
                 _follow(followed)
                 _show_request_palette(open_it=True)
                 progress = _show_export_progress(self.operation)
@@ -2185,7 +2340,10 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                     acknowledged=acknowledged if solve else (),
                     request_id=followed["requestId"],
                     superseded=superseded,
+                    solve_settings=solve_settings,
                 )
+                if solve_settings:
+                    _settings_sent(followed.get("documentId"), solve_settings)
                 report["solve_requested"] = solve
                 _update_export_progress(progress, 3, f"Sent to {PANEL_NAME}.")
             elif self.operation == "source":

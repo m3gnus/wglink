@@ -1585,23 +1585,24 @@ def test_a_second_registration_adopts_the_panel_instead_of_rebuilding_it(
     assert panel is not None
     assert list(first.COMMANDS) == [
         "source",
+        "solve",
+        "requests",
+        "send",
         "declare",
         "fem",
-        "solve",
         "insert",
         "update",
-        "send",
         "detach",
-        "requests",
     ]
-    assert first.PROMOTED_COMMANDS == ("source", "solve", "send", "requests")
+    assert first.PROMOTED_COMMANDS == ("source", "solve", "requests")
     assert {"audit", "relink"} <= set(first.wglink_core.__all__)
-    # Four promoted commands plus Manage, whose four entries are the complete
+    # Three promoted commands plus Advanced, whose five entries are the complete
     # maintenance UI. Audit and Relink remain head-less APIs only.
-    assert panel.controls.count == 5
+    assert panel.controls.count == 4
     manage = panel.controls.itemById(first.MANAGE_DROPDOWN_ID)
     assert manage is not None
     assert [control.definition.id for control in manage.controls._items] == [
+        "hornlab_wglink_send",
         "hornlab_wglink_declare_body",
         "hornlab_wglink_insert",
         "hornlab_wglink_update",
@@ -1614,7 +1615,6 @@ def test_a_second_registration_adopts_the_panel_instead_of_rebuilding_it(
     ] == [
         "hornlab_wglink_set_source",
         "hornlab_wglink_solve",
-        "hornlab_wglink_send",
         "hornlab_wglink_requests",
     ]
     assert first._owned is True
@@ -1632,7 +1632,7 @@ def test_a_second_registration_adopts_the_panel_instead_of_rebuilding_it(
     # command id reserved.
     assert ui.messages == []
     assert panels.itemById(first.PANEL_ID) is panel
-    assert panel.controls.count == 5
+    assert panel.controls.count == 4
     assert second._owned is False
     assert second._definitions == []
 
@@ -1640,7 +1640,7 @@ def test_a_second_registration_adopts_the_panel_instead_of_rebuilding_it(
     second.stop(None)
     assert ui.messages == []
     assert panel.isValid
-    assert panel.controls.count == 5
+    assert panel.controls.count == 4
     assert [d.id for d in definitions.items.values() if d.isValid] == [
         command_id for operation, (command_id, _name, _description) in first.COMMANDS.items()
         if operation != "fem"

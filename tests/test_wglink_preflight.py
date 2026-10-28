@@ -133,11 +133,11 @@ def test_a_scope_that_cannot_be_exported_is_the_only_finding():
     [finding] = protocol.preflight_findings({
         "scope_error": "Export refused for body 'helper'.",
         "has_unclassified_visible_surface_refusal": True,
-        "manage_dropdown_name": "Manage Link…",
+        "manage_dropdown_name": "Advanced",
         "sources": [],
     })
     assert finding["code"] == "scope_unclassified_surface"
-    assert finding["message"].endswith("Declare Body… is under Manage Link….")
+    assert finding["message"].endswith("Declare Body… is under Advanced.")
 
 
 def test_a_group_left_out_of_this_selection_is_a_note_not_an_error():

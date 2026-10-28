@@ -935,3 +935,204 @@ def test_fusion_holds_events_while_a_modal_is_open(monkeypatch, tmp_path: Path) 
         assert palette.shown["headline"] == "Horn A · Waiting for the solver to start."
     finally:
         module.stop(None)
+
+
+def test_the_palettes_top_row_starts_sources_and_mesh_and_solve(monkeypatch, tmp_path: Path) -> None:
+    fixture = _following(monkeypatch, tmp_path, "WGLink_palette_toolbar")
+    module = fixture.module
+    palette = _palette(fixture)
+    shown = palette.load()
+    started: list[str] = []
+    monkeypatch.setattr(module, "_execute_command", lambda operation: started.append(operation) or True)
+
+    assert [item["id"] for item in shown["toolbar"]] == ["command:source", "command:solve", "clearFinished"]
+    assert [item["label"] for item in shown["toolbar"][:2]] == ["Sources & Mesh…", "Solve in WG"]
+    palette.click("command:source")
+    palette.click("command:solve")
+    palette.click("command:detach")  # only the palette's own commands run from it
+    palette.click("allDocuments")  # the document toggle is gone
+    assert started == []  # nothing ran inside the page's own message
+    _deliver_followups(module, fixture.app)
+    assert started == ["source", "solve"]
+    assert module._requests.all_documents is False
+
+
+def _advertise_settings(ipc: Path, value: object = 1) -> None:
+    path = ipc / wglink_inbox.CAPABILITIES_FILENAME
+    payload = json.loads(path.read_text())
+    payload[wglink_protocol.SOLVE_SETTINGS_CAPABILITY] = value
+    path.write_text(json.dumps(payload))
+
+
+def _following_document(monkeypatch, tmp_path: Path, name: str, operation: str = "solve"):
+    """``_following``, in a document the add-in can name."""
+
+    fixture = _transfer(monkeypatch, tmp_path, name)
+    monkeypatch.setattr(fixture.module, "_active_document_id", lambda: "doc-1")
+    _advertise_acks(fixture.ipc)
+    _advertise_status(fixture.ipc)
+    _run(fixture.module, operation)
+    [fixture.request] = _inbox(fixture.ipc)
+    fixture.request_id = fixture.request["operationId"]
+    return fixture
+
+
+def _new_requests(fixture) -> list[dict]:
+    return [request for request in _inbox(fixture.ipc) if request["operationId"] != fixture.request_id]
+
+
+def _change_settings(fixture, palette, **values) -> dict:
+    palette._send("settings", json.dumps({"documentId": fixture.module._active_document_id(), "values": values}))
+    _deliver_followups(fixture.module, fixture.app)
+    return palette.shown["settings"]
+
+
+def test_a_deferred_settings_edit_stays_with_its_rendered_document(monkeypatch, tmp_path: Path) -> None:
+    fixture = _following_document(monkeypatch, tmp_path, "WGLink_settings_document")
+    module = fixture.module
+    _advertise_settings(fixture.ipc)
+    palette = _palette(fixture)
+    palette.load()
+    document_id = palette.shown["settings"]["documentId"]
+    palette._send("settings", json.dumps({"documentId": document_id, "values": {"frequencyCount": "60"}}))
+    monkeypatch.setattr(module, "_active_document_id", lambda: "doc-2")
+
+    _deliver_followups(module, fixture.app)
+
+    assert module._pending_settings == {document_id: {"frequencyCount": 60}}
+    assert not palette.shown["settings"]["changed"]
+    module._pending_settings["doc-2"] = {"frequencyCount": 24}
+    palette._send("action", json.dumps({"id": "resetSettings", "documentId": document_id}))
+    _deliver_followups(module, fixture.app)
+    assert module._pending_settings == {"doc-2": {"frequencyCount": 24}}
+
+
+@pytest.mark.parametrize("fresh_spacing", [False, True])
+def test_replacing_an_unclaimed_solve_carries_the_settings_it_would_withdraw(monkeypatch, tmp_path: Path, fresh_spacing) -> None:
+    fixture = _following_document(monkeypatch, tmp_path, "WGLink_settings_replaced")
+    module = fixture.module
+    _advertise_settings(fixture.ipc)
+    palette = _palette(fixture)
+    palette.load()
+    _change_settings(fixture, palette, frequencyCount="60")
+    _run(module, "solve")
+    [first] = _inbox(fixture.ipc)
+    assert first["solveSettings"] == {"frequencyCount": 60}
+    assert not module._pending_settings
+    if fresh_spacing:
+        _change_settings(fixture, palette, frequencySpacing="linear")
+
+    _run(module, "solve")
+
+    [replacement] = _inbox(fixture.ipc)
+    assert replacement["operationId"] != first["operationId"]
+    assert replacement["solveSettings"] == {**first["solveSettings"],
+                                           **({"frequencySpacing": "linear"} if fresh_spacing else {})}
+    assert not module._pending_settings
+    _claim(fixture, replacement["operationId"])
+    assert module._settings_to_send() == {}
+
+
+def test_solve_settings_shown_are_the_last_solves_and_edits_go_with_the_next_solve(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    fixture = _following_document(monkeypatch, tmp_path, "WGLink_palette_settings")
+    module = fixture.module
+    assert "solveSettings" not in fixture.request
+    palette = _palette(fixture)
+    palette.load()
+    assert palette.shown["settings"] is None  # this WG does not read them
+    _advertise_settings(fixture.ipc)
+    used = {"frequencyStartHz": 50.0, "frequencyEndHz": 20000.0, "frequencyCount": 33,
+            "frequencySpacing": "log"}
+    _status(fixture, "solved", 3, result={"jobId": "job-1", "runNumber": 1}, settings=used)
+    shown = _tick(fixture)["settings"]
+    assert {field["id"]: field["value"] for field in shown["fields"]} == used
+    assert not shown["changed"]
+
+    shown = _change_settings(fixture, palette, frequencyStartHz="50", frequencyEndHz="",
+                             frequencyCount="60", frequencySpacing="log")
+    # Only what differs from WG's is an edit; a blank keeps WG's value.
+    assert module._pending_settings == {module._active_document_id(): {"frequencyCount": 60}}
+    assert [field["id"] for field in shown["fields"] if field["changed"]] == ["frequencyCount"]
+    assert shown["reset"]
+
+    _run(module, "solve")
+    [request] = _new_requests(fixture)
+    assert request[wglink_protocol.SOLVE_SETTINGS_FIELD] == {"frequencyCount": 60}
+    # WG has them now: the panel holds no copy, and shows them as last sent.
+    assert module._pending_settings == {}
+    values = {field["id"]: field["value"] for field in module._request_view()["settings"]["fields"]}
+    assert values["frequencyCount"] == 60
+
+
+def test_unusable_solve_settings_stop_the_solve_before_anything_is_sent(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    fixture = _following_document(monkeypatch, tmp_path, "WGLink_palette_settings_bad")
+    module = fixture.module
+    _advertise_settings(fixture.ipc)
+    palette = _palette(fixture)
+    palette.load()
+    shown = _change_settings(fixture, palette, frequencyStartHz="2000", frequencyEndHz="100",
+                             frequencyCount="many")
+    assert shown["problem"] == "Cannot be used: End frequency, Number of frequencies." or (
+        shown["problem"] == "Cannot be used: Number of frequencies, End frequency.")
+
+    _run(module, "solve")
+    assert _new_requests(fixture) == []
+    assert any("cannot be used" in str(message) for message in fixture.ui.messages), fixture.ui.messages
+
+    palette.click("resetSettings")
+    _deliver_followups(module, fixture.app)
+    assert module._pending_settings == {}
+    assert palette.shown["settings"]["problem"] is None
+
+
+def test_a_send_never_carries_solve_settings(monkeypatch, tmp_path: Path) -> None:
+    fixture = _following_document(monkeypatch, tmp_path, "WGLink_palette_settings_send")
+    module = fixture.module
+    _advertise_settings(fixture.ipc)
+    palette = _palette(fixture)
+    palette.load()
+    _change_settings(fixture, palette, frequencyCount="60")
+    _run(module, "send")
+    [request] = _new_requests(fixture)
+    assert wglink_protocol.SOLVE_SETTINGS_FIELD not in request
+    assert module._pending_settings  # still waiting for a Solve
+
+
+def test_solve_settings_wire_format_is_checked_on_both_sides() -> None:
+    assert wglink_protocol.request_solve_settings(None) == {}
+    assert wglink_protocol.request_solve_settings(
+        {"frequencyCount": 60, "frequencySpacing": "linear", "newer": True}
+    ) == {"frequencyCount": 60, "frequencySpacing": "linear"}
+    for wrong in ({"frequencyCount": 0}, {"frequencyCount": 402}, {"frequencyCount": 6.5},
+                  {"frequencyStartHz": -1}, {"frequencyStartHz": float("nan")},
+                  {"frequencyStartHz": 200, "frequencyEndHz": 100}, {"frequencySpacing": "cubic"},
+                  {"frequencyCount": True}, []):
+        with pytest.raises(wglink_protocol.ProtocolValidationError):
+            wglink_protocol.request_solve_settings(wrong)
+    with pytest.raises(ValueError):
+        wglink_inbox.wg_request_payload(
+            kind=wglink_inbox.KIND_RECEIVE_SNAPSHOT, command_id="a", return_id=None,
+            bundle_relative="b", manifest_sha256="c", requested_at="d",
+            solve_settings={"frequencyCount": 60})
+    status = wglink_protocol.validate_request_status({
+        "contract": "wg-request-status", "schemaVersion": 1, "seq": 1, "requestId": "r",
+        "state": "solving", "settings": {"frequencyCount": 60, "frequencyStartHz": "x"}})
+    assert status["settings"] == {"frequencyCount": 60}
+
+
+def test_settings_used_prefers_what_wg_reported_and_ignores_requests_never_written() -> None:
+    newest = wglink_requests.new_request("r2", SOLVE, "Horn A", document_id="doc")
+    newest["sentSettings"] = {"frequencyCount": 99}  # never written
+    middle = wglink_requests.new_request("r1", SOLVE, "Horn A", document_id="doc")
+    middle.update(submittedAt=1.0, sentSettings={"frequencyCount": 60, "frequencyStartHz": 20.0},
+                  status={"settings": {"frequencyCount": 61}})
+    oldest = wglink_requests.new_request("r0", SOLVE, "Horn A", document_id="doc")
+    oldest.update(submittedAt=0.5, status={"settings": {"frequencyEndHz": 20000.0, "frequencyStartHz": 50.0}})
+    other = wglink_requests.new_request("x", SOLVE, "Horn B", document_id="other")
+    other.update(submittedAt=2.0, status={"settings": {"frequencySpacing": "linear"}})
+    assert wglink_requests.settings_used([other, newest, middle, oldest], "doc") == {
+        "frequencyCount": 61, "frequencyStartHz": 20.0, "frequencyEndHz": 20000.0}

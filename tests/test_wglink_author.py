@@ -303,10 +303,10 @@ def test_an_unclassified_surface_body_points_at_both_correct_remedies(author):
             "visible surface body 'Shell' is not classified. If it is a modelling "
             "or cutting helper, hide the body itself in the browser; if it is "
             f"part of the acoustic exterior, select it and use "
-            "Manage Link… → Declare Body… → Exterior shell"
+            "Advanced → Declare Body… → Exterior shell"
         ),
         has_unclassified_visible_surface_refusal=True,
-        manage_dropdown_name="Manage Link…",
+        manage_dropdown_name="Advanced",
         included=[],
         sources=[],
     ))
@@ -314,10 +314,10 @@ def test_an_unclassified_surface_body_points_at_both_correct_remedies(author):
     assert summary.text().startswith("⚠ Export is blocked")
     assert "hide the body itself in the browser" in summary.text()
     assert (
-        "select it and use Manage Link… → Declare Body… → Exterior shell"
+        "select it and use Advanced → Declare Body… → Exterior shell"
         in summary.text()
     )
-    assert "Declare Body… is under Manage Link…." not in summary.text()
+    assert "Declare Body… is under Advanced." not in summary.text()
     assert "Bodies included: none" not in summary.text()
     assert "Sources: none" not in summary.text()
     assert author.NO_SOURCE_WARNING not in summary.text()
@@ -334,20 +334,20 @@ def test_unclassified_name_does_not_select_the_surface_refusal_hint(author):
         sources=[],
     ))
 
-    assert "Declare Body… is under Manage Link…." not in summary.text()
+    assert "Declare Body… is under Advanced." not in summary.text()
 
 
 def test_surface_refusal_code_adds_the_correct_manage_menu_hint(author):
     summary = author.preflight_summary(clean_scope(
         scope_error="Export refused for body 'unclassified helper'.",
         has_unclassified_visible_surface_refusal=True,
-        manage_dropdown_name="Manage Link…",
+        manage_dropdown_name="Advanced",
         included=[],
         sources=[],
     ))
 
-    assert "Declare Body… is under Manage Link…." in summary.text()
-    assert "Manage Link…" in summary.text()
+    assert "Declare Body… is under Advanced." in summary.text()
+    assert "Advanced" in summary.text()
     assert "exclude" not in summary.text().casefold()
 
 

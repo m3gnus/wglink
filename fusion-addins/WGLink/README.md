@@ -74,9 +74,9 @@ labelling it `original`.
 
 ## Commands
 
-The panel promotes the three everyday commands, **Sources & Mesh…**, **Solve in
-WG** and **Send to WG**. **Manage Link…** contains **Declare Body…**,
-**Insert**, **Update**, and **Detach**.
+The panel promotes the everyday commands, **Sources & Mesh…** and **Solve in
+WG**, plus **Show Panel**. **Advanced** contains **Send to WG**, **Declare
+Body…**, **Insert**, **Update**, and **Detach**.
 Insert and Update are ordinarily automatic — WG's *Send to CAD* publishes a
 handoff the add-in applies on its own — so the dropdown is maintenance,
 authoring-remedy, and recovery UI rather than the normal workflow. Audit and
@@ -350,7 +350,7 @@ Commands and requests cross through WG's machine-local IPC folder,
   Mesh…** when the model meshes too large, **Show results in Waveguide
   Generator**, **Send again**). Technical correlation stays under its
   collapsed Diagnostics. It opens on Send or Solve and, by itself, only when WG
-  needs the user; **Requests…** in the panel reopens it. Routine outcomes are
+  needs the user; **Show Panel** in the panel reopens it. Routine outcomes are
   never a message box. WG's states and their words come from WG's request
   status (`docs/REQUEST-STATUS.md`, `wglink_protocol.request_status_text`);
   the add-in words only what WG cannot know: exporting, waiting to be picked

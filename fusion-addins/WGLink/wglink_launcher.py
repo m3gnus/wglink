@@ -462,19 +462,27 @@ class BackendAdmission:
 
 #: WG's macOS application identifier (WG ``launchers/macos``).
 WG_BUNDLE_ID = "is.hornlab.waveguide-generator-v2"
+#: WG's window title, alone or with the open design (WG ``useDocumentTitle``).
+WG_WINDOW_TITLE = "Waveguide Generator"
 
 
 def bring_wg_forward(*, platform: str | None = None,
-                     spawn: Callable[..., object] = subprocess.Popen) -> bool:
+                     spawn: Callable[..., object] = subprocess.Popen,
+                     user32: object | None = None) -> bool:
     """Ask the system to bring Waveguide Generator to the front, starting it if needed.
 
-    macOS only: ``open -b`` with WG's application identifier, which returns at
-    once and reads nothing of Fusion. Elsewhere there is no dependable way to
-    raise another program's window; False tells the caller to say "Switch to
-    Waveguide Generator" instead.
+    macOS: ``open -b`` with WG's application identifier, which returns at
+    once and reads nothing of Fusion. Windows: WG's own top-level window,
+    restored if minimized and made the foreground window; Windows lets
+    Fusion do that only because Fusion is in front when a palette button is
+    pressed. Elsewhere, or when no WG window is found, False tells the
+    caller to say "Switch to Waveguide Generator" instead.
     """
 
-    if (platform or sys.platform) != "darwin":
+    platform = platform or sys.platform
+    if platform == "win32":
+        return _raise_windows_wg(user32)
+    if platform != "darwin":
         return False
     try:
         spawn(["/usr/bin/open", "-b", WG_BUNDLE_ID], stdin=subprocess.DEVNULL,
@@ -482,3 +490,56 @@ def bring_wg_forward(*, platform: str | None = None,
     except (OSError, ValueError):
         return False
     return True
+
+
+def _is_wg_window_title(title: str) -> bool:
+    return (title == WG_WINDOW_TITLE or title.endswith(f" \u2014 {WG_WINDOW_TITLE}")
+            or title.startswith(f"{WG_WINDOW_TITLE} \u2014 "))
+
+
+def _raise_windows_wg(user32: object | None = None) -> bool:
+    """Raise WG's visible top-level window. Never raises.
+
+    Fusion's own request palette carries the same title, so only windows of
+    other processes count.
+    """
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        if user32 is None:
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+        own = os.getpid()
+        found: list[int] = []
+
+        # WINFUNCTYPE exists only on Windows; CFUNCTYPE lets the tests run anywhere.
+        callback = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
+
+        @callback(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def visit(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == own:
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0 or length > 1024:
+                return True
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            if _is_wg_window_title(buffer.value):
+                found.append(hwnd)
+                return False
+            return True
+
+        user32.EnumWindows(visit, 0)
+        if not found:
+            return False
+        hwnd = found[0]
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        return bool(user32.SetForegroundWindow(hwnd))
+    except Exception:  # noqa: BLE001 - a window that will not come forward is not an error
+        return False

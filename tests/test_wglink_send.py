@@ -678,7 +678,7 @@ def test_two_visible_undeclared_surfaces_still_refuse(send_module, monkeypatch):
     assert "no purpose set" in report["scope_error"]
     assert "hide the body itself in the browser" in report["scope_error"]
     assert (
-        "select it and use Manage Link… → Declare Body… → Exterior shell"
+        "select it and use Advanced → Declare Body… → Exterior shell"
         in report["scope_error"]
     )
     assert report["included"] == [] and report["sources"] == []
@@ -862,8 +862,8 @@ def test_unclassified_surface_name_does_not_add_exclusion_advice(
     assert "A visible surface body has no purpose set" in report["scope_error"]
     assert "hide the body itself" in report["scope_error"]
     assert "exclude" not in summary.text().casefold()
-    assert "Manage Link… → Declare Body… → Exterior shell" in summary.text()
-    assert "Declare Body… is under Manage Link…." not in summary.text()
+    assert "Advanced → Declare Body… → Exterior shell" in summary.text()
+    assert "Declare Body… is under Advanced." not in summary.text()
 
 
 def test_step_body_counter_handles_solid_shell_mixed_and_ignores_names(send_module):

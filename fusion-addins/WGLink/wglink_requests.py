@@ -32,7 +32,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 if __package__:
     from . import wglink_inbox, wglink_protocol, wglink_status
@@ -554,6 +554,8 @@ def _read_entry(found: object) -> dict[str, Any] | None:
     if not isinstance(found.get("notes"), list):
         found["notes"] = []
     found["quiet"] = bool(found.get("quiet"))
+    if found.get("sentSettings") is not None:
+        found["sentSettings"] = wglink_protocol._status_settings(found["sentSettings"])
     return found
 
 
@@ -634,6 +636,39 @@ def can_show(ipc: Path) -> bool:
         return False
     return (type(capabilities.get(wglink_protocol.SHOW_REQUEST_CAPABILITY)) is int
             and capabilities[wglink_protocol.SHOW_REQUEST_CAPABILITY] == 1)
+
+
+def can_change_settings(ipc: Path) -> bool:
+    """Whether WG reads the solve settings a Solve request carries."""
+    capabilities = wglink_inbox._read_json(Path(ipc) / wglink_inbox.CAPABILITIES_FILENAME)
+    if not isinstance(capabilities, dict):
+        return False
+    found = capabilities.get(wglink_protocol.SOLVE_SETTINGS_CAPABILITY)
+    return type(found) is int and found == wglink_protocol.SOLVE_SETTINGS_VERSION
+
+
+def settings_used(entries: Sequence[Mapping[str, Any]], document_id: object) -> dict[str, Any]:
+    """The solve settings this document's latest solves used, newest first, field by field.
+
+    What WG reported for a solve wins over what this add-in sent with it (WG
+    may have refused or adjusted nothing, but it is the owner); a request that
+    was never written says nothing. Fields no solve reports stay absent: the
+    panel then shows WG's own value as unknown. ``entries`` are newest first.
+    """
+    found: dict[str, Any] = {}
+    for entry in entries:
+        if entry.get("kind") != SOLVE or not document_id or entry.get("documentId") != document_id:
+            continue
+        status = entry.get("status") if isinstance(entry.get("status"), Mapping) else {}
+        reported = status.get("settings") if isinstance(status.get("settings"), Mapping) else {}
+        sent = (entry.get("sentSettings") if entry.get("submittedAt") is not None
+                and isinstance(entry.get("sentSettings"), Mapping) else {})
+        for source in (reported, sent):
+            for key, value in source.items():
+                found.setdefault(key, value)
+        if len(found) == len(wglink_protocol.SOLVE_SETTINGS_LABELS):
+            break
+    return found
 
 
 def show_request(ipc: Path, request: Mapping[str, Any]) -> Path | None:

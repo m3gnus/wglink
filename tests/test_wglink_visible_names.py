@@ -28,7 +28,7 @@ def _assignments(filename):
 def test_panel_commands_and_manifest_use_the_display_name():
     shell = _assignments("WGLink.py")
     assert shell["PANEL_NAME"] == "Waveguide Generator"
-    assert _assignments("wglink_return.py")["MANAGE_DROPDOWN_NAME"] == "Manage Link…"
+    assert _assignments("wglink_return.py")["MANAGE_DROPDOWN_NAME"] == "Advanced"
     commands = shell["COMMANDS"]
     assert commands["source"][1] == "Sources & Mesh…"
     assert commands["detach"][2] == (

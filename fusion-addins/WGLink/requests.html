@@ -10,13 +10,22 @@ body{font:14px system-ui,-apple-system,"Segoe UI",sans-serif;margin:14px 16px;co
 button{font:inherit;padding:5px 12px;border:1px solid var(--line);border-radius:4px;background:var(--button);color:var(--fg);cursor:pointer}
 section{border-bottom:1px solid var(--line);padding:8px 0 12px}nav{display:flex;gap:6px;flex-wrap:wrap}progress{display:block;margin:8px 0}
 details{margin-top:18px;color:var(--muted)}
+#settings{border-bottom:1px solid var(--line);padding:6px 0 10px}
+#settings h2{font-size:13px;margin:6px 0}
+#settings label{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:4px 0}
+#settings input,#settings select{font:inherit;width:8em;padding:3px 6px;border:1px solid var(--line);border-radius:4px;background:var(--button);color:var(--fg)}
+#settings .changed{border-color:var(--accent)}
+.muted{color:var(--muted)}.problem{color:#c62828}
 summary{cursor:pointer}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}
 [hidden]{display:none!important}
 </style>
 </head>
 <body>
-<nav id="filters"></nav>
+<nav id="filters" aria-label="Commands"></nav>
+<section id="settings" hidden><h2 id="settings-title"></h2><form id="settings-form"></form>
+<p id="settings-note" class="muted"></p><p id="settings-problem" class="problem" hidden></p>
+<button id="settings-reset" type="button" hidden></button></section>
 <div id="history"></div>
 <details><summary>Diagnostics</summary><pre id="diagnostics"></pre></details>
 <script>
@@ -38,14 +47,14 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}
     var focusRequest = active && active.dataset ? active.dataset.requestId : null;
     var filters = byId("filters"), history = byId("history");
     filters.textContent = ""; history.textContent = "";
-    ["thisDocument", "allDocuments", "clearFinished"].forEach(function (id) {
+    (view.toolbar || []).forEach(function (item) {
       var button = document.createElement("button");
-      button.textContent = (view.labels || {})[id] || "";
-      button.dataset.action = id;
-      if (id !== "clearFinished") { button.setAttribute("aria-pressed", String((id === "allDocuments") === !!view.allDocuments)); }
-      button.addEventListener("click", function () { send("action", JSON.stringify({id:id})); });
+      button.textContent = item.label || "";
+      button.dataset.action = item.id;
+      button.addEventListener("click", function () { send("action", JSON.stringify({id:item.id})); });
       filters.appendChild(button);
     });
+    renderSettings(view.settings);
     (view.entries || []).forEach(function (entry) {
       var row = document.createElement("section"), title = document.createElement("p");
       var fields = {document: entry.documentName || view.labels.unnamedDocument,
@@ -80,6 +89,67 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}
         return false;
       });
     }
+  }
+  // The settings form is built once per set of fields and then only updated,
+  // so a status update never takes away what the user is typing.
+  var settingsShape = null, settingsDocument = null;
+  function sendSettings() {
+    send("settings", JSON.stringify({documentId: settingsDocument, values: settingsValues()}));
+  }
+  function settingsValues() {
+    var values = {};
+    Array.prototype.forEach.call(byId("settings-form").elements, function (field) {
+      if (field.name) { values[field.name] = field.value; }
+    });
+    return values;
+  }
+  function renderSettings(settings) {
+    var section = byId("settings"), form = byId("settings-form");
+    if (!section) { return; }
+    section.hidden = !settings;
+    if (!settings) { settingsShape = null; settingsDocument = null; return; }
+    settingsDocument = settings.documentId;
+    var shape = JSON.stringify([settingsDocument, (settings.fields || []).map(function (field) { return [field.id, field.label]; })]);
+    if (shape !== settingsShape) {
+      settingsShape = shape; form.textContent = "";
+      (settings.fields || []).forEach(function (field) {
+        var label = document.createElement("label"), text = document.createElement("span"), input;
+        text.textContent = field.label;
+        if (field.choices) {
+          input = document.createElement("select");
+          var blank = document.createElement("option"); blank.value = ""; blank.textContent = "\u2014";
+          input.appendChild(blank);
+          field.choices.forEach(function (choice) {
+            var option = document.createElement("option"); option.value = choice.id; option.textContent = choice.label;
+            input.appendChild(option);
+          });
+        } else {
+          input = document.createElement("input"); input.type = "text"; input.inputMode = "decimal";
+        }
+        input.name = field.id;
+        input.addEventListener("change", sendSettings);
+        label.appendChild(text); label.appendChild(input); form.appendChild(label);
+      });
+    }
+    (settings.fields || []).forEach(function (field) {
+      var input = form.elements[field.id];
+      if (!input) { return; }
+      input.classList.toggle("changed", !!field.changed);
+      input.placeholder = field.used === null || field.used === undefined ? "WG's setting" : String(field.used);
+      if (document.activeElement !== input) {
+        input.value = field.value === null || field.value === undefined ? "" : String(field.value);
+      }
+    });
+    byId("settings-title").textContent = settings.title || "";
+    byId("settings-note").textContent = settings.note || "";
+    var problem = byId("settings-problem"); problem.hidden = !settings.problem; problem.textContent = settings.problem || "";
+    var reset = byId("settings-reset"); reset.hidden = !settings.reset; reset.textContent = settings.reset || "";
+  }
+  if (byId("settings")) {
+    byId("settings-form").addEventListener("submit", function (event) {
+      event.preventDefault(); sendSettings();
+    });
+    byId("settings-reset").addEventListener("click", function () { send("action", JSON.stringify({id: "resetSettings", documentId: settingsDocument})); });
   }
   // True when the answer carried the state; an empty answer is asked again.
   function received(reply) {

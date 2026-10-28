@@ -461,6 +461,7 @@ def wg_request_payload(
     manifest_sha256: str,
     requested_at: str,
     acknowledged: Sequence[str] = (),
+    solve_settings: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One schema-4 WG request (C2). ``kind`` is the only Send/Solve difference.
 
@@ -468,7 +469,10 @@ def wg_request_payload(
     absent on a Send. ``acknowledged`` names the WG holds the user already
     answered before this Solve (``wglink_protocol.ACKNOWLEDGES``, such as
     Solve anyway over the triangle ceiling); present only on a Solve that has
-    any. A WG that does not read it asks again, as before.
+    any. A WG that does not read it asks again, as before. ``solve_settings``
+    are the solve settings the user changed in Fusion's panel
+    (``wglink_protocol.SOLVE_SETTINGS_FIELD``); present only on a Solve that
+    has any, and only sent to a WG that advertises reading them.
     """
 
     if kind not in WG_REQUEST_KINDS:
@@ -492,8 +496,13 @@ def wg_request_payload(
         holds = wglink_protocol.request_acknowledged(list(acknowledged))
         if holds:
             payload[wglink_protocol.ACKNOWLEDGED_FIELD] = list(holds)
+        settings = wglink_protocol.request_solve_settings(dict(solve_settings or {}))
+        if settings:
+            payload[wglink_protocol.SOLVE_SETTINGS_FIELD] = settings
     elif acknowledged:
         raise ValueError("Only a Solve request answers WG's questions.")
+    elif solve_settings:
+        raise ValueError("Only a Solve request changes solve settings.")
     return payload
 
 
@@ -511,6 +520,7 @@ def plan_wg_request(
     manifest_sha256: str,
     requested_at: str,
     acknowledged: Sequence[str] = (),
+    solve_settings: Mapping[str, Any] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     """Decide, once, the exact request file this command writes: where, and what.
 
@@ -526,7 +536,8 @@ def plan_wg_request(
         "manifest_sha256": manifest_sha256,
         "requested_at": requested_at,
     }
-    payload = wg_request_payload(kind=kind, return_id=return_id, acknowledged=acknowledged, **fields)
+    payload = wg_request_payload(kind=kind, return_id=return_id, acknowledged=acknowledged,
+                                 solve_settings=solve_settings, **fields)
     return solve_request_path(ipc_folder, payload["commandId"]), payload
 
 

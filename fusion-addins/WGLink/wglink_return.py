@@ -19,7 +19,7 @@ if __package__:
 else:
     import wglink_protocol
 
-MANAGE_DROPDOWN_NAME = "Manage Link…"
+MANAGE_DROPDOWN_NAME = "Advanced"
 SCOPE_REASON_UNCLASSIFIED_VISIBLE_SURFACE = "unclassified_visible_surface"
 
 SUPPORTED_RETURN_FEATURES = wglink_protocol.SUPPORTED_RETURN_FEATURES

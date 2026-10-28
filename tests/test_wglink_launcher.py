@@ -1082,3 +1082,68 @@ def test_stop_hides_pending_launch_status(monkeypatch, tmp_path):
         assert fixture.exports == [] and _inbox(fixture.ipc) == []
     finally:
         fixture.module._backend_admission.close()
+
+
+class _FakeUser32:
+    """EnumWindows over ``(hwnd, pid, title, visible, iconic)`` rows."""
+
+    def __init__(self, windows):
+        self.windows = {row[0]: row for row in windows}
+        self.raised: list[int] = []
+        self.restored: list[int] = []
+
+    def EnumWindows(self, visit, _lparam):
+        for hwnd in self.windows:
+            if not visit(hwnd, 0):
+                break
+        return True
+
+    def IsWindowVisible(self, hwnd):
+        return self.windows[hwnd][3]
+
+    def GetWindowThreadProcessId(self, hwnd, pid):
+        pid._obj.value = self.windows[hwnd][1]
+        return 1
+
+    def GetWindowTextLengthW(self, hwnd):
+        return len(self.windows[hwnd][2])
+
+    def GetWindowTextW(self, hwnd, buffer, _size):
+        buffer.value = self.windows[hwnd][2]
+        return len(buffer.value)
+
+    def IsIconic(self, hwnd):
+        return self.windows[hwnd][4]
+
+    def ShowWindow(self, hwnd, _command):
+        self.restored.append(hwnd)
+        return True
+
+    def SetForegroundWindow(self, hwnd):
+        self.raised.append(hwnd)
+        return True
+
+
+def test_windows_raises_wgs_window_and_never_fusions_own_palette() -> None:
+    own = os.getpid()
+    user32 = _FakeUser32([
+        (1, own, "Waveguide Generator", True, False),  # Fusion's palette
+        (2, own + 1, "Waveguide Generator", False, False),  # hidden
+        (3, own + 1, "Notes", True, False),
+        (4, own + 1, "Horn A — Waveguide Generator", True, True),
+    ])
+
+    assert wglink_launcher.bring_wg_forward(platform="win32", user32=user32) is True
+    assert user32.restored == [4]
+    assert user32.raised == [4]
+
+
+def test_windows_without_a_wg_window_asks_the_user_to_switch() -> None:
+    user32 = _FakeUser32([(1, os.getpid(), "Waveguide Generator", True, False)])
+
+    assert wglink_launcher.bring_wg_forward(platform="win32", user32=user32) is False
+    assert user32.raised == []
+
+
+def test_other_platforms_ask_the_user_to_switch() -> None:
+    assert wglink_launcher.bring_wg_forward(platform="linux") is False
