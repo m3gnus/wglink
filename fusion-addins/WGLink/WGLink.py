@@ -4167,13 +4167,19 @@ def _pending_handoff() -> wglink_handoff.PendingHandoff | None:
         # An absent result alone proves nothing: a valid file's read may have
         # failed transiently. Only successful validation can suppress wakeups.
         unusable = wglink_handoff.unusable_handoffs(ipc, bundle_root=bundles)
-        _wg_request_memo = tuple(item.state for item in unusable) or None
+        _wg_request_memo = tuple(item.state for item in unusable if not item.request_id) or None
         for item in unusable:
             if item.request_id:
-                _note_outcome("handoff", item.request_id, "refused", message=(
-                    "The Send to CAD request cannot be read by this add-in. "
-                    "Update WG and its Fusion add-in, restart the add-in, "
-                    "then send the model from WG again."))
+                claimed = wglink_handoff.claim_request(item)
+                if claimed is None:
+                    continue  # Retry without memoizing an unclaimed refusal.
+                try:
+                    _note_outcome("handoff", item.request_id, "refused", message=(
+                        "The Send to CAD request cannot be read by this add-in. "
+                        "Update WG and its Fusion add-in, restart the add-in, "
+                        "then send the model from WG again."))
+                finally:
+                    wglink_handoff.acknowledge_handoff(claimed)
     return handoff
 
 

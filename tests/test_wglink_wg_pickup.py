@@ -123,19 +123,104 @@ def test_invalid_file_is_memoized_and_changed_file_is_retried(monkeypatch, tmp_p
     try:
         folder = ipc / '.fusion-handoffs'
         folder.mkdir(exist_ok=True)
-        request = folder / 'broken.json'
+        request = folder / 'no correlation.json'
         request.write_text('{}')
         _poll(m)
         _deliver_every_event(f.app)
         count = len(f.app.fired)
-        receipt = json.loads((ipc / '.fusion-status.json').read_text())['diagnostics']['recentOutcomes'][-1]
-        assert receipt['requestId'] == 'broken' and receipt['outcome'] == 'refused'
-        assert 'send the model from WG again' in receipt['message']
+        assert request.exists()  # No correlatable ID: leave it and suppress wakeups.
+        assert not m._recent_outcomes
         _poll(m)
         assert len(f.app.fired) == count
         request.write_text('{"changed":true}')
         _poll(m)
         assert len(f.app.fired) == count + 1
+    finally:
+        m.stop(None)
+
+
+@pytest.mark.parametrize('invalidity', ['malformed-json', 'missing-fields', 'bundle-root'])
+def test_refused_unusable_file_is_retired_and_cannot_run_after_restart(monkeypatch, tmp_path, invalidity):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_retire_' + invalidity)
+    m = f.module
+    try:
+        writes, original = _submit(monkeypatch, f, ipc, bundles)
+        request = ipc / '.fusion-handoffs/req-1.json'
+        payload = json.loads(request.read_text())
+        if invalidity == 'bundle-root':
+            monkeypatch.setattr(m.wglink_workspace, 'bundle_folder', lambda: tmp_path / 'other-bundles')
+        else:
+            request.write_text('{' if invalidity == 'malformed-json' else '{}')
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert not writes and f.app.activeDocument is original
+        receipt = json.loads((ipc / '.fusion-status.json').read_text())['diagnostics']['recentOutcomes'][-1]
+        assert receipt['requestId'] == 'req-1' and receipt['outcome'] == 'refused'
+        assert 'send the model from WG again' in receipt['message']
+        assert not list(request.parent.iterdir())  # Neither a runnable file nor a claim remains.
+
+        m.stop(None)
+        # Simulate switching back to the original workspace, or an updated
+        # reader that can now parse the old file. Neither may resurrect it.
+        monkeypatch.setattr(m.wglink_workspace, 'bundle_folder', lambda: bundles)
+        read = m.wglink_handoff._read_json
+        monkeypatch.setattr(m.wglink_handoff, '_read_json', lambda path, **kwargs:
+                            payload if path == request else read(path, **kwargs))
+        m.run(None)
+        assert m._wg_request_memo is None
+        for _ in range(2):
+            _poll(m)
+            _deliver_every_event(f.app)
+        assert not writes and f.app.activeDocument is original
+        assert not request.exists()
+    finally:
+        m.stop(None)
+
+
+def test_unusable_claim_failure_retries_before_reporting_refusal(monkeypatch, tmp_path):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_unusable_claim_retry')
+    m = f.module
+    try:
+        request = ipc / '.fusion-handoffs/broken.json'
+        request.parent.mkdir()
+        request.write_text('{}')
+        claim = m.wglink_handoff.claim_request
+        monkeypatch.setattr(m.wglink_handoff, 'claim_request', lambda _: None)
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert request.exists() and m._wg_request_memo is None
+        assert not m._recent_outcomes
+        monkeypatch.setattr(m.wglink_handoff, 'claim_request', claim)
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert not list(request.parent.iterdir())
+        assert m._recent_outcomes[-1]['outcome'] == 'refused'
+    finally:
+        m.stop(None)
+
+
+def test_unusable_file_changed_before_claim_is_retried_without_refusal(monkeypatch, tmp_path):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_unusable_claim_race')
+    m = f.module
+    try:
+        writes, _ = _submit(monkeypatch, f, ipc, bundles)
+        request = ipc / '.fusion-handoffs/req-1.json'
+        payload = request.read_text()
+        request.write_text('{}')
+        rename = m.wglink_handoff.os.rename
+        def changed(source, target):
+            if source == request:
+                request.write_text(payload)
+            return rename(source, target)
+        monkeypatch.setattr(m.wglink_handoff.os, 'rename', changed)
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert request.exists() and not writes
+        assert m._wg_request_memo is None and not m._recent_outcomes
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert len(writes) == 1
+        assert not list(request.parent.iterdir())
     finally:
         m.stop(None)
 
@@ -487,7 +572,7 @@ def test_proven_unusable_request_reports_a_correlated_terminal_refusal(monkeypat
         else:
             _poll(m)
             _deliver_every_event(f.app)
-        assert not writes and request.exists()
+        assert not writes and not list(request.parent.iterdir())
         report = json.loads((ipc / '.fusion-status.json').read_text())
         receipt = report['diagnostics']['recentOutcomes'][-1]
         assert receipt['requestId'] == 'req-1' and receipt['outcome'] == 'refused'

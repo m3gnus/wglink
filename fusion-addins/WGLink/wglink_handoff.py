@@ -84,9 +84,6 @@ class PendingReturnRequest:
         return self.request_id
 
 
-_Pending = TypeVar("_Pending", PendingHandoff, PendingReturnRequest)
-
-
 def _sequence(payload: Any) -> int | None:
     value = payload.get(SEQUENCE_FIELD) if isinstance(payload, Mapping) else None
     if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
@@ -226,8 +223,8 @@ def acknowledge_return_request(request: PendingReturnRequest) -> bool:
     return _remove_claim(request.marker_path)
 
 
-def acknowledge_handoff(handoff: PendingHandoff) -> bool:
-    """Retire a handoff that ran: delete its claim."""
+def acknowledge_handoff(handoff: PendingHandoff | UnusableHandoff) -> bool:
+    """Retire a handled handoff: delete its claim."""
 
     return _remove_claim(handoff.marker_path)
 
@@ -269,8 +266,12 @@ def request_state(ipc: Path) -> tuple[tuple[str, int, int], ...]:
 class UnusableHandoff:
     """An unchanged file read successfully and proven not to be executable."""
 
+    marker_path: Path
     request_id: str | None
     state: tuple[str, int, int]
+
+
+_Pending = TypeVar("_Pending", PendingHandoff, PendingReturnRequest, UnusableHandoff)
 
 
 def unusable_handoffs(ipc: Path, *, bundle_root: Path) -> list[UnusableHandoff]:
@@ -292,6 +293,7 @@ def unusable_handoffs(ipc: Path, *, bundle_root: Path) -> list[UnusableHandoff]:
         if handoff is not None or before != after:
             continue
         unusable.append(UnusableHandoff(
+            marker_path=path,
             request_id=path.stem if _PLAIN_ID.fullmatch(path.stem) else None,
             state=after,
         ))
@@ -462,8 +464,11 @@ def claim_request(pending: _Pending) -> _Pending | None:
     the rename failed -- the file is gone, or on Windows WG still has it
     open -- in which case the next pass tries again. What the rename took is
     the request: a claim that no longer holds the same request is put back.
+    Unusable files are matched to their validated file state instead of JSON.
     """
 
+    if not pending.request_id:
+        return None
     source = pending.marker_path
     claim = source.with_name(
         f"{CLAIM_PREFIX}{pending.request_id}-{uuid.uuid4().hex[:12]}.json"
@@ -472,12 +477,19 @@ def claim_request(pending: _Pending) -> _Pending | None:
         os.rename(source, claim)
     except OSError:
         return None
-    taken = _read_json(claim)
-    if (
-        not isinstance(taken, Mapping)
-        or taken.get("requestId") != pending.request_id
-        or _sequence(taken) != pending.delivery_sequence
-    ):
+    if isinstance(pending, UnusableHandoff):
+        try:
+            matches = _request_file_state(claim)[1:] == pending.state[1:]
+        except OSError:
+            matches = False
+    else:
+        taken = _read_json(claim)
+        matches = (
+            isinstance(taken, Mapping)
+            and taken.get("requestId") == pending.request_id
+            and _sequence(taken) == pending.delivery_sequence
+        )
+    if not matches:
         try:
             os.rename(claim, source)
         except OSError:
