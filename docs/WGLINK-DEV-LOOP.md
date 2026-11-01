@@ -44,7 +44,9 @@ handles WG capabilities, Send/Solve request writes and acknowledgement reads;
 `wglink_status.py` writes `.fusion-status.json`. The old `wglink_watch.py`
 and export watcher are removed. Exports are no longer watched: the user presses
 Send, and new WG exports require an explicit Insert/Update command or handoff.
-The optional tick only services explicit file requests and publishes status.
+The optional tick services explicit file requests and publishes status. With it
+off, explicit WG handoffs use the follow-up event; return requests remain untouched.
+Press **Send to WG** in Fusion to bring its model back to WG.
 
 Insert, Update, WG handoffs and return requests require advertised
 `fusionRequestDelivery >= 3` under capability schema 1. Send and Solve also
@@ -62,7 +64,9 @@ session to restart or inspect.
 With `automatic_coordination` explicitly set to `true`, the add-in republishes
 `.fusion-status.json` in WG's IPC folder on every four-second watch tick on
 Fusion's main thread. The default is off, so startup and explicit commands
-publish status without a watch tick. Under `diagnostics` an enabled tick
+publish status without a watch tick. A separate two-second file-only poll picks
+up explicit WG **Send to CAD** requests in this default state, and their completion
+publishes status. Empty inbox polls make no Fusion calls and publish nothing. Under `diagnostics` an enabled tick
 reports its cost:
 
 ```json
@@ -129,6 +133,15 @@ error, and 2 if no result arrived in time.
   appearances, attributes and authoring counters. Only the 3D viewport is captured.
   It closes the scratch design without saving and confirms the user's own
   document is unchanged.
+- `wg-send-handoff` takes `--bundle <completed.wglink>` and uses an isolated test
+  IPC folder. It proves empty polls advance while WG event fires, status writes,
+  timeline changes and `isModified` changes stay zero, then publishes a real
+  new-document handoff and waits for the normal registered timer/event path to
+  insert it and report its exact outcome. It closes the scratch document without
+  saving and checks the original document again. Run with coordination off:
+
+      python scripts/fusion_dev_test.py --ipc <ipc> --scenario wg-send-handoff --bundle <completed.wglink>
+
 - `reload` reloads the runner, plus any helper modules you name, inside
   Fusion. That saves a restart after a dev sync. `WGLink.py` itself still
   needs Stop and Run.

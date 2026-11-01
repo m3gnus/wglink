@@ -222,8 +222,8 @@ _legacy_claims_pending = True
 # One gate, read once when this registration starts, and checked where each
 # engine starts -- never threaded through the tick. On, WGLink coordinates as
 # it always has: the four-second watch tick and owner-candidate promotion.
-# Off, neither starts or registers, so nothing between the user's
-# commands can inspect the document, publish status or apply a WG request.
+# Off, neither starts or registers. Explicit Send to CAD requests still run
+# as commands; an empty inbox never wakes Fusion or inspects its document.
 #
 # The gate is off by default. The owner may enable it with a JSON boolean in
 # WGLink's own settings file (``SETTINGS_PATH``); Fusion does not inherit a
@@ -252,6 +252,12 @@ _followup_handler = None
 # The application the follow-up event was registered on: what a worker fires.
 _followup_app = None
 _followups: list[object] = []
+_followups_once: set[object] = set()
+WG_REQUEST_POLL_SECONDS = 2.0
+_wg_request_poll_count = 0
+_wg_request_fire_count = 0
+_wg_request_memo: object = None
+_handoff_retry_pending = False
 # The pickup check's one-shot timer adds its job from its own thread.
 _followups_lock = threading.Lock()
 _timers: list[threading.Timer] = []
@@ -262,8 +268,10 @@ _backend_admission = wglink_launcher.BackendAdmission()
 _backend_progress = None
 
 
-def _note_outcome(channel: str, request_id: str, outcome: str) -> None:
-    _recent_outcomes.append({"channel": channel, "requestId": request_id, "outcome": outcome})
+def _note_outcome(channel: str, request_id: str, outcome: str, **details: str) -> None:
+    _recent_outcomes[:] = [item for item in _recent_outcomes
+                           if (item["channel"], item["requestId"]) != (channel, request_id)]
+    _recent_outcomes.append({"channel": channel, "requestId": request_id, "outcome": outcome, **details})
     del _recent_outcomes[:-_RECENT_OUTCOMES_LIMIT]
 
 
@@ -4090,7 +4098,7 @@ def _publish_fusion_status(snapshot: dict[str, object] | None = None) -> bool:
     """Best-effort owner presence for WG; every Fusion read stays on this thread.
 
     Counted on entry, whoever calls it: with automatic coordination off it is
-    reached only from start-up and from a command's follow-up, never a clock.
+    reached from start-up or explicit command work, including WG Send to CAD.
     """
 
     wglink_activity.record(wglink_activity.STATUS_PUBLICATION)
@@ -4100,16 +4108,21 @@ def _publish_fusion_status(snapshot: dict[str, object] | None = None) -> bool:
     folder = wglink_workspace.ipc_folder(create=True)
     if folder is None:
         return False
-    current = snapshot if snapshot is not None else _fusion_snapshot()
-    if current.get("links_inspected") is False and current.get("document_name") is not None:
-        # The document's links could not be read. Publishing its link list
-        # empty would tell WG "this document has no links"; the last status
-        # stands instead, and ages out on WG's side as it would with no add-in.
+    try:
+        current = snapshot if snapshot is not None else _fusion_snapshot()
+    except Exception:  # noqa: BLE001 - status must never interrupt a claimed command
         return False
+    if current.get("links_inspected") is False and current.get("document_name") is not None:
+        # Never advertise an empty link list for an unreadable document.
+        # A command receipt must still reach WG: publish diagnostics without
+        # a document observation, as legacy claim settlement does.
+        if not _recent_outcomes:
+            return False
+        current = {**current, "document_name": None, "document_id": None, "links": []}
     diagnostics = dict(current.get("diagnostics") or {})
     # How this add-in is configured, from its own mouth, so a comparison run
     # records its configuration from the components rather than from notes.
-    diagnostics["activation"] = dict(_activation)
+    diagnostics["activation"] = {**_activation, "wgRequestPickup": 1}
     diagnostics["activity"] = dict(wglink_activity.LOG.as_payload())
     diagnostics["meshCalibration"] = wglink_mesh.history.calibration_diagnostics()
     if _request_trace is not None:
@@ -4322,7 +4335,7 @@ def _require_insert_target(
     """Re-read the live document immediately before an insert's first write."""
 
     active_document_id = _active_document_id()
-    # A new-document destination was validated while no document existed. At
+    # A new-document destination always creates a separate document. At
     # this boundary validate its request identity and TTL again, then compare
     # the document created for it below; do not reinterpret that new document
     # as an unrelated active-document destination.
@@ -4377,10 +4390,10 @@ def _design_ready() -> bool:
     return bool(design and "Design" in str(getattr(design, "objectType", "")))
 
 
-def _ensure_design_ready() -> bool:
+def _ensure_design_ready(*, new_document: bool = False) -> bool:
     """Create a Fusion Design document for an explicit WG handoff if needed."""
 
-    if _design_ready():
+    if not new_document and _design_ready():
         return True
     app = _app()
     if app is None:
@@ -4389,7 +4402,8 @@ def _ensure_design_ready() -> bool:
         app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
     except Exception as exc:  # noqa: BLE001 - surfaced as an actionable refusal
         raise wglink_core.WgLinkError(
-            f"Could not create a Fusion Design document for this waveguide: {exc}"
+            f"Could not create a Fusion Design document for this waveguide: {exc}. "
+            "Create a Design document in Fusion, then send the model from WG again."
         ) from exc
     return _design_ready()
 
@@ -4424,7 +4438,6 @@ def _insert_handoff_issue(
     if (
         kind == "new_document"
         and value == getattr(handoff, "request_id", None)
-        and document_id is None
     ):
         return None
     return (
@@ -4435,6 +4448,18 @@ def _insert_handoff_issue(
 
 
 def _apply_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
+    """Keep the full claim/preflight/refusal path busy, including modal dialogs."""
+    global _command_busy
+    already_busy = _command_busy
+    _command_busy = True
+    try:
+        return _consume_pending_handoff(snapshot)
+    finally:
+        if not already_busy:
+            _release_command_busy()
+
+
+def _consume_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
     """Insert or update the bundle named by WG's explicit CAD action.
 
     Returns one of ``IDLE``, ``HANDLED`` or ``SUPPRESSED``. A request already
@@ -4451,7 +4476,8 @@ def _apply_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
     immediately before its first write.
     """
 
-    global _command_busy, _handoff_attempted_id
+    global _command_busy, _handoff_attempted_id, _handoff_retry_pending
+    _handoff_retry_pending = False
     handoff = _pending_handoff()
     if handoff is None:
         return IDLE
@@ -4462,53 +4488,71 @@ def _apply_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
     correlation_id = handoff.operation_id
     claimed = wglink_handoff.claim_request(handoff)
     if claimed is None:
+        _handoff_retry_pending = True
         return IDLE
     handoff = claimed
-    # Destination is a live guard, not heartbeat-cached identity. The snapshot
-    # may already be stale if the user switched documents during this tick.
-    issue = _insert_handoff_issue(handoff, _active_document_id())
-    if issue is not None:
-        wglink_handoff.acknowledge_handoff(handoff)
-        _handoff_attempted_id = attempt_key
-        outcome, reason = issue
-        _begin_request("handoff", correlation_id, DELIVERY)["outcome"] = outcome
-        _message(reason, PANEL_NAME)
-        return HANDLED
     try:
-        _require_compatible_wg()
-        # Read before _ensure_design_ready can create a destination document.
-        # Core checks again at insert/update, immediately before using it.
-        wglink_core._handoff_bundle(handoff.bundle_path, {
-            "expected_bundle_id": handoff.bundle_id,
-            "expected_export_id": handoff.export_id,
-        })
-        ready = _ensure_design_ready()
-    except wglink_core.WgLinkError as exc:
-        wglink_handoff.acknowledge_handoff(handoff)
+        _begin_request("handoff", correlation_id, DELIVERY)
+        _note_outcome("handoff", correlation_id, "claimed")
+        _publish_fusion_status()
+        # Destination is a live guard, not heartbeat-cached identity. The snapshot
+        # may already be stale if the user switched documents during this tick.
+        issue = _insert_handoff_issue(handoff, _active_document_id())
+        if issue is not None:
+            _handoff_attempted_id = attempt_key
+            outcome, reason = issue
+            _begin_request("handoff", correlation_id, DELIVERY).update(outcome=outcome, message=reason)
+            _note_outcome("handoff", correlation_id, outcome, message=reason)
+            _message(reason, PANEL_NAME)
+            return HANDLED
+        try:
+            _require_compatible_wg()
+            # Read before _ensure_design_ready can create a destination document.
+            # Core checks again at insert/update, immediately before using it.
+            wglink_core._handoff_bundle(handoff.bundle_path, {
+                "expected_bundle_id": handoff.bundle_id,
+                "expected_export_id": handoff.export_id,
+            })
+            destination = getattr(handoff, "destination", None)
+            create_new = bool(not handoff.expected_instance_id and destination
+                              and destination.get("kind") == "new_document")
+            ready = _ensure_design_ready(new_document=True) if create_new else _ensure_design_ready()
+        except wglink_core.WgLinkError as exc:
+            _handoff_attempted_id = attempt_key
+            _begin_request("handoff", correlation_id, DELIVERY).update(outcome="refused", message=str(exc))
+            _note_outcome("handoff", correlation_id, "refused", message=str(exc))
+            _message(
+                _refusal_text(exc, _HANDOFF_RETRY_HINT, request_id=handoff.request_id),
+                PANEL_NAME,
+            )
+            return HANDLED
+        if not ready:
+            _handoff_retry_pending = True
+            wglink_handoff.release_claim(handoff)
+            return IDLE
+        new_document_id = None
+        destination = getattr(handoff, "destination", None)
+        if (
+            not getattr(handoff, "expected_instance_id", "")
+            and destination is not None
+            and destination.get("kind") == "new_document"
+        ):
+            new_document_id = _active_document_id()
+            snapshot = None
         _handoff_attempted_id = attempt_key
-        _begin_request("handoff", correlation_id, DELIVERY)["outcome"] = "refused"
-        _message(
-            _refusal_text(exc, _HANDOFF_RETRY_HINT, request_id=handoff.request_id),
-            PANEL_NAME,
-        )
-        return HANDLED
-    if not ready:
-        wglink_handoff.release_claim(handoff)
-        return IDLE
-    new_document_id = None
-    destination = getattr(handoff, "destination", None)
-    if (
-        not getattr(handoff, "expected_instance_id", "")
-        and destination is not None
-        and destination.get("kind") == "new_document"
-    ):
-        new_document_id = _active_document_id()
-    _handoff_attempted_id = attempt_key
-    try:
         _execute_handoff(handoff, snapshot, new_document_id=new_document_id)
+        return HANDLED
+    except Exception as exc:  # noqa: BLE001 - a claimed mutation is never replayed
+        _begin_request("handoff", correlation_id, DELIVERY).update(
+            outcome="recoveryRequired", message=str(exc))
+        _note_outcome("handoff", correlation_id, "recoveryRequired", message=(
+            "Fusion could not finish this request. Inspect the new document or link, "
+            "undo or repair any partial change, then send the model from WG again."))
+        _report_error("Applying the WG Send to CAD request", PANEL_NAME, exc,
+                      request_id=handoff.request_id)
+        return HANDLED
     finally:
         wglink_handoff.acknowledge_handoff(handoff)
-    return HANDLED
 
 
 def _execute_handoff(
@@ -4531,6 +4575,7 @@ def _execute_handoff(
     trace = _begin_request("handoff", handoff.operation_id, DELIVERY)
     outcome = "failed"
     operation = "update" if handoff.expected_instance_id else "insert"
+    already_busy = _command_busy
     _command_busy = True
     try:
         _require_compatible_wg()
@@ -4627,12 +4672,14 @@ def _execute_handoff(
         # the manual Insert command; automatic success stays silent. Genuine
         # refusals and unexpected failures below still demand attention.
     except _ExpiredInsertError as exc:
+        trace["message"] = str(exc)
         outcome = "expired"
         _message(
             _refusal_text(exc, _HANDOFF_RETRY_HINT, request_id=handoff.request_id),
             PANEL_NAME,
         )
     except wglink_core.WgLinkError as exc:
+        trace["message"] = str(exc)
         if outcome != "recoveryRequired":
             outcome = (
                 "recoveryRequired"
@@ -4644,6 +4691,7 @@ def _execute_handoff(
             PANEL_NAME,
         )
     except Exception as exc:  # noqa: BLE001 - main-thread add-in boundary
+        trace["message"] = str(exc)
         if _interrupted(handoff.operation_id, _applying_operation()):
             outcome = "recoveryRequired"
         _report_error(
@@ -4651,7 +4699,20 @@ def _execute_handoff(
         )
     finally:
         trace["outcome"] = outcome
-        _release_command_busy()
+        details = {"message": trace["message"]} if trace.get("message") else {}
+        if outcome in ("applied", "reconciled"):
+            details.update(exportId=handoff.export_id, documentId=str(document_id or ""))
+        destination = getattr(handoff, "destination", None)
+        if (isinstance(destination, dict) and destination.get("kind") == "new_document"
+                and outcome not in ("applied", "reconciled", "alreadyCurrent")):
+            cleanup = ("The new Fusion document remains open for inspection. "
+                       "If it is empty, close it without saving; if it contains a partial insert, "
+                       "undo or repair it before sending again.")
+            details["message"] = f"{details.get('message', '')} {cleanup}".strip()
+            _message(cleanup, PANEL_NAME)
+        _note_outcome("handoff", handoff.operation_id, outcome, **details)
+        if not already_busy:
+            _release_command_busy()
     return outcome
 
 
@@ -4830,7 +4891,9 @@ def _settle_legacy_claims(snapshot: dict[str, object]) -> None:
                 and item.get("outcome") in wglink_legacy_queue.CLAIM_OUTCOMES
                 and not any(existing["channel"] == item["channel"]
                             and existing["requestId"] == item["requestId"] for existing in _recent_outcomes)):
-            _recent_outcomes.append(dict(item))
+            _note_outcome(item["channel"], item["requestId"], item["outcome"],
+                          **{key: value for key, value in item.items()
+                             if key not in {"channel", "requestId", "outcome"}})
     ready = []
     refusal = None
     for entry in entries:
@@ -4863,26 +4926,13 @@ def _settle_legacy_claims(snapshot: dict[str, object]) -> None:
             if refusal is not None:
                 continue
             refusal = entry["operationId"]
-        item = {"channel": channel, "requestId": entry["operationId"], "outcome": outcome}
-        _recent_outcomes[:] = [existing for existing in _recent_outcomes
-                              if (existing["channel"], existing["requestId"])
-                              != (channel, entry["operationId"])]
-        if item not in published:
-            _note_outcome(channel, entry["operationId"], outcome)
-        else:
-            _recent_outcomes.append(item)
-            del _recent_outcomes[:-_RECENT_OUTCOMES_LIMIT]
+        _note_outcome(channel, entry["operationId"], outcome)
         _begin_request(channel, entry["operationId"], DELIVERY)["outcome"] = outcome
         ready.append(entry)
     if ready:
         if refusal is not None:
             _begin_request("handoff", refusal, DELIVERY)["outcome"] = "refused"
-        report = snapshot
-        if snapshot.get("links_inspected") is False:
-            # No reading means no document observation. An outcome can still
-            # report recovery without advertising an empty link list.
-            report = {**snapshot, "document_name": None, "document_id": None, "links": []}
-        if not _publish_fusion_status(report):
+        if not _publish_fusion_status(snapshot):
             return
     for entry in ready:
         journal.delete(entry["operationId"])
@@ -4928,12 +4978,15 @@ def _on_watch_tick() -> None:
         _notice_outdated_wg()
         # Only a channel that did work claims the tick. A suppressed refusal
         # must not starve the other file channel.
-        if _apply_pending_handoff(snapshot) == HANDLED:
+        app = _app()
+        if (app is not None and app.isStartupComplete
+                and app.userInterface.activeCommand == "SelectCommand"
+                and _apply_pending_handoff(snapshot) == HANDLED):
             return
         if _apply_pending_return_request(snapshot) == HANDLED:
             return
     finally:
-        _publish_fusion_status(snapshot)
+        _publish_fusion_status()
 
 
 class WatchEventHandler(adsk.core.CustomEventHandler):
@@ -4964,7 +5017,7 @@ class CandidateEventHandler(adsk.core.CustomEventHandler):
 
 
 class FollowupEventHandler(adsk.core.CustomEventHandler):
-    """Main-thread time a command asked for; registered only with coordination off.
+    """Main-thread time a command asked for; registered in both coordination states.
 
     Declares no cause of its own. Each job carries the cause of the command
     that scheduled it, so anything this handler did outside a job would count
@@ -4978,6 +5031,73 @@ class FollowupEventHandler(adsk.core.CustomEventHandler):
             _run_followups()
         except Exception as exc:  # noqa: BLE001
             _report_error("Finishing a command in the Waveguide Generator add-in", PANEL_NAME, exc)
+
+
+def _queue_followup_once(job: object) -> bool:
+    """Coalesce queued and running jobs, including delivery during a modal."""
+    with _followups_lock:
+        if _timers_closed or job in _followups_once:
+            return False
+        _followups_once.add(job)
+        def run() -> None:
+            try:
+                job()
+            finally:
+                with _followups_lock:
+                    _followups_once.discard(job)
+        _followups.append(run)
+    _raise_followup_event()
+    return True
+
+
+def _poll_wg_requests_due() -> None:
+    """Worker: list request names/stats only; an empty inbox never calls Fusion."""
+    global _wg_request_poll_count, _wg_request_fire_count
+    try:
+        _wg_request_poll_count += 1
+        if _coordinating() or not _owns_active_ipc_lease():
+            return
+        ipc = wglink_workspace.ipc_folder()
+        if ipc is None or not wglink_handoff.has_requests(ipc):
+            return
+        state = wglink_handoff.request_state(ipc)
+        if state != _wg_request_memo and _queue_followup_once(_service_wg_handoff):
+            _wg_request_fire_count += 1
+    except Exception:  # noqa: BLE001 - unreadable folders are retried on the next look
+        pass
+    finally:
+        _start_timer(WG_REQUEST_POLL_SECONDS, _poll_wg_requests_due)
+
+
+def _service_wg_handoff() -> str:
+    """Main thread: a WG Send is a command, deferred until Fusion is idle."""
+    global _command_busy, _wg_request_memo
+    if not _owns_active_ipc_lease() or _command_busy:
+        return IDLE
+    app = _app()
+    # Autodesk Application.isStartupComplete and UserInterface.activeCommand.
+    # Do not terminate a command or execute SelectCommand to make it idle.
+    if app is None or not app.isStartupComplete or app.userInterface.activeCommand != "SelectCommand":
+        return IDLE
+    ipc = wglink_workspace.ipc_folder()
+    if ipc is None:
+        return IDLE
+    state = wglink_handoff.request_state(ipc)
+    if not state or state == _wg_request_memo:
+        return IDLE
+    with wglink_activity.because(wglink_activity.command_cause("wg-send")):
+        _command_busy = True
+        try:
+            result = _apply_pending_handoff(None)
+            # Invalid files, and refusals whose claim cannot be removed, must
+            # not raise an event every two seconds. Deferrals above never memo.
+            _wg_request_memo = state if result != HANDLED and not _handoff_retry_pending else None
+            return result
+        finally:
+            try:
+                _after_command()
+            finally:
+                _release_command_busy()
 
 
 def _schedule_followup(job: object) -> None:
@@ -5135,7 +5255,8 @@ def _stop_candidate(app: object) -> None:
 def _start_watch(app: object) -> bool:
     global _watch_event, _watch_handler, _watch_stop, _watch_thread
     global _handoff_attempted_id, _return_request_attempted_id, _request_trace
-    global _claims_swept, _wg_outdated_noticed, _legacy_claims_pending
+    global _claims_swept, _wg_outdated_noticed, _legacy_claims_pending, _wg_request_memo
+    _wg_request_memo = None
     _handoff_attempted_id = None
     _return_request_attempted_id = None
     _request_trace = None
@@ -5145,6 +5266,7 @@ def _start_watch(app: object) -> bool:
     _recent_outcomes.clear()
     _deferred_file_claims.clear()
     _followups.clear()
+    _followups_once.clear()
     # The transfer path's carrier, in both gate states (C8).
     if not _start_followups(app):
         return False
@@ -5169,8 +5291,8 @@ def _start_watch(app: object) -> bool:
 def _start_followups(app: object) -> bool:
     """The one event a command raises for itself, registered in both gate states.
 
-    With coordination off it is the whole of what starts: no thread, no timer,
-    and no watch event. It is raised only by a command's own completion
+    With coordination off there is no watch event. A file-only two-second
+    poll carries WG Send to CAD commands. It is also raised by a command's own completion
     (:func:`_schedule_followup`), by the one-shot poll timer that follows the
     request a Send or Solve made while it is under way
     (:func:`_poll_requests_due`), or by the one start-up starts for a request
@@ -5241,6 +5363,7 @@ def _stop_followups(app: object) -> None:
             timer.join(timeout=1.0)
     with _followups_lock:
         _followups.clear()
+        _followups_once.clear()
 
 
 def _stop_watch(app: object) -> None:
@@ -5358,15 +5481,11 @@ def _poll_dev_tests() -> None:
     runner = _dev_tests.get("runner")
     if runner is None:
         return
-    if runner.pending():
-        with _followups_lock:
-            if runner.tick not in _followups:
-                _followups.append(runner.tick)
-        try:
-            _raise_followup_event()
-        except Exception:  # noqa: BLE001 - a torn-down event: the add-in is stopping
-            return
-    _start_timer(1.0, _poll_dev_tests)
+    try:
+        if runner.pending():
+            _queue_followup_once(runner.tick)
+    finally:
+        _start_timer(1.0, _poll_dev_tests)
 
 
 def _stop_dev_tests() -> None:
@@ -5468,6 +5587,8 @@ def _build_owner(app: object, ui: object) -> None:
         if not _activate_ipc_lease():
             raise RuntimeError("The Waveguide Generator add-in's IPC owner lease was lost during startup")
         _owned = True
+        if not _coordinating():
+            _start_timer(WG_REQUEST_POLL_SECONDS, _poll_wg_requests_due)
         # Migrate earlier queued requests once, in either gate state.
         _convert_outbox_at_startup()
         # The request the palette followed, then the pickup checks a restart
@@ -5497,7 +5618,7 @@ def _build_owner(app: object, ui: object) -> None:
 
 
 def _start_without_coordination() -> None:
-    """Start-up with the gate off: bounded, once, and then nothing until a command.
+    """Start-up with the gate off: bounded, then explicit commands and WG handoffs.
 
     What start-up still owes is done here, once: read the
     document if one is open, settle interrupted claims against it read-only

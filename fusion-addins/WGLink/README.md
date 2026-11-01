@@ -77,8 +77,8 @@ labelling it `original`.
 The panel promotes the everyday commands, **Sources & Mesh…** and **Solve in
 WG**, plus **Show Panel**. **Advanced** contains **Send to WG**, **Declare
 Body…**, **Insert**, **Update**, and **Detach**.
-Insert and Update are ordinarily automatic — WG's *Send to CAD* publishes a
-handoff the add-in applies on its own — so the dropdown is maintenance,
+Pressing WG’s **Send to CAD** is the command: the add-in applies that request
+when Fusion is idle, without another click. The dropdown is maintenance,
 authoring-remedy, and recovery UI rather than the normal workflow. Audit and
 Relink remain full head-less APIs but are not panel commands.
 
@@ -132,7 +132,10 @@ Relink remain full head-less APIs but are not panel commands.
   workspace, validates the chosen one before Fusion mutation, and builds the
   full WG viewport model. **Send to CAD** in Waveguide Generator also publishes
   a one-shot handoff beside the completed bundle: Waveguide Generator inserts a new link into
-  the active Fusion design automatically, including after a cold start. If that
+  the named Fusion design, including after a cold start. A `new_document` request
+  always creates a separate Design, even when another document is open. If insertion
+  fails, the new document stays open for inspection; close it without saving if
+  empty, or undo or repair any partial insert before sending again. If that
   bundle is already linked, WG must send an explicit Update handoff for its
   exact target; an Insert refuses the duplicate. Exports are no longer watched. For assemblies
   containing repeated placements of one design, WG includes the chosen
@@ -673,10 +676,12 @@ change it. A missing or invalid value leaves coordination off; only a JSON
 `true` enables it. An invalid value is reported as `invalid`. With it off:
 
 - neither engine starts or registers;
-- WG's handoffs and return requests are not consumed. Insert and Update remain as commands;
+- A two-second file-only poll picks up explicit **Send to CAD** handoffs. An empty
+  inbox makes no Fusion call, raises no event, and publishes no status. Return
+  requests stay unconsumed; press **Send to WG** in Fusion to return a model;
 - status is published once at start-up, after each command, and removed at
   shutdown, never on a clock. WG therefore sees Fusion's status age out between
-  commands;
+  commands. Send to CAD publishes status after applying or refusing its request;
 - the geometry refresh a command asks for is paid for by that command's own
   follow-up, a one-shot main-thread event raised when the command returns;
 - interrupted claims are settled once at start-up, read-only and never re-run.
@@ -685,7 +690,10 @@ change it. A missing or invalid value leaves coordination off; only a JSON
 - a follow-up delivered while another Waveguide Generator command holds the main thread
   waits, and that command's completion runs it.
 
-The heartbeat's `diagnostics.activation` states the setting, and
+The heartbeat’s `diagnostics.activation` states the setting and additive
+`wgRequestPickup: 1` capability. `recentOutcomes` retains each handoff’s correlated
+claim or result, including a refusal’s reason. WG records the result durably.
+The heartbeat’s
 `diagnostics.activity` carries the execution counters: every link resolution,
 geometry measurement, source inventory, document signature, status
 publication, mutation and export, by the cause that reached it

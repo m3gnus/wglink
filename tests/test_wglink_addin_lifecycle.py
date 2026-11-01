@@ -68,12 +68,15 @@ class _Application(MainThreadOnly):
         self.userInterface = ui
         self.events: dict[str, _CustomEvent] = {}
         self.fired: list[str] = []
+        self.isStartupComplete = True
+        ui.activeCommand = "SelectCommand"
         self.activeProduct = None
         self.activeDocument = None
         self.documents = types.SimpleNamespace(add=self._add_document)
 
     def _add_document(self, _document_type: object) -> object:
-        self.activeProduct = types.SimpleNamespace(objectType="adsk::fusion::Design")
+        self.activeProduct = types.SimpleNamespace(objectType="adsk::fusion::Design",
+                                                 rootComponent=types.SimpleNamespace(entityToken="new-design-root"))
         self.activeDocument = types.SimpleNamespace(name="Untitled")
         return self.activeDocument
 
@@ -5029,7 +5032,8 @@ def test_a_claimed_new_document_destination_inserts_into_the_document_it_created
     monkeypatch.setattr(module, "_active_document_id", lambda: active["id"])
     monkeypatch.setattr(module, "_document_links", lambda: [])
 
-    def create_document():
+    def create_document(*, new_document=False):
+        assert new_document
         active["id"] = "fusion:new-doc"
         return True
 

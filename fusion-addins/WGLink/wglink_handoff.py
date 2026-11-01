@@ -244,6 +244,23 @@ def _request_files(directory: Path) -> list[Path]:
         return []
 
 
+def has_requests(ipc: Path) -> bool:
+    """File-only probe for explicit handoffs; never reads JSON or creates a folder."""
+    return bool(_request_files(Path(ipc) / HANDOFFS_DIRECTORY))
+
+
+def request_state(ipc: Path) -> tuple[tuple[str, int, int], ...]:
+    """A cheap memo key: an unusable unchanged file gets no repeated wakeups."""
+    state = []
+    for path in _request_files(Path(ipc) / HANDOFFS_DIRECTORY):
+        try:
+            stat = path.stat()
+            state.append((path.name, stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            continue
+    return tuple(state)
+
+
 def _requests_in_order(directory: Path) -> list[Path]:
     """Request files in ``deliverySequence`` order, then by name.
 

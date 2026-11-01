@@ -509,9 +509,93 @@ def reload(context: Any) -> Callable[[Run], Iterator[None]]:
     return scenario
 
 
+def wg_send_handoff(context: Any) -> Callable[[Run], Iterator[None]]:
+    """Real delivery through the owner timer, using isolated request/status files."""
+    def scenario(run: Run) -> Iterator[None]:
+        w = context.wglink
+        app = context.app()
+        if w["_coordinating"]():
+            raise ScenarioFailed("Turn automatic coordination off and restart the add-in before this check.")
+        bundle_path = Path(str(run.request.get("bundlePath") or "")).resolve()
+        bundle_module = importlib.import_module(f"{context.package}.wglink_bundle")
+        with bundle_module.read_bundle(bundle_path) as bundle:
+            identity = bundle_module.bundle_identity(bundle)
+            bundle_id = bundle.manifest["bundle"]["id"]
+        workspace = w["wglink_workspace"]
+        original_ipc, original_bundles = workspace.ipc_folder, workspace.bundle_folder
+        ipc = run.folder / "isolated-ipc"
+        ipc.mkdir(parents=True, exist_ok=True)
+        source_ipc = original_ipc()
+        if source_ipc is None:
+            raise ScenarioFailed("Start WG before running this check so its capability report is available.")
+        if w["wglink_handoff"].has_requests(source_ipc) or any(
+                w["wglink_requests"].following(item) for item in w["_requests"].entries()):
+            raise ScenarioFailed("Finish the pending CAD requests before running this isolated check.")
+        capability_name = w["wglink_inbox"].CAPABILITIES_FILENAME
+        write_json(ipc / capability_name, json.loads((source_ipc / capability_name).read_text()))
+        original = app.activeDocument
+        design = app.activeProduct
+        before = snapshot(w, design) if original is not None else None
+        modified = original.isModified if original is not None else None
+        created = None
+        saved_memo = w["_wg_request_memo"]
+        workspace.ipc_folder = lambda **_kwargs: ipc
+        workspace.bundle_folder = lambda: bundle_path.parent
+        try:
+            # A deliberate setup publication, then only the real timers run.
+            w["_publish_fusion_status"]()
+            status_path = ipc / w["wglink_status"].FUSION_STATUS_FILENAME
+            status_mtime = status_path.stat().st_mtime_ns
+            poll_before = w["_wg_request_poll_count"]
+            fire_before = w["_wg_request_fire_count"]
+            for _ in range(7):
+                yield
+            run.check("idle poll positive control", w["_wg_request_poll_count"] > poll_before)
+            run.check("idle WG event fires zero", w["_wg_request_fire_count"] == fire_before)
+            run.check("idle status mtime unchanged", status_path.stat().st_mtime_ns == status_mtime)
+            if original is not None:
+                run.check("idle timeline unchanged", snapshot(w, design)["timeline"] == before["timeline"])
+                run.check("idle isModified unchanged", original.isModified == modified)
+            request_id = f"dev-{run.id}"
+            request_path = ipc / ".fusion-handoffs" / f"{request_id}.json"
+            write_json(request_path, {
+                "schemaVersion": 3, "target": "fusion360", "requestId": request_id,
+                "operationId": request_id, "deliverySequence": 1,
+                "bundlePath": str(bundle_path), "bundleId": bundle_id,
+                "exportId": identity["export_id"], "designId": identity["design_id"],
+                "sequence": identity["export_sequence"], "requestedAt": _now(),
+                "destination": {"kind": "new_document", "value": request_id},
+            })
+            outcome = None
+            for _ in range(45):
+                yield  # normal registered timer -> follow-up -> command, never direct consumer
+                report = json.loads(status_path.read_text())
+                outcome = next((item for item in report.get("diagnostics", {}).get("recentOutcomes", [])
+                                if item.get("requestId") == request_id and item.get("outcome") != "claimed"), None)
+                if outcome is not None:
+                    break
+            created = app.activeDocument if app.activeDocument != original else None
+            run.check("registered delivery claimed request", not request_path.exists())
+            run.check("handoff applied", bool(outcome and outcome.get("outcome") == "applied"), outcome)
+            run.check("separate document created", created is not None)
+            if original is not None:
+                original.activate()
+                run.check("original document unchanged", snapshot(w, app.activeProduct) == before)
+                run.check("original isModified unchanged", original.isModified == modified)
+        finally:
+            workspace.ipc_folder, workspace.bundle_folder = original_ipc, original_bundles
+            w["_wg_request_memo"] = saved_memo
+            if created is not None:
+                created.close(False)
+            if original is not None:
+                original.activate()
+    return scenario
+
+
 def scenarios(context: Any) -> dict[str, Callable[[Run], Iterator[None]]]:
     found = {"noop": noop(context)}
     if getattr(context, "package", None):
+        found["wg-send-handoff"] = wg_send_handoff(context)
         found["reload"] = reload(context)
         found["sources-mesh-baseline"] = sources_mesh_baseline(context)
     return found

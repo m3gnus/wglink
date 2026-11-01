@@ -78,7 +78,7 @@ def test_the_runner_starts_only_in_a_dev_sync_and_rides_the_follow_up_event(monk
                 dev_tests.write_json(requests / "n.json", {"id": "n", "scenario": "noop"})
                 fired = len(app.fired)
                 module._poll_dev_tests()  # what the timer does: queue a tick, raise the event
-                assert len(app.fired) == fired + 1 and runner.tick in module._followups
+                assert len(app.fired) == fired + 1 and runner.tick in module._followups_once
                 for _ in range(3):
                     module._run_followups()
                     module._poll_dev_tests()
@@ -98,7 +98,7 @@ def test_reload_refreshes_the_scenarios_in_place(monkeypatch, tmp_path):
     try:
         runner = module._dev_tests["runner"]
         old = runner.scenarios
-        assert set(old) == {"noop", "reload", "sources-mesh-baseline"}
+        assert set(old) == {"noop", "reload", "sources-mesh-baseline", "wg-send-handoff"}
         dev_tests = importlib.import_module(f"{module._registration_package_name}.wglink_dev_tests")
         requests, results = dev_tests.folders(tmp_path)
         dev_tests.write_json(requests / "r.json", {"id": "r", "scenario": "reload",

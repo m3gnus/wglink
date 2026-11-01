@@ -30,11 +30,12 @@ import wglink_workspace  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--scenario", required=True, help="noop, reload or sources-mesh-baseline")
+    parser.add_argument("--scenario", required=True, help="noop, reload, sources-mesh-baseline or wg-send-handoff")
     parser.add_argument("--wait", type=float, default=120.0, help="seconds to wait for the result")
     parser.add_argument("--ipc", type=Path, help="WGLink IPC folder (default: WG's)")
     parser.add_argument("--modules", nargs="*", default=[],
                         help="with --scenario reload: extra helper modules to reload first")
+    parser.add_argument("--bundle", type=Path, help="completed WGLink bundle for wg-send-handoff")
     args = parser.parse_args()
 
     ipc = args.ipc or wglink_workspace.ipc_folder()
@@ -44,7 +45,8 @@ def main() -> int:
     requests, results = wglink_dev_tests.folders(ipc)
     request_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
     wglink_dev_tests.write_json(requests / f"{request_id}.json", {"id": request_id, "scenario": args.scenario,
-                                                                "modules": args.modules})
+                                                                "modules": args.modules,
+                                                                "bundlePath": str(args.bundle.resolve()) if args.bundle else None})
     print(f"requested {args.scenario} as {request_id} in {requests}", flush=True)
 
     result_path = results / f"{request_id}.json"

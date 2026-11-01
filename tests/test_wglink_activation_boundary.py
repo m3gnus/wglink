@@ -294,7 +294,6 @@ def test_with_coordination_off_an_idle_owner_keeps_its_lease(monkeypatch, tmp_pa
 
 _TIMER_ONLY = (
     "_on_watch_tick",
-    "_apply_pending_handoff",
     "_apply_pending_return_request",
     "_notice_outdated_wg",
 )
@@ -326,7 +325,7 @@ def _document_scenario(fixture) -> None:
     _deliver_every_event(app)
 
 
-def test_with_coordination_off_the_consumers_and_prompts_are_unreachable(
+def test_with_coordination_off_tick_consumers_are_unreachable_without_requests(
     monkeypatch, tmp_path: Path
 ) -> None:
     fixture = _boundary(monkeypatch, tmp_path, "WGLink_reach_off", coordination=False)
@@ -354,7 +353,6 @@ def test_with_coordination_on_the_same_scenario_reaches_them(
         _document_scenario(fixture)
         assert {
             "_on_watch_tick",
-            "_apply_pending_handoff",
             "_apply_pending_return_request",
             "_notice_outdated_wg",
         } <= set(reached)
