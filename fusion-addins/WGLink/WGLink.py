@@ -4111,7 +4111,10 @@ def _publish_fusion_status(snapshot: dict[str, object] | None = None) -> bool:
     try:
         current = snapshot if snapshot is not None else _fusion_snapshot()
     except Exception:  # noqa: BLE001 - status must never interrupt a claimed command
-        return False
+        if not _recent_outcomes:
+            return False
+        # A terminal receipt does not depend on a readable CAD observation.
+        current = {"document_name": None, "document_id": None, "links": [], "diagnostics": {}}
     if current.get("links_inspected") is False and current.get("document_name") is not None:
         # Never advertise an empty link list for an unreadable document.
         # A command receipt must still reach WG: publish diagnostics without
@@ -4390,6 +4393,13 @@ def _design_ready() -> bool:
     return bool(design and "Design" in str(getattr(design, "objectType", "")))
 
 
+_NEW_DOCUMENT_CLEANUP = (
+    "The new Fusion document remains open for inspection. "
+    "If it is empty, close it without saving; if it contains a partial insert, "
+    "undo or repair it before sending again."
+)
+
+
 def _ensure_design_ready(*, new_document: bool = False) -> bool:
     """Create a Fusion Design document for an explicit WG handoff if needed."""
 
@@ -4405,7 +4415,12 @@ def _ensure_design_ready(*, new_document: bool = False) -> bool:
             f"Could not create a Fusion Design document for this waveguide: {exc}. "
             "Create a Design document in Fusion, then send the model from WG again."
         ) from exc
-    return _design_ready()
+    if not _design_ready():
+        raise wglink_core.WgLinkError(
+            "Fusion created a document, but its Design is not active. "
+            f"{_NEW_DOCUMENT_CLEANUP} Activate a Design document, then send the model from WG again."
+        )
+    return True
 
 
 def _insert_handoff_issue(
@@ -4491,10 +4506,8 @@ def _consume_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
         _handoff_retry_pending = True
         return IDLE
     handoff = claimed
+    retire_claim = True
     try:
-        _begin_request("handoff", correlation_id, DELIVERY)
-        _note_outcome("handoff", correlation_id, "claimed")
-        _publish_fusion_status()
         # Destination is a live guard, not heartbeat-cached identity. The snapshot
         # may already be stale if the user switched documents during this tick.
         issue = _insert_handoff_issue(handoff, _active_document_id())
@@ -4528,15 +4541,17 @@ def _consume_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
             return HANDLED
         if not ready:
             _handoff_retry_pending = True
+            # Even a failed release must leave its claim for leftover settlement.
+            retire_claim = False
             wglink_handoff.release_claim(handoff)
             return IDLE
+        # Readiness can release a claim. Publish pickup only once it is retained,
+        # so neither recentOutcomes nor lastRequest falsely reports a release.
+        _begin_request("handoff", correlation_id, DELIVERY)
+        _note_outcome("handoff", correlation_id, "claimed")
+        _publish_fusion_status()
         new_document_id = None
-        destination = getattr(handoff, "destination", None)
-        if (
-            not getattr(handoff, "expected_instance_id", "")
-            and destination is not None
-            and destination.get("kind") == "new_document"
-        ):
+        if create_new:
             new_document_id = _active_document_id()
             snapshot = None
         _handoff_attempted_id = attempt_key
@@ -4552,7 +4567,8 @@ def _consume_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
                       request_id=handoff.request_id)
         return HANDLED
     finally:
-        wglink_handoff.acknowledge_handoff(handoff)
+        if retire_claim:
+            wglink_handoff.acknowledge_handoff(handoff)
 
 
 def _execute_handoff(
@@ -4705,11 +4721,8 @@ def _execute_handoff(
         destination = getattr(handoff, "destination", None)
         if (isinstance(destination, dict) and destination.get("kind") == "new_document"
                 and outcome not in ("applied", "reconciled", "alreadyCurrent")):
-            cleanup = ("The new Fusion document remains open for inspection. "
-                       "If it is empty, close it without saving; if it contains a partial insert, "
-                       "undo or repair it before sending again.")
-            details["message"] = f"{details.get('message', '')} {cleanup}".strip()
-            _message(cleanup, PANEL_NAME)
+            details["message"] = f"{details.get('message', '')} {_NEW_DOCUMENT_CLEANUP}".strip()
+            _message(_NEW_DOCUMENT_CLEANUP, PANEL_NAME)
         _note_outcome("handoff", handoff.operation_id, outcome, **details)
         if not already_busy:
             _release_command_busy()
@@ -4961,6 +4974,26 @@ def _claims_outstanding() -> bool:
     return not _claims_swept or bool(_deferred_file_claims) or _legacy_claims_pending
 
 
+def _handoff_idle() -> bool:
+    """Defer WG work during startup, a tool, or a Design edit session.
+
+    Autodesk's Design.activeEditObject is the current edit container, including
+    a sketch or feature. Only its root component is idle. Non-Design products
+    have no such edit gate; a new-document handoff can create a Design there.
+    """
+    app = _app()
+    if app is None or not app.isStartupComplete or app.userInterface.activeCommand != "SelectCommand":
+        return False
+    try:
+        design = app.activeProduct
+        if design is None or "Design" not in str(getattr(design, "objectType", "")):
+            return True
+        root = design.rootComponent
+        return root is not None and design.activeEditObject == root
+    except Exception:  # noqa: BLE001 - an unreadable edit state cannot authorize a mutation
+        return False
+
+
 def _on_watch_tick() -> None:
     """Service explicit file requests and publish status on the main thread."""
 
@@ -4978,15 +5011,14 @@ def _on_watch_tick() -> None:
         _notice_outdated_wg()
         # Only a channel that did work claims the tick. A suppressed refusal
         # must not starve the other file channel.
-        app = _app()
-        if (app is not None and app.isStartupComplete
-                and app.userInterface.activeCommand == "SelectCommand"
-                and _apply_pending_handoff(snapshot) == HANDLED):
+        if _handoff_idle() and _apply_pending_handoff(snapshot) == HANDLED:
+            snapshot = None
             return
         if _apply_pending_return_request(snapshot) == HANDLED:
+            snapshot = None
             return
     finally:
-        _publish_fusion_status()
+        _publish_fusion_status(snapshot)
 
 
 class WatchEventHandler(adsk.core.CustomEventHandler):
@@ -5074,10 +5106,8 @@ def _service_wg_handoff() -> str:
     global _command_busy, _wg_request_memo
     if not _owns_active_ipc_lease() or _command_busy:
         return IDLE
-    app = _app()
-    # Autodesk Application.isStartupComplete and UserInterface.activeCommand.
     # Do not terminate a command or execute SelectCommand to make it idle.
-    if app is None or not app.isStartupComplete or app.userInterface.activeCommand != "SelectCommand":
+    if not _handoff_idle():
         return IDLE
     ipc = wglink_workspace.ipc_folder()
     if ipc is None:
@@ -5183,11 +5213,14 @@ def _after_command() -> None:
 
     # No tick will come back for a request the duty cycle defers, so this
     # command pays for its own refresh now (review M1).
-    _service_geometry_refresh(throttle=False)
-    snapshot = _fusion_snapshot()
-    if _claims_outstanding():
-        _settle_claims(snapshot)
-    _publish_fusion_status(snapshot)
+    snapshot = None
+    try:
+        _service_geometry_refresh(throttle=False)
+        snapshot = _fusion_snapshot()
+        if _claims_outstanding():
+            _settle_claims(snapshot)
+    finally:
+        _publish_fusion_status(snapshot)
 
 
 def _watch_loop(app: object, stop: threading.Event) -> None:

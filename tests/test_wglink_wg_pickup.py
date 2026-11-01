@@ -1,6 +1,7 @@
 """WG Send to CAD through the actual owner/timer/custom-event path."""
 import json
 import threading
+import types
 from pathlib import Path
 
 import pytest
@@ -245,5 +246,166 @@ def test_unreadable_document_still_publishes_the_refusal_receipt(monkeypatch, tm
         report = json.loads((ipc / '.fusion-status.json').read_text())
         assert report['document'] is None  # no invented empty observation of Horn
         assert report['diagnostics']['recentOutcomes'][-1]['outcome'] == 'refused'
+    finally:
+        m.stop(None)
+
+
+def test_created_document_without_active_design_is_terminal_and_created_once(monkeypatch, tmp_path):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_not_ready_after_add')
+    m = f.module
+    try:
+        writes, original = _submit(monkeypatch, f, ipc, bundles)
+        created = []
+        def add(_kind):
+            created.append(types.SimpleNamespace(name='Untitled'))
+            f.app.activeDocument = created[-1]
+            f.app.activeProduct = types.SimpleNamespace(objectType='adsk::drawing::Drawing')
+            return created[-1]
+        monkeypatch.setattr(f.app.documents, 'add', add)
+        for _ in range(3):
+            _poll(m)
+            _deliver_every_event(f.app)
+        assert len(created) == 1 and not writes
+        assert original.name == 'Horn' and f.app.activeDocument is created[0]
+        assert not list((ipc / '.fusion-handoffs').iterdir())
+        receipt = json.loads((ipc / '.fusion-status.json').read_text())['diagnostics']['recentOutcomes'][-1]
+        assert receipt['outcome'] == 'refused'
+        assert 'remains open' in receipt['message'] and 'close it without saving' in receipt['message']
+        assert not m._handoff_retry_pending
+    finally:
+        m.stop(None)
+
+
+@pytest.mark.parametrize('carrier', ['followup', 'tick'])
+@pytest.mark.parametrize('edit_type', ['Sketch', 'BaseFeature', 'Component', None])
+def test_design_edit_sessions_defer_both_handoff_carriers(monkeypatch, tmp_path, carrier, edit_type):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_edit_' + carrier + str(edit_type))
+    m = f.module
+    try:
+        writes, _ = _submit(monkeypatch, f, ipc, bundles)
+        f.design.activeEditObject = (types.SimpleNamespace(objectType='adsk::fusion::' + edit_type)
+                                     if edit_type else None)
+        def deliver():
+            if carrier == 'tick':
+                m._on_watch_tick()
+            else:
+                _poll(m)
+                _deliver_every_event(f.app)
+        deliver()
+        assert not writes and (ipc / '.fusion-handoffs/req-1.json').exists()
+        assert not m._handoff_attempted_id
+        assert not m._wg_request_memo
+        f.design.activeEditObject = f.design.rootComponent
+        deliver()
+        assert len(writes) == 1
+    finally:
+        m.stop(None)
+
+
+def test_non_design_product_does_not_defer_new_document_handoff(monkeypatch, tmp_path):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_non_design')
+    m = f.module
+    try:
+        writes, _ = _submit(monkeypatch, f, ipc, bundles)
+        f.app.activeProduct = types.SimpleNamespace(objectType='adsk::drawing::Drawing')
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert len(writes) == 1
+    finally:
+        m.stop(None)
+
+
+@pytest.mark.parametrize('release_fails', [False, True])
+def test_not_ready_release_retains_failed_claim_and_publishes_no_false_pickup(monkeypatch, tmp_path, release_fails):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_release_' + str(release_fails))
+    m = f.module
+    try:
+        writes, _ = _submit(monkeypatch, f, ipc, bundles)
+        monkeypatch.setattr(m, '_ensure_design_ready', lambda **_: False)
+        rename = m.wglink_handoff.os.rename
+        def release(source, target):
+            if release_fails and Path(source).name.startswith(m.wglink_handoff.CLAIM_PREFIX):
+                raise PermissionError('release is held open')
+            return rename(source, target)
+        monkeypatch.setattr(m.wglink_handoff.os, 'rename', release)
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert not writes
+        [retained] = list((ipc / '.fusion-handoffs').iterdir())
+        assert retained.name.startswith(m.wglink_handoff.CLAIM_PREFIX) == release_fails
+        report = json.loads((ipc / '.fusion-status.json').read_text())['diagnostics']
+        assert not any(item['outcome'] == 'claimed' for item in report.get('recentOutcomes', []))
+        assert report.get('lastRequest', {}).get('outcome') != 'running'
+    finally:
+        m.stop(None)
+
+
+@pytest.mark.parametrize('failure', ['_service_geometry_refresh', '_fusion_snapshot', '_settle_claims'])
+def test_post_job_receipt_survives_observation_failure(monkeypatch, tmp_path, failure):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_receipt_' + failure)
+    m = f.module
+    try:
+        _submit(monkeypatch, f, ipc, bundles)
+        def broken(*args, **kwargs):
+            raise RuntimeError('temporary observation failure')
+        monkeypatch.setattr(m, failure, broken)
+        if failure == '_settle_claims':
+            monkeypatch.setattr(m, '_claims_outstanding', lambda: True)
+        _poll(m)
+        _deliver_every_event(f.app)
+        report = json.loads((ipc / '.fusion-status.json').read_text())
+        assert report['diagnostics']['recentOutcomes'][-1]['outcome'] == 'applied'
+        assert not m._command_busy
+        if failure == '_fusion_snapshot':
+            assert report['document'] is None
+    finally:
+        m.stop(None)
+
+
+@pytest.mark.parametrize('failure', ['false', 'raise'])
+def test_failed_followup_event_keeps_job_and_retries_delivery(monkeypatch, tmp_path, failure):
+    f, ipc, bundles, due = _running(monkeypatch, tmp_path, 'WGLink_wg_event_' + failure)
+    m = f.module
+    try:
+        writes, _ = _submit(monkeypatch, f, ipc, bundles)
+        fire = f.app.fireCustomEvent
+        def failed(_event):
+            if failure == 'raise':
+                raise RuntimeError('event temporarily unavailable')
+            return False
+        monkeypatch.setattr(f.app, 'fireCustomEvent', failed)
+        _poll(m)
+        assert len(m._followups) == 1 and m._service_wg_handoff in m._followups_once
+        assert (m.FOLLOWUP_RETRY_SECONDS, m._raise_followup_event) in due
+        _poll(m)
+        assert len(m._followups) == 1
+        monkeypatch.setattr(f.app, 'fireCustomEvent', fire)
+        m._raise_followup_event()
+        _deliver_every_event(f.app)
+        assert len(writes) == 1 and not m._followups_once
+    finally:
+        m.stop(None)
+
+
+def test_watch_tick_reuses_snapshot_until_a_request_runs(monkeypatch, tmp_path):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_tick_snapshot')
+    m = f.module
+    try:
+        read = m._fusion_snapshot
+        snapshots = []
+        def snapshot():
+            result = read()
+            snapshots.append(result)
+            return result
+        monkeypatch.setattr(m, '_fusion_snapshot', snapshot)
+        m._on_watch_tick()
+        assert len(snapshots) == 1
+        writes, _ = _submit(monkeypatch, f, ipc, bundles)
+        snapshots.clear()
+        m._on_watch_tick()
+        assert len(writes) == 1
+        assert snapshots[0]['document_id'] != snapshots[-1]['document_id']
+        report = json.loads((ipc / '.fusion-status.json').read_text())
+        assert report['document']['id'] == snapshots[-1]['document_id']
     finally:
         m.stop(None)
