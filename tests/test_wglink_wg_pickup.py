@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from test_wglink_activation_boundary import _boundary, _deliver_every_event
-from test_wglink_addin_lifecycle import _per_request_folders, _per_request_handoff
+from test_wglink_addin_lifecycle import _per_request_folders, _per_request_handoff, _proxying_root
 
 
 def _running(monkeypatch, tmp_path, name):
@@ -311,6 +311,20 @@ def test_non_design_product_does_not_defer_new_document_handoff(monkeypatch, tmp
     try:
         writes, _ = _submit(monkeypatch, f, ipc, bundles)
         f.app.activeProduct = types.SimpleNamespace(objectType='adsk::drawing::Drawing')
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert len(writes) == 1
+    finally:
+        m.stop(None)
+
+
+def test_idle_gate_recognizes_fresh_wrappers_of_the_root_component(monkeypatch, tmp_path):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_idle_proxy')
+    m = f.module
+    try:
+        writes, _ = _submit(monkeypatch, f, ipc, bundles)
+        f.app.activeProduct = _proxying_root(f.design)
+        assert f.app.activeProduct.activeEditObject is not f.app.activeProduct.rootComponent
         _poll(m)
         _deliver_every_event(f.app)
         assert len(writes) == 1

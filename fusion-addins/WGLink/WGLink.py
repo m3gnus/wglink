@@ -5002,8 +5002,7 @@ def _handoff_idle() -> bool:
         design = app.activeProduct
         if design is None or "Design" not in str(getattr(design, "objectType", "")):
             return True
-        root = design.rootComponent
-        return root is not None and design.activeEditObject == root
+        return wglink_core._same_entity(design.activeEditObject, design.rootComponent)
     except Exception:  # noqa: BLE001 - an unreadable edit state cannot authorize a mutation
         return False
 
