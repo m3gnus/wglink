@@ -128,6 +128,9 @@ def test_invalid_file_is_memoized_and_changed_file_is_retried(monkeypatch, tmp_p
         _poll(m)
         _deliver_every_event(f.app)
         count = len(f.app.fired)
+        receipt = json.loads((ipc / '.fusion-status.json').read_text())['diagnostics']['recentOutcomes'][-1]
+        assert receipt['requestId'] == 'broken' and receipt['outcome'] == 'refused'
+        assert 'send the model from WG again' in receipt['message']
         _poll(m)
         assert len(f.app.fired) == count
         request.write_text('{"changed":true}')
@@ -407,5 +410,76 @@ def test_watch_tick_reuses_snapshot_until_a_request_runs(monkeypatch, tmp_path):
         assert snapshots[0]['document_id'] != snapshots[-1]['document_id']
         report = json.loads((ipc / '.fusion-status.json').read_text())
         assert report['document']['id'] == snapshots[-1]['document_id']
+    finally:
+        m.stop(None)
+
+
+@pytest.mark.parametrize('block', ['read', 'bundle_folder', 'selection'])
+def test_transient_idle_result_retries_the_unchanged_valid_file(monkeypatch, tmp_path, block):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_transient_' + block)
+    m = f.module
+    try:
+        writes, _ = _submit(monkeypatch, f, ipc, bundles)
+        request = ipc / '.fusion-handoffs/req-1.json'
+        before = request.stat()
+        if block == 'bundle_folder':
+            read_bundles = m.wglink_workspace.bundle_folder
+            monkeypatch.setattr(m.wglink_workspace, 'bundle_folder', lambda: None)
+        elif block == 'selection':
+            select = m.wglink_handoff.next_pending_handoff
+            monkeypatch.setattr(m.wglink_handoff, 'next_pending_handoff', lambda *_, **__: None)
+        else:
+            read = Path.read_text
+            def unreadable(path, *args, **kwargs):
+                if path == request:
+                    raise PermissionError('request temporarily held open')
+                return read(path, *args, **kwargs)
+            monkeypatch.setattr(Path, 'read_text', unreadable)
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert not writes and m._wg_request_memo is None
+        assert not m._recent_outcomes
+        assert (request.stat().st_mtime_ns, request.stat().st_size) == (before.st_mtime_ns, before.st_size)
+        if block == 'bundle_folder':
+            monkeypatch.setattr(m.wglink_workspace, 'bundle_folder', read_bundles)
+        elif block == 'selection':
+            monkeypatch.setattr(m.wglink_handoff, 'next_pending_handoff', select)
+        else:
+            monkeypatch.setattr(Path, 'read_text', read)
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert len(writes) == 1
+    finally:
+        m.stop(None)
+
+
+@pytest.mark.parametrize('carrier', ['followup', 'tick'])
+@pytest.mark.parametrize('invalid', ['json', 'schema', 'sequence', 'bundle'])
+def test_proven_unusable_request_reports_a_correlated_terminal_refusal(monkeypatch, tmp_path, carrier, invalid):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_invalid_' + carrier + invalid)
+    m = f.module
+    try:
+        writes, _ = _submit(monkeypatch, f, ipc, bundles)
+        request = ipc / '.fusion-handoffs/req-1.json'
+        payload = json.loads(request.read_text())
+        if invalid == 'json':
+            request.write_text('{broken')
+        else:
+            payload[{'schema': 'schemaVersion', 'sequence': 'deliverySequence', 'bundle': 'bundlePath'}[invalid]] = (
+                'wrong' if invalid != 'bundle' else str(tmp_path / 'outside/horn.wglink'))
+            request.write_text(json.dumps(payload))
+        if carrier == 'tick':
+            m._on_watch_tick()
+        else:
+            _poll(m)
+            _deliver_every_event(f.app)
+        assert not writes and request.exists()
+        report = json.loads((ipc / '.fusion-status.json').read_text())
+        receipt = report['diagnostics']['recentOutcomes'][-1]
+        assert receipt['requestId'] == 'req-1' and receipt['outcome'] == 'refused'
+        assert 'send the model from WG again' in receipt['message']
+        count = len(f.app.fired)
+        _poll(m)
+        assert len(f.app.fired) == count
     finally:
         m.stop(None)

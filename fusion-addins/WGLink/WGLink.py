@@ -4153,6 +4153,8 @@ def _publish_fusion_status(snapshot: dict[str, object] | None = None) -> bool:
 
 
 def _pending_handoff() -> wglink_handoff.PendingHandoff | None:
+    global _wg_request_memo
+    _wg_request_memo = None
     ipc = wglink_workspace.ipc_folder(create=True)
     bundles = wglink_workspace.bundle_folder()
     if ipc is None or bundles is None:
@@ -4160,7 +4162,19 @@ def _pending_handoff() -> wglink_handoff.PendingHandoff | None:
     for request_id in wglink_handoff.discard_superseded_handoffs(ipc, bundle_root=bundles):
         # Visible in the heartbeat: which request was dropped, and why.
         _note_outcome("handoff", request_id, "superseded")
-    return wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles)
+    handoff = wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles)
+    if handoff is None:
+        # An absent result alone proves nothing: a valid file's read may have
+        # failed transiently. Only successful validation can suppress wakeups.
+        unusable = wglink_handoff.unusable_handoffs(ipc, bundle_root=bundles)
+        _wg_request_memo = tuple(item.state for item in unusable) or None
+        for item in unusable:
+            if item.request_id:
+                _note_outcome("handoff", item.request_id, "refused", message=(
+                    "The Send to CAD request cannot be read by this add-in. "
+                    "Update WG and its Fusion add-in, restart the add-in, "
+                    "then send the model from WG again."))
+    return handoff
 
 
 def _pending_return_request() -> wglink_handoff.PendingReturnRequest | None:
@@ -5119,9 +5133,10 @@ def _service_wg_handoff() -> str:
         _command_busy = True
         try:
             result = _apply_pending_handoff(None)
-            # Invalid files, and refusals whose claim cannot be removed, must
-            # not raise an event every two seconds. Deferrals above never memo.
-            _wg_request_memo = state if result != HANDLED and not _handoff_retry_pending else None
+            # A duplicate already attempted this session cannot run again.
+            # Its terminal receipt was recorded by that attempt.
+            if result == SUPPRESSED:
+                _wg_request_memo = state
             return result
         finally:
             try:

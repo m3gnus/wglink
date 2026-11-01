@@ -249,16 +249,53 @@ def has_requests(ipc: Path) -> bool:
     return bool(_request_files(Path(ipc) / HANDOFFS_DIRECTORY))
 
 
+def _request_file_state(path: Path) -> tuple[str, int, int]:
+    stat = path.stat()
+    return path.name, stat.st_mtime_ns, stat.st_size
+
+
 def request_state(ipc: Path) -> tuple[tuple[str, int, int], ...]:
     """A cheap memo key: an unusable unchanged file gets no repeated wakeups."""
     state = []
     for path in _request_files(Path(ipc) / HANDOFFS_DIRECTORY):
         try:
-            stat = path.stat()
-            state.append((path.name, stat.st_mtime_ns, stat.st_size))
+            state.append(_request_file_state(path))
         except OSError:
             continue
     return tuple(state)
+
+
+@dataclass(frozen=True)
+class UnusableHandoff:
+    """An unchanged file read successfully and proven not to be executable."""
+
+    request_id: str | None
+    state: tuple[str, int, int]
+
+
+def unusable_handoffs(ipc: Path, *, bundle_root: Path) -> list[UnusableHandoff]:
+    """Prove unusability before suppressing wakeups; never memoize failed reads.
+
+    WG names each atomic request file with its operation ID. Even malformed
+    JSON can therefore report a correlated refusal using that filename. An
+    unsafe filename is not an ID WG can publish, and supplies no correlation.
+    """
+    unusable = []
+    for path in _request_files(Path(ipc) / HANDOFFS_DIRECTORY):
+        try:
+            before = _request_file_state(path)
+            payload = _read_json(path, raise_io_errors=True)
+            handoff = handoff_from_document(payload, bundle_root=bundle_root, marker_path=path)
+            after = _request_file_state(path)
+        except OSError:
+            continue
+        if handoff is not None or before != after:
+            continue
+        unusable.append(UnusableHandoff(
+            request_id=path.stem if _PLAIN_ID.fullmatch(path.stem) else None,
+            state=after,
+        ))
+    return unusable
 
 
 def _requests_in_order(directory: Path) -> list[Path]:

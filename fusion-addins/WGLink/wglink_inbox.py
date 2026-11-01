@@ -234,10 +234,15 @@ class WriteOutcomeUnknown(OSError):
     """
 
 
-def _read_json(path: Path) -> Any:
+def _read_json(path: Path, *, raise_io_errors: bool = False) -> Any:
+    """Read JSON, optionally distinguishing temporary I/O from invalid content."""
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
+    except OSError:
+        if raise_io_errors:
+            raise
+        return None
+    except (ValueError, TypeError):
         return None
 
 
