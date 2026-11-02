@@ -647,47 +647,41 @@ def can_change_settings(ipc: Path) -> bool:
     return type(found) is int and found == wglink_protocol.SOLVE_SETTINGS_VERSION
 
 
-def settings_used(entries: Sequence[Mapping[str, Any]], document_id: object) -> dict[str, Any]:
-    """The solve settings this document's latest solves used, newest first, field by field.
+def settings_reports(entries: Sequence[Mapping[str, Any]], document_id: object):
+    """This document's Solves and trustworthy setup reports, newest first.
 
-    Only WG's reported setup confirms application: publishing or consuming a
-    request does not mean WG applied its edits. Fields no solve reports stay
-    absent: the panel shows WG's own value as unknown. ``entries`` are newest first.
+    WG may report a setup before a first ingest saves it for the model.
+    Queuing binds the prepared solve after that save; earlier, held and
+    unsuccessful states cannot prove application.
     """
-    found: dict[str, Any] = {}
     for entry in entries:
         if entry.get("kind") != SOLVE or not document_id or entry.get("documentId") != document_id:
             continue
         status = entry.get("status") if isinstance(entry.get("status"), Mapping) else {}
         reported = status.get("settings") if isinstance(status.get("settings"), Mapping) else {}
+        yield entry, reported if status.get("state") in {"queued", "solving", "solved"} else {}
+
+
+def settings_used(entries: Sequence[Mapping[str, Any]], document_id: object) -> dict[str, Any]:
+    """WG's latest proven settings, field by field; never the sent edits."""
+    found: dict[str, Any] = {}
+    for _entry, reported in settings_reports(entries, document_id):
         for key, value in reported.items():
             found.setdefault(key, value)
-        if len(found) == len(wglink_protocol.SOLVE_SETTINGS_LABELS):
-            break
     return found
 
 
-def settings_unconfirmed(entries: Sequence[Mapping[str, Any]], document_id: object) -> dict[str, Any]:
-    """Latest published edits not yet covered by a newer WG setup report.
-
-    An older matching report cannot confirm a revert while a conflicting edit
-    is still in flight. Request history already records publication and replies.
-    """
-    found: dict[str, Any] = {}
+def settings_awaiting(entries: Sequence[Mapping[str, Any]], document_id: object) -> set[str]:
+    """Fields a later published request could still change (including a revert)."""
+    awaiting: set[str] = set()
     seen: set[str] = set()
-    for entry in entries:
-        if entry.get("kind") != SOLVE or not document_id or entry.get("documentId") != document_id:
-            continue
-        status = entry.get("status") if isinstance(entry.get("status"), Mapping) else {}
-        reported = status.get("settings") if isinstance(status.get("settings"), Mapping) else {}
+    for entry, reported in settings_reports(entries, document_id):
         seen.update(reported)
         sent = entry.get("sentSettings")
         if entry.get("submittedAt") is not None and isinstance(sent, Mapping):
-            for key, value in sent.items():
-                if key not in seen:
-                    found[key] = value
-                    seen.add(key)
-    return found
+            awaiting.update(set(sent) - seen)
+            seen.update(sent)
+    return awaiting
 
 
 def show_request(ipc: Path, request: Mapping[str, Any]) -> Path | None:

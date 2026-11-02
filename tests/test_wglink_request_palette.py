@@ -999,12 +999,12 @@ def test_a_deferred_settings_edit_stays_with_its_rendered_document(monkeypatch, 
 
     _deliver_followups(module, fixture.app)
 
-    assert module._pending_settings == {document_id: {"frequencyCount": 60}}
+    assert _pending(module) == {document_id: {"frequencyCount": 60}}
     assert not palette.shown["settings"]["changed"]
-    module._pending_settings["doc-2"] = {"frequencyCount": 24}
+    module._set_pending_settings("doc-2", {"frequencyCount": 24})
     palette._send("action", json.dumps({"id": "resetSettings", "documentId": document_id}))
     _deliver_followups(module, fixture.app)
-    assert module._pending_settings == {"doc-2": {"frequencyCount": 24}}
+    assert _pending(module) == {"doc-2": {"frequencyCount": 24}}
 
 
 @pytest.mark.parametrize("fresh_spacing", [False, True])
@@ -1021,9 +1021,10 @@ def test_replacing_an_unclaimed_solve_carries_the_settings_it_would_withdraw(mon
     assert first["solveSettings"] == {"frequencyCount": 60}
     if recover:
         module._pending_settings.clear()
+        module._load_pending_settings()
         module._recover_request()
         assert _inbox(fixture.ipc) == [first]  # recovery never resubmits
-    assert module._pending_settings == {"doc-1": {"frequencyCount": 60}}
+    assert _pending(module) == {"doc-1": {"frequencyCount": 60}}
     if fresh_spacing:
         _change_settings(fixture, palette, frequencyCount="60", frequencySpacing="linear")
 
@@ -1033,19 +1034,19 @@ def test_replacing_an_unclaimed_solve_carries_the_settings_it_would_withdraw(mon
     assert replacement["operationId"] != first["operationId"]
     assert replacement["solveSettings"] == {**first["solveSettings"],
                                            **({"frequencySpacing": "linear"} if fresh_spacing else {})}
-    assert module._pending_settings == {"doc-1": replacement["solveSettings"]}
+    assert _pending(module) == {"doc-1": replacement["solveSettings"]}
     _claim(fixture, replacement["operationId"])
     # Pickup alone says nothing about setup application.
     assert module._settings_to_send() == replacement["solveSettings"]
-    _status(fixture, "preparing", 1, request_id=replacement["operationId"],
+    _status(fixture, "queued", 1, request_id=replacement["operationId"],
             settings=replacement["solveSettings"])
     _tick(fixture)
-    assert module._pending_settings == {}
+    assert _pending(module) == {}
     assert module._settings_to_send() == {}
 
 
 @pytest.mark.parametrize("early_state", ["refused", "failed"])
-@pytest.mark.parametrize("applied_state", ["preparing", "solved", "failed"])
+@pytest.mark.parametrize("applied_state", ["queued", "solving", "solved"])
 def test_unapplied_settings_survive_early_failure_and_retry(
     monkeypatch, tmp_path: Path, early_state: str, applied_state: str,
 ) -> None:
@@ -1069,26 +1070,27 @@ def test_unapplied_settings_survive_early_failure_and_retry(
     shown = _tick(fixture)["settings"]
     [count] = [field for field in shown["fields"] if field["id"] == "frequencyCount"]
     assert (count["value"], count["used"], count["changed"]) == (41, 21, True)
-    assert module._pending_settings == {"doc-1": {"frequencyCount": 41}}
-    # A consumed, refused request also recovers from durable history.
+    assert _pending(module) == {"doc-1": {"frequencyCount": 41}}
+    # A consumed, refused request keeps the independently persisted edit.
     module._pending_settings.clear()
+    module._load_pending_settings()
     module._recover_request()
-    assert module._pending_settings == {"doc-1": {"frequencyCount": 41}}
+    assert _pending(module) == {"doc-1": {"frequencyCount": 41}}
 
     _run(module, "solve")
     [retry] = _inbox(fixture.ipc)
     assert retry["operationId"] != first["operationId"]
     assert retry["solveSettings"] == {"frequencyCount": 41}
     _claim(fixture, retry["operationId"])
-    # Setup application, even if the solver later fails, is the confirmation.
+    # A bound job proves that the model-settings save happened.
     _status(fixture, applied_state, 1, request_id=retry["operationId"],
             settings={"frequencyCount": 41})
     shown = _tick(fixture)["settings"]
     [count] = [field for field in shown["fields"] if field["id"] == "frequencyCount"]
     assert (count["value"], count["used"], count["changed"]) == (41, 41, False)
-    assert module._pending_settings == {}
+    assert _pending(module) == {}
     module._recover_request()
-    assert module._pending_settings == {}
+    assert _pending(module) == {}
     assert module._settings_to_send() == {}
     _run(module, "solve")
     [next_solve] = _inbox(fixture.ipc)
@@ -1105,12 +1107,12 @@ def test_settings_confirmation_keeps_a_newer_edit_and_other_documents(monkeypatc
     _run(module, "solve")
     [first] = _inbox(fixture.ipc)
     _change_settings(fixture, palette, frequencyCount="61")
-    module._pending_settings["doc-2"] = {"frequencyCount": 41}
+    module._set_pending_settings("doc-2", {"frequencyCount": 41})
     _claim(fixture, first["operationId"])
     _status(fixture, "solved", 1, request_id=first["operationId"],
             settings={"frequencyCount": 41})
     _tick(fixture)
-    assert module._pending_settings == {"doc-1": {"frequencyCount": 61},
+    assert _pending(module) == {"doc-1": {"frequencyCount": 61},
                                         "doc-2": {"frequencyCount": 41}}
     assert module._settings_to_send() == {"frequencyCount": 61}
 
@@ -1155,7 +1157,7 @@ def test_reverting_to_the_old_used_value_survives_an_inflight_edit(
             settings={"frequencyCount": 21})
     _tick(fixture)
     assert module._settings_to_send() == {}
-    assert module._pending_settings == {}
+    assert _pending(module) == {}
 
 
 def test_solve_settings_shown_are_the_last_solves_and_edits_go_with_the_next_solve(
@@ -1178,7 +1180,7 @@ def test_solve_settings_shown_are_the_last_solves_and_edits_go_with_the_next_sol
     shown = _change_settings(fixture, palette, frequencyStartHz="50", frequencyEndHz="",
                              frequencyCount="60", frequencySpacing="log")
     # Only what differs from WG's is an edit; a blank keeps WG's value.
-    assert module._pending_settings == {module._active_document_id(): {"frequencyCount": 60}}
+    assert _pending(module) == {module._active_document_id(): {"frequencyCount": 60}}
     assert [field["id"] for field in shown["fields"] if field["changed"]] == ["frequencyCount"]
     assert shown["reset"]
 
@@ -1186,7 +1188,7 @@ def test_solve_settings_shown_are_the_last_solves_and_edits_go_with_the_next_sol
     [request] = _new_requests(fixture)
     assert request[wglink_protocol.SOLVE_SETTINGS_FIELD] == {"frequencyCount": 60}
     # Publication is not application: keep the edit, and the last confirmed value.
-    assert module._pending_settings == {"doc-1": {"frequencyCount": 60}}
+    assert _pending(module) == {"doc-1": {"frequencyCount": 60}}
     fields = {field["id"]: field for field in module._request_view()["settings"]["fields"]}
     assert fields["frequencyCount"]["value"] == 60
     assert fields["frequencyCount"]["used"] == 33
@@ -1212,7 +1214,7 @@ def test_unusable_solve_settings_stop_the_solve_before_anything_is_sent(
 
     palette.click("resetSettings")
     _deliver_followups(module, fixture.app)
-    assert module._pending_settings == {}
+    assert _pending(module) == {}
     assert palette.shown["settings"]["problem"] is None
 
 
@@ -1256,10 +1258,182 @@ def test_settings_used_only_includes_what_wg_reported() -> None:
     newest["sentSettings"] = {"frequencyCount": 99}  # never written
     middle = wglink_requests.new_request("r1", SOLVE, "Horn A", document_id="doc")
     middle.update(submittedAt=1.0, sentSettings={"frequencyCount": 60, "frequencyStartHz": 20.0},
-                  status={"settings": {"frequencyCount": 61}})
+                  status={"state": "solved", "settings": {"frequencyCount": 61}})
     oldest = wglink_requests.new_request("r0", SOLVE, "Horn A", document_id="doc")
-    oldest.update(submittedAt=0.5, status={"settings": {"frequencyEndHz": 20000.0, "frequencyStartHz": 50.0}})
+    oldest.update(submittedAt=0.5, status={"state": "solved", "settings": {"frequencyEndHz": 20000.0, "frequencyStartHz": 50.0}})
     other = wglink_requests.new_request("x", SOLVE, "Horn B", document_id="other")
-    other.update(submittedAt=2.0, status={"settings": {"frequencySpacing": "linear"}})
+    other.update(submittedAt=2.0, status={"state": "solved", "settings": {"frequencySpacing": "linear"}})
     assert wglink_requests.settings_used([other, newest, middle, oldest], "doc") == {
         "frequencyCount": 61, "frequencyStartHz": 50.0, "frequencyEndHz": 20000.0}
+
+
+def _pending(module):
+    return {doc: module._pending_values(doc) for doc in module._pending_settings}
+
+
+@pytest.mark.parametrize("known", [False, True])
+@pytest.mark.parametrize("state", ["preparing", "needsYou", "refused", "couldNotFinish", "cancelled"])
+def test_setup_report_before_binding_does_not_confirm_first_import(monkeypatch, tmp_path, state, known):
+    fixture = _following_document(monkeypatch, tmp_path, "WGLink_settings_before_save")
+    module = fixture.module
+    _advertise_settings(fixture.ipc)
+    _claim(fixture, fixture.request_id)
+    _status(fixture, "solved", 1, **({"settings": {"frequencyCount": 21}} if known else {}))
+    _tick(fixture)
+    _change_settings(fixture, _palette(fixture), frequencyCount="41")
+    _run(module, "solve")
+    [request] = _inbox(fixture.ipc)
+    _claim(fixture, request["operationId"])
+    _status(fixture, state, 1, request_id=request["operationId"], settings={"frequencyCount": 41})
+    fields = _tick(fixture)["settings"]["fields"]
+    count = next(field for field in fields if field["id"] == "frequencyCount")
+    assert (count["used"], count["value"], count["changed"]) == (21 if known else None, 41, True)
+    assert module._settings_to_send() == {"frequencyCount": 41}
+
+
+@pytest.mark.parametrize("before_save_state", ["refused", "solved"])
+def test_saving_an_unsaved_document_moves_pending_edits_with_history(monkeypatch, tmp_path, before_save_state):
+    fixture = _following(monkeypatch, tmp_path, "WGLink_settings_first_save")
+    module = fixture.module
+    fixture.app.activeProduct.rootComponent = types.SimpleNamespace(entityToken="first-save-root")
+    local_id = module._active_document_id()
+    assert local_id.startswith("local:")
+    _claim(fixture, fixture.request_id)
+    _status(fixture, "solved", 1)
+    _tick(fixture)
+    _advertise_settings(fixture.ipc)
+    module._set_pending_settings(local_id, {"frequencyCount": 41})
+    _run(module, "solve")
+    [request] = _inbox(fixture.ipc)
+    _claim(fixture, request["operationId"])
+    _status(fixture, before_save_state, 1, request_id=request["operationId"],
+            settings={"frequencyCount": 41})
+    _tick(fixture)
+    assert module._settings_to_send() == {"frequencyCount": 41}
+    fixture.app.activeDocument.dataFile = types.SimpleNamespace(id="saved-first-time")
+    saved_id = module._active_document_id()
+    assert saved_id == "fusion:saved-first-time"
+    assert _pending(module) == {saved_id: {"frequencyCount": 41}}
+    assert all(entry.get("documentId") != local_id for entry in module._requests.entries())
+    assert module._settings_to_send() == {"frequencyCount": 41}
+    module._load_pending_settings()
+    assert _pending(module) == {saved_id: {"frequencyCount": 41}}
+    _run(module, "solve")
+    [retry] = _inbox(fixture.ipc)
+    assert retry["solveSettings"] == {"frequencyCount": 41}
+
+    _claim(fixture, retry["operationId"])
+    _status(fixture, "queued", 1, request_id=retry["operationId"], settings={"frequencyCount": 41})
+    _tick(fixture)
+    assert module._settings_to_send() == {}
+
+
+@pytest.mark.parametrize("cleanup", ["clear", "age", "limit", "newer_edit"])
+def test_pending_edits_survive_history_cleanup_and_restart(monkeypatch, tmp_path, cleanup):
+    fixture = _following_document(monkeypatch, tmp_path, "WGLink_settings_durable")
+    module = fixture.module
+    _advertise_settings(fixture.ipc)
+    _change_settings(fixture, _palette(fixture), frequencyCount="41")
+    _run(module, "solve")
+    [request] = _inbox(fixture.ipc)
+    _claim(fixture, request["operationId"])
+    _status(fixture, "refused", 1, request_id=request["operationId"])
+    _tick(fixture)
+    if cleanup == "clear":
+        module._request_action("clearFinished")
+    elif cleanup == "age":
+        entries = module._requests.entries()
+        for entry in entries:
+            entry.update(pressedAt=1, submittedAt=1, local="finished", status={"state": "refused"})
+        module._requests.restore(wglink_requests.bounded(entries))
+        module._requests.save(module._save_followed)
+    elif cleanup == "limit":
+        entries = [wglink_requests.new_request(str(i), SOLVE, "Other", document_id="other") for i in range(60)]
+        module._requests.restore(wglink_requests.bounded(entries + module._requests.entries()))
+        module._requests.save(module._save_followed)
+    else:
+        _change_settings(fixture, _palette(fixture), frequencyCount="61")
+    expected = 61 if cleanup == "newer_edit" else 41
+    module._pending_settings.clear()
+    module._load_pending_settings()
+    module._recover_request()
+    assert _pending(module) == {"doc-1": {"frequencyCount": expected}}
+    assert module._settings_to_send() == {"frequencyCount": expected}
+
+
+@pytest.mark.parametrize("raw", [None, "{", "[]", '{"schema":1,"documents":{"d":{"frequencyCount":{}}}}'])
+def test_missing_or_corrupt_pending_file_does_not_fail_startup(monkeypatch, tmp_path, raw):
+    fixture = _following_document(monkeypatch, tmp_path, "WGLink_settings_bad_state")
+    module = fixture.module
+    path = module.SETTINGS_PATH.with_name("pending-solve-settings.json")
+    if raw is not None:
+        path.write_text(raw)
+    module._load_pending_settings()
+    assert module._pending_settings == {}
+    module._recover_request()
+
+
+def test_pending_confirmation_compares_fields_and_values_after_restart(monkeypatch, tmp_path):
+    fixture = _following_document(monkeypatch, tmp_path, "WGLink_settings_values")
+    module = fixture.module
+    _advertise_settings(fixture.ipc)
+    _change_settings(fixture, _palette(fixture), frequencyCount="41", frequencyStartHz="50")
+    _run(module, "solve")
+    [request] = _inbox(fixture.ipc)
+    _claim(fixture, request["operationId"])
+    _status(fixture, "solved", 1, request_id=request["operationId"],
+            settings={"frequencyCount": 21, "frequencyStartHz": 50.0})
+    _tick(fixture)
+    module._load_pending_settings()
+    module._recover_request()
+    assert module._settings_to_send() == {"frequencyCount": 41}
+    assert module._settings_used("doc-1") == {"frequencyCount": 21, "frequencyStartHz": 50.0}
+    assert _pending(module) == {"doc-1": {"frequencyCount": 41}}
+
+
+def test_previous_addin_history_is_not_migrated_to_pending(monkeypatch, tmp_path):
+    fixture = _following_document(monkeypatch, tmp_path, "WGLink_settings_no_migration")
+    module = fixture.module
+    entry = module._requests.current()
+    entry.update(submittedAt=1, sentSettings={"frequencyCount": 41}, status={"state": "refused"})
+    module._save_followed(entry)
+    module._load_pending_settings()
+    module._recover_request()
+    assert module._pending_settings == {}
+
+
+def test_revert_survives_restart_even_when_newer_history_is_gone(monkeypatch, tmp_path):
+    fixture = _following_document(monkeypatch, tmp_path, "WGLink_settings_revert_restart")
+    module = fixture.module
+    _advertise_settings(fixture.ipc)
+    _claim(fixture, fixture.request_id)
+    _status(fixture, "solved", 1, settings={"frequencyCount": 21})
+    _tick(fixture)
+    old = module._requests.entries()
+    _change_settings(fixture, _palette(fixture), frequencyCount="41")
+    _run(module, "solve")
+    _change_settings(fixture, _palette(fixture), frequencyCount="21")
+    module._requests.restore(old)
+    module._requests.save(module._save_followed)
+    module._load_pending_settings()
+    module._recover_request()
+    assert module._settings_to_send() == {"frequencyCount": 21}
+    _change_settings(fixture, _palette(fixture), frequencyCount="21")
+    assert module._settings_to_send() == {"frequencyCount": 21}
+
+
+def test_pending_file_reuses_atomic_writer_and_preserves_previous_on_failure(monkeypatch, tmp_path):
+    fixture = _following_document(monkeypatch, tmp_path, "WGLink_settings_atomic")
+    module = fixture.module
+    module._set_pending_settings("doc-1", {"frequencyCount": 41})
+    path = module.SETTINGS_PATH.with_name("pending-solve-settings.json")
+    original = path.read_bytes()
+    def fail_replace(*_args):
+        raise OSError("injected replace failure")
+    with monkeypatch.context() as patch:
+        patch.setattr(module.wglink_status.os, "replace", fail_replace)
+        with pytest.raises(OSError, match="injected"):
+            module._set_pending_settings("doc-1", {"frequencyCount": 61})
+    assert path.read_bytes() == original
+    module._load_pending_settings()
+    assert _pending(module) == {"doc-1": {"frequencyCount": 41}}

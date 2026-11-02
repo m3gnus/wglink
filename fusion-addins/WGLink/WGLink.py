@@ -1569,18 +1569,47 @@ _requests_palette_unavailable = False
 _requests_fallback_said: str | None = None
 # The solve settings changed in the panel and not yet confirmed, by document id.
 # WG owns the settings: this holds only edits, until WG reports applying them
-# in the request status (``settings``). Publication alone confirms nothing.
-_pending_settings: dict[str, dict[str, object]] = {}
+# in a queued, solving or solved request. Publication alone confirms nothing.
+# Each field owns its value and edit time; bounded history never owns edits.
+_pending_settings: dict[str, dict[str, dict[str, object]]] = {}
 _SETTINGS_HZ = ("frequencyStartHz", "frequencyEndHz")
 
 
 def _settings_used(document_id: str | None = None) -> dict[str, object]:
     document_id = document_id if document_id is not None else _active_document_id()
-    entries = _requests.entries()
-    used = wglink_requests.settings_used(entries, document_id)
-    unconfirmed = wglink_requests.settings_unconfirmed(entries, document_id)
-    _settings_confirmed(document_id, {key: value for key, value in used.items() if key not in unconfirmed})
-    return used
+    _settings_confirmed(document_id)
+    return wglink_requests.settings_used(_requests.entries(), document_id)
+
+
+def _pending_values(document_id: str) -> dict[str, object]:
+    return {field: edit["value"] for field, edit in _pending_settings.get(document_id, {}).items()}
+
+
+def _save_pending_settings() -> None:
+    path = SETTINGS_PATH.with_name("pending-solve-settings.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wglink_status.write_status_record(path.parent, path.name, {"schema": 1, "documents": _pending_settings})
+
+
+def _load_pending_settings() -> None:
+    """No history migration: missing or damaged optional state starts empty."""
+    _pending_settings.clear()
+    try:
+        record = json.loads(SETTINGS_PATH.with_name("pending-solve-settings.json").read_text(encoding="utf-8"))
+        if type(record["schema"]) is not int or record["schema"] != 1 or not isinstance(record["documents"], dict):
+            return
+        documents = record["documents"]
+        for document, fields in documents.items():
+            if not document or not isinstance(fields, dict):
+                return
+            for field, edit in fields.items():
+                if (field not in wglink_protocol.SOLVE_SETTINGS_LABELS or not isinstance(edit, dict)
+                        or "value" not in edit or type(edit.get("after")) not in (int, float)
+                        or not math.isfinite(edit["after"])):
+                    return
+        _pending_settings.update(documents)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
 
 
 def _read_setting(key: str, text: object) -> object | None:
@@ -1607,22 +1636,26 @@ def _set_pending_settings(document_id: str, values: object) -> None:
     if not document_id or not isinstance(values, dict):
         return
     used = _settings_used(document_id)
-    unconfirmed = wglink_requests.settings_unconfirmed(_requests.entries(), document_id)
-    pending: dict[str, object] = {}
+    awaiting = wglink_requests.settings_awaiting(_requests.entries(), document_id)
+    previous = _pending_settings.get(document_id, {})
+    pending: dict[str, dict[str, object]] = {}
     for key in wglink_protocol.SOLVE_SETTINGS_LABELS:
         value = _read_setting(key, values.get(key))
-        if value is not None and (value != used.get(key) or key in unconfirmed):
-            pending[key] = value
+        old = previous.get(key)
+        if value is not None and (value != used.get(key) or key in awaiting
+                                  or (old is not None and old["value"] == value)):
+            pending[key] = old if old and old["value"] == value else {"value": value, "after": time.time()}
     if pending:
         _pending_settings[document_id] = pending
     else:
         _pending_settings.pop(document_id, None)
+    _save_pending_settings()
     _show_request_palette()
 
 
 def _settings_problems(document_id: str) -> list[str]:
     used = _settings_used(document_id)
-    pending = _pending_settings.get(document_id) or {}
+    pending = _pending_values(document_id)
     return wglink_protocol.solve_settings_problems({**used, **pending})
 
 
@@ -1638,7 +1671,7 @@ def _settings_to_send() -> dict[str, object]:
     if ipc is None or not wglink_requests.can_change_settings(ipc):
         return {}
     used = _settings_used(document_id)
-    pending = _pending_settings.get(document_id) or {}
+    pending = _pending_values(document_id)
     if not pending:
         return {}
     problems = wglink_protocol.solve_settings_problems({**used, **pending})
@@ -1647,18 +1680,28 @@ def _settings_to_send() -> dict[str, object]:
     return wglink_protocol.request_solve_settings(pending)
 
 
-def _settings_confirmed(document_id: object, used: dict[str, object]) -> None:
-    """Forget only edits WG reports applying; keep any newer panel changes."""
-
+def _settings_confirmed(document_id: object) -> None:
+    """One confirmation rule: a matching field from a later, proven request."""
     key = str(document_id or "")
     pending = _pending_settings.get(key)
-    if pending is None:
+    if not pending or key.startswith("local:"):
+        # An unsaved CAD-authored model may have no WG project to store a setup.
         return
-    for field, value in used.items():
-        if field in pending and pending[field] == value:
-            pending.pop(field)
+    changed = False
+    seen: set[str] = set()
+    for entry, reported in wglink_requests.settings_reports(_requests.entries(), document_id):
+        for field, value in reported.items():
+            if field in seen:
+                continue
+            seen.add(field)
+            edit = pending.get(field)
+            if edit and entry.get("pressedAt", 0) >= edit["after"] and edit["value"] == value:
+                pending.pop(field)
+                changed = True
     if not pending:
         _pending_settings.pop(key, None)
+    if changed:
+        _save_pending_settings()
 
 
 def _settings_view(document_id: str | None) -> dict[str, object] | None:
@@ -1668,7 +1711,7 @@ def _settings_view(document_id: str | None) -> dict[str, object] | None:
     if not document_id or ipc is None or not wglink_requests.can_change_settings(ipc):
         return None
     used = _settings_used(document_id)
-    pending = _pending_settings.get(document_id) or {}
+    pending = _pending_values(document_id)
     fields = []
     for key, label in wglink_protocol.SOLVE_SETTINGS_LABELS.items():
         fields.append({
@@ -2162,14 +2205,6 @@ def _recover_request() -> None:
                 )
                 entries[index] = updated
         _requests.restore(entries)
-        # Published edits survive a restart in the existing request history.
-        # Restore only what WG has not confirmed, without replacing newer edits.
-        for document_id in {entry.get("documentId") for entry in entries if entry.get("documentId")}:
-            unconfirmed = wglink_requests.settings_unconfirmed(entries, document_id)
-            if unconfirmed:
-                pending = _pending_settings.setdefault(document_id, {})
-                for key, value in unconfirmed.items():
-                    pending.setdefault(key, value)
         _requests.document_id = _active_document_id()
         _requests.all_documents = False
         if entries:
@@ -3951,6 +3986,15 @@ def _active_document_id() -> str | None:
         saved_id = f"fusion:{native_id}"
         if local_id:
             try:
+                edits = _pending_settings.pop(local_id, None)
+                if edits:
+                    saved = _pending_settings.setdefault(saved_id, {})
+                    for field, edit in edits.items():
+                        if field not in saved or edit["after"] > saved[field]["after"]:
+                            # Pre-save requests may have solved without a model
+                            # identity in WG. Only a fresh saved request can confirm.
+                            saved[field] = {**edit, "after": max(time.time(), edit["after"])}
+                    _save_pending_settings()
                 _requests.remap_document(local_id, saved_id, _save_followed)
             except Exception:  # noqa: BLE001 - identity remains usable if persistence fails
                 _log(f"[{PANEL_NAME}] could not record saved document identity\n{traceback.format_exc()}")
@@ -5666,6 +5710,7 @@ def _build_owner(app: object, ui: object) -> None:
         _convert_outbox_at_startup()
         # The request the palette followed, then the pickup checks a restart
         # lost, whatever the gate says (C6, C8).
+        _load_pending_settings()
         _recover_request()
         _recheck_requests_at_startup()
         if not _coordinating():

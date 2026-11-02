@@ -93,15 +93,24 @@ never fall back silently. Any changed sweep field replaces an explicit
 frequency list with the requested grid, retaining its endpoints and count
 where those fields were not changed.
 
-The panel shows, per field, what the document's newest solve used (the status
-record's `settings`) and holds only the edits WG has not yet confirmed, in
-memory, per document. Each Solve carries those edits until WG reports their
-values in `settings`; publishing or consuming a request alone confirms nothing.
-A refusal or failure before setup application, or replacement by another request,
-therefore leaves the edits for the next Solve. A Send never carries them.
-Published edits awaiting confirmation are recovered from the existing request
-history after a restart. The panel's settings appear only for a WG that advertises
-the capability.
+The panel shows, per field, WG's newest proven settings and holds unconfirmed
+edits per document. Only `queued`, `solving` and `solved` prove the preparation
+passed ingest and saved the model's settings. Earlier, held, refused and failed
+requests may report a setup that the model never stored. Each Solve carries
+pending edits until a later request reports matching field values in a proven
+state; publishing or consuming a request alone confirms nothing. A Send never
+carries them.
+
+The add-in atomically writes `pending-solve-settings.json` beside its per-install
+`settings.json`, using the existing durable record writer. Each pending field
+owns its value and edit time, so older confirmations cannot erase later edits
+or reverts. Startup reads this file independently of bounded request history;
+Clear finished, history expiry and history limits cannot remove edits. Missing
+or corrupt state starts empty. History from earlier add-ins is not migrated.
+Unsaved documents retain edits: a CAD-authored return may have no WG project
+to store them in. First save moves pending edits alongside the document's
+request-history remap; only a request made after saving can then confirm them.
+The panel's settings appear only for a WG that advertises the capability.
 
 ## WG's rhythm, and WG stopping
 
