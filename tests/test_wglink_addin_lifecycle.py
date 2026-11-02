@@ -291,6 +291,10 @@ class _UI(MainThreadOnly):
         self.workspaces = types.SimpleNamespace(
             itemById=lambda _id: types.SimpleNamespace(toolbarPanels=panels)
         )
+        self.activeWorkspace = types.SimpleNamespace(
+            id="FusionSolidEnvironment",
+            toolbarTabs=[types.SimpleNamespace(id="SolidTab", isActive=True)],
+        )
         self.progress_dialogs: list[object] = []
 
     def messageBox(

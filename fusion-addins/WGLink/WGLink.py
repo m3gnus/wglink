@@ -254,6 +254,7 @@ _followup_app = None
 _followups: list[object] = []
 _followups_once: set[object] = set()
 WG_REQUEST_POLL_SECONDS = 2.0
+WG_HANDOFF_WORKSPACE_ID = "FusionSolidEnvironment"
 _wg_request_poll_count = 0
 _wg_request_fire_count = 0
 _wg_request_memo: object = None
@@ -4995,21 +4996,27 @@ def _claims_outstanding() -> bool:
 
 
 def _handoff_idle() -> bool:
-    """Defer WG work during startup, a tool, or a Design edit session.
+    """Allow WG work only after startup with SelectCommand active.
 
-    Autodesk's Design.activeEditObject is the current edit container, including
-    a sketch or feature. Any Component is idle, including an activated
-    sub-component; other edit containers defer. Non-Design products
-    have no such edit gate; a new-document handoff can create a Design there.
+    A Design also requires a Component edit container, the Solid workspace,
+    and no active toolbar tab whose id contains "basefeature" (case-insensitive).
+    Unknown state defers. Non-Design products have no edit gate; a
+    new-document handoff can create a Design there.
     """
-    app = _app()
-    if app is None or not app.isStartupComplete or app.userInterface.activeCommand != "SelectCommand":
-        return False
     try:
+        app = _app()
+        if app is None or not app.isStartupComplete or app.userInterface.activeCommand != "SelectCommand":
+            return False
         design = app.activeProduct
         if design is None or "Design" not in str(getattr(design, "objectType", "")):
             return True
-        return design.activeEditObject.objectType == "adsk::fusion::Component"
+        if design.activeEditObject.objectType != "adsk::fusion::Component":
+            return False
+        workspace = app.userInterface.activeWorkspace
+        if workspace.id != WG_HANDOFF_WORKSPACE_ID:
+            return False
+        return not any(tab.isActive and "basefeature" in tab.id.lower()
+                       for tab in workspace.toolbarTabs)
     except Exception:  # noqa: BLE001 - an unreadable edit state cannot authorize a mutation
         return False
 

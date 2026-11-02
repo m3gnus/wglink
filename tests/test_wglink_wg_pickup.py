@@ -472,6 +472,47 @@ def test_idle_gate_accepts_any_component(monkeypatch, tmp_path, component):
         f.module.stop(None)
 
 
+@pytest.mark.parametrize(('workspace_id', 'tab_id', 'active', 'idle'), [
+    ('FusionSolidEnvironment', 'SolidTab', True, True),
+    ('TSplineEnvironment', 'SolidTab', True, False),
+    ('FusionSolidEnvironment', 'BasefeatureSolidTab', True, False),
+    ('FusionSolidEnvironment', 'BASEFEATURESolidTab', True, False),
+    ('FusionSolidEnvironment', 'SurfaceTab', True, True),
+    ('FusionSolidEnvironment', 'BasefeatureSolidTab', False, True),
+])
+def test_idle_gate_checks_workspace_and_active_tabs(monkeypatch, tmp_path, workspace_id, tab_id, active, idle):
+    f, _, _, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_workspace')
+    try:
+        f.ui.activeWorkspace = types.SimpleNamespace(
+            id=workspace_id,
+            toolbarTabs=[types.SimpleNamespace(id='SolidTab', isActive=True),
+                         types.SimpleNamespace(id=tab_id, isActive=active)],
+        )
+        assert f.module._handoff_idle() is idle
+    finally:
+        f.module.stop(None)
+
+
+@pytest.mark.parametrize('unreadable', ['workspace', 'tabs', 'tab-active', 'tab-id'])
+def test_unreadable_workspace_or_tabs_defer(monkeypatch, tmp_path, unreadable):
+    f, _, _, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_unreadable_workspace')
+    class Unreadable:
+        def __getattr__(self, name):
+            raise RuntimeError('workspace state unavailable')
+    try:
+        if unreadable == 'workspace':
+            f.ui.activeWorkspace = Unreadable()
+        elif unreadable == 'tabs':
+            f.ui.activeWorkspace = types.SimpleNamespace(id='FusionSolidEnvironment')
+        elif unreadable == 'tab-active':
+            f.ui.activeWorkspace.toolbarTabs = [Unreadable()]
+        else:
+            f.ui.activeWorkspace.toolbarTabs = [types.SimpleNamespace(isActive=True)]
+        assert not f.module._handoff_idle()
+    finally:
+        f.module.stop(None)
+
+
 def test_unreadable_edit_state_defers(monkeypatch, tmp_path):
     f, _, _, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_unreadable_edit')
     class UnreadableDesign:
