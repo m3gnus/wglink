@@ -5139,6 +5139,10 @@ def _service_wg_handoff() -> str:
         _command_busy = True
         try:
             result = _apply_pending_handoff(None)
+            if result not in (IDLE, SUPPRESSED):
+                # WG Send owes the same measured status as a native command;
+                # coordination may be off, so no tick will pay for it later.
+                _request_geometry_refresh("command", _active_document_id())
             # A duplicate already attempted this session cannot run again.
             # Its terminal receipt was recorded by that attempt.
             if result == SUPPRESSED:

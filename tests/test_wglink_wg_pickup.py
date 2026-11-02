@@ -7,15 +7,18 @@ from pathlib import Path
 import pytest
 
 from test_wglink_activation_boundary import _boundary, _deliver_every_event
-from test_wglink_addin_lifecycle import _per_request_folders, _per_request_handoff, _proxying_root
+from test_wglink_addin_lifecycle import _linked_document, _per_request_folders, _per_request_handoff, _proxying_root
 
 
-def _running(monkeypatch, tmp_path, name):
+def _running(monkeypatch, tmp_path, name, *, real_geometry=False):
     fixture = _boundary(monkeypatch, tmp_path, name, coordination=None)
     module = fixture.module
     due = []
     monkeypatch.setattr(module, '_start_timer', lambda delay, fn: due.append((delay, fn)))
+    fresh_geometry_state = module._fresh_geometry_state
     ipc, bundles = _per_request_folders(monkeypatch, module, tmp_path / 'files')
+    if real_geometry:
+        monkeypatch.setattr(module, '_fresh_geometry_state', fresh_geometry_state)
     module.run(None)
     assert not module.SETTINGS_PATH.exists()
     assert (2.0, module._poll_wg_requests_due) in due
@@ -48,6 +51,58 @@ def _submit(monkeypatch, fixture, ipc, bundles):
     monkeypatch.setattr(module.wglink_core, 'insert', insert)
     monkeypatch.setattr(module, '_document_links', lambda *_: [])
     return writes, original
+
+
+@pytest.mark.parametrize('signature', ['sha256:measured', ''])
+def test_handled_request_publishes_measured_status(monkeypatch, tmp_path, signature):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_measured', real_geometry=True)
+    m = f.module
+    try:
+        document_links = m._document_links
+        _submit(monkeypatch, f, ipc, bundles)
+        def insert(app, path, options):
+            options['precondition']()
+            app.activeProduct, _ = _linked_document(m, instance_id='wgi-new')
+            monkeypatch.setattr(m, '_document_links', document_links)
+        monkeypatch.setattr(m.wglink_core, 'insert', insert)
+        # Stand in for Fusion's export fingerprint; the refresh, cache and
+        # snapshot paths, including the managed body's state, all run for real.
+        monkeypatch.setattr(m.wglink_send, 'return_state', lambda *_: {'hash': signature})
+        before = m.wglink_activity.LOG.counts().get('status_publication', {}).get('command:wg-send', 0)
+        _poll(m)
+        _deliver_every_event(f.app)
+        report = json.loads((ipc / '.fusion-status.json').read_text())
+        assert report['diagnostics']['recentOutcomes'][-1]['outcome'] == 'applied'
+        assert m._geometry_state_cache is not None, (m.wglink_activity.LOG.counts(), f.ui.text_palette.written)
+        [link] = report['document']['links']
+        assert (link['documentSignatureHash'] or '') == signature
+        assert link['localBodyState'] != 'unknown'
+        timings = report['diagnostics']['lastTickMs']
+        assert timings['geometry_state'] in ('cached', 'stale')
+        assert timings['geometry_refresh_pending'] is False
+        assert m._geometry_refresh_pending is None
+        activity = report['diagnostics']['activity']
+        assert activity['counts']['geometry_measurement'] == {'command:wg-send': 1}
+        # The existing claim receipt plus exactly one post-command status.
+        assert activity['counts']['status_publication']['command:wg-send'] == before + 2
+        assert activity['betweenCommands'] == {}
+    finally:
+        m.stop(None)
+
+
+@pytest.mark.parametrize('result', ['idle', 'suppressed'])
+def test_unhandled_request_does_not_request_or_measure_geometry(monkeypatch, tmp_path, result):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_unhandled', real_geometry=True)
+    m = f.module
+    try:
+        _submit(monkeypatch, f, ipc, bundles)
+        monkeypatch.setattr(m, '_apply_pending_handoff', lambda _: result)
+        monkeypatch.setattr(m, '_request_geometry_refresh', lambda *_: pytest.fail('unhandled request refreshed'))
+        monkeypatch.setattr(m, '_measure_geometry_state', lambda *_: pytest.fail('unhandled request measured'))
+        m._geometry_refresh_pending = None
+        assert m._service_wg_handoff() == result
+    finally:
+        m.stop(None)
 
 
 def test_default_owner_picks_up_claims_and_reports_through_registered_path(monkeypatch, tmp_path):
@@ -110,7 +165,9 @@ def test_empty_poll_is_file_only_and_memo_stops_unusable_files(monkeypatch, tmp_
         before = report.stat().st_mtime_ns
         fired = list(f.app.fired)
         monkeypatch.setattr(m.wglink_handoff, '_read_json', lambda *_: pytest.fail('empty inbox read JSON'))
+        monkeypatch.setattr(m, '_measure_geometry_state', lambda *_: pytest.fail('empty inbox measured'))
         for _ in range(3): _poll(m)
+        assert m._service_wg_handoff() == m.IDLE
         assert m._wg_request_poll_count >= 3
         assert f.app.fired == fired and report.stat().st_mtime_ns == before
     finally:
