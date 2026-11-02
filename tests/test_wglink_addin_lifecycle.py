@@ -76,7 +76,8 @@ class _Application(MainThreadOnly):
 
     def _add_document(self, _document_type: object) -> object:
         self.activeProduct = types.SimpleNamespace(objectType="adsk::fusion::Design",
-                                                 rootComponent=types.SimpleNamespace(entityToken="new-design-root"))
+                                                 rootComponent=types.SimpleNamespace(objectType="adsk::fusion::Component",
+                                                                                  entityToken="new-design-root"))
         self.activeProduct.activeEditObject = self.activeProduct.rootComponent
         self.activeDocument = types.SimpleNamespace(name="Untitled")
         return self.activeDocument
@@ -3981,7 +3982,8 @@ def test_a_pending_new_bundle_is_inserted_once_and_acknowledged(
     definitions = _Definitions(reserve_ids=False)
     ui = _UI(panels, definitions)
     app = _Application(ui)
-    app.activeProduct = types.SimpleNamespace(objectType="adsk::fusion::Design", rootComponent=object())
+    app.activeProduct = types.SimpleNamespace(objectType="adsk::fusion::Design", rootComponent=types.SimpleNamespace(
+        objectType="adsk::fusion::Component"))
     app.activeProduct.activeEditObject = app.activeProduct.rootComponent
     module = _load_instance(monkeypatch, "WGLink_pending_insert", ui, app)
     bundle_root = tmp_path / "wglink"
@@ -4468,7 +4470,8 @@ def test_a_refused_automatic_insert_is_not_retried_every_tick(
     definitions = _Definitions(reserve_ids=False)
     ui = _UI(panels, definitions)
     app = _Application(ui)
-    app.activeProduct = types.SimpleNamespace(objectType="adsk::fusion::Design", rootComponent=object())
+    app.activeProduct = types.SimpleNamespace(objectType="adsk::fusion::Design", rootComponent=types.SimpleNamespace(
+        objectType="adsk::fusion::Component"))
     app.activeProduct.activeEditObject = app.activeProduct.rootComponent
     module = _load_instance(monkeypatch, "WGLink_pending_refusal", ui, app)
     bundle_root = tmp_path / "wglink"
@@ -4557,7 +4560,8 @@ def test_a_refused_handoff_does_not_starve_a_pending_return_request(
     panels = _Panels()
     ui = _UI(panels, _Definitions(reserve_ids=False))
     app = _Application(ui)
-    app.activeProduct = types.SimpleNamespace(objectType="adsk::fusion::Design", rootComponent=object())
+    app.activeProduct = types.SimpleNamespace(objectType="adsk::fusion::Design", rootComponent=types.SimpleNamespace(
+        objectType="adsk::fusion::Component"))
     app.activeProduct.activeEditObject = app.activeProduct.rootComponent
     app.activeDocument = types.SimpleNamespace(name="Tritonia V")
     module = _load_instance(monkeypatch, "WGLink_refusal_starves_return", ui, app)

@@ -365,7 +365,7 @@ def test_created_document_without_active_design_is_terminal_and_created_once(mon
 
 
 @pytest.mark.parametrize('carrier', ['followup', 'tick'])
-@pytest.mark.parametrize('edit_type', ['Sketch', 'BaseFeature', 'Component', None])
+@pytest.mark.parametrize('edit_type', ['Sketch', 'BaseFeature', 'FormFeature', 'Unknown', None])
 def test_design_edit_sessions_defer_both_handoff_carriers(monkeypatch, tmp_path, carrier, edit_type):
     f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_edit_' + carrier + str(edit_type))
     m = f.module
@@ -399,6 +399,51 @@ def test_non_design_product_does_not_defer_new_document_handoff(monkeypatch, tmp
         _poll(m)
         _deliver_every_event(f.app)
         assert len(writes) == 1
+    finally:
+        m.stop(None)
+
+
+@pytest.mark.parametrize('component', ['root', 'sub-component'])
+def test_idle_gate_accepts_any_component(monkeypatch, tmp_path, component):
+    f, _, _, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_component_' + component)
+    try:
+        f.design.activeEditObject = (f.design.rootComponent if component == 'root' else
+                                    types.SimpleNamespace(objectType='adsk::fusion::Component',
+                                                          entityToken='activated-sub-component'))
+        assert f.module._handoff_idle()
+    finally:
+        f.module.stop(None)
+
+
+def test_unreadable_edit_state_defers(monkeypatch, tmp_path):
+    f, _, _, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_unreadable_edit')
+    class UnreadableDesign:
+        objectType = 'adsk::fusion::Design'
+
+        @property
+        def activeEditObject(self):
+            raise RuntimeError('edit state unavailable')
+    try:
+        f.app.activeProduct = UnreadableDesign()
+        assert not f.module._handoff_idle()
+    finally:
+        f.module.stop(None)
+
+
+def test_request_delivered_with_non_root_component_active(monkeypatch, tmp_path):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_activated_component')
+    m = f.module
+    try:
+        writes, _ = _submit(monkeypatch, f, ipc, bundles)
+        f.design.activeEditObject = types.SimpleNamespace(
+            objectType='adsk::fusion::Component', entityToken='activated-sub-component')
+        assert f.design.activeEditObject.entityToken != f.design.rootComponent.entityToken
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert len(writes) == 1
+        assert not list((ipc / '.fusion-handoffs').iterdir())
+        receipt = json.loads((ipc / '.fusion-status.json').read_text())['diagnostics']['recentOutcomes'][-1]
+        assert receipt['requestId'] == 'req-1' and receipt['outcome'] == 'applied'
     finally:
         m.stop(None)
 

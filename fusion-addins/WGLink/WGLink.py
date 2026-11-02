@@ -4998,7 +4998,8 @@ def _handoff_idle() -> bool:
     """Defer WG work during startup, a tool, or a Design edit session.
 
     Autodesk's Design.activeEditObject is the current edit container, including
-    a sketch or feature. Only its root component is idle. Non-Design products
+    a sketch or feature. Any Component is idle, including an activated
+    sub-component; other edit containers defer. Non-Design products
     have no such edit gate; a new-document handoff can create a Design there.
     """
     app = _app()
@@ -5008,7 +5009,7 @@ def _handoff_idle() -> bool:
         design = app.activeProduct
         if design is None or "Design" not in str(getattr(design, "objectType", "")):
             return True
-        return wglink_core._same_entity(design.activeEditObject, design.rootComponent)
+        return design.activeEditObject.objectType == "adsk::fusion::Component"
     except Exception:  # noqa: BLE001 - an unreadable edit state cannot authorize a mutation
         return False
 
