@@ -2,6 +2,7 @@
 import json
 import threading
 import types
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -447,15 +448,105 @@ def test_design_edit_sessions_defer_both_handoff_carriers(monkeypatch, tmp_path,
         m.stop(None)
 
 
-def test_non_design_product_does_not_defer_new_document_handoff(monkeypatch, tmp_path):
+@pytest.mark.parametrize('product', ['adsk::cam::CAM', 'adsk::drawing::Drawing'])
+def test_non_design_product_does_not_defer_new_document_handoff(monkeypatch, tmp_path, product):
     f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_non_design')
     m = f.module
     try:
-        writes, _ = _submit(monkeypatch, f, ipc, bundles)
-        f.app.activeProduct = types.SimpleNamespace(objectType='adsk::drawing::Drawing')
+        writes, original = _submit(monkeypatch, f, ipc, bundles)
+        f.app.activeProduct = types.SimpleNamespace(objectType=product)
         _poll(m)
         _deliver_every_event(f.app)
-        assert len(writes) == 1
+        assert len(writes) == 1 and writes[0] is not original
+    finally:
+        m.stop(None)
+
+
+@pytest.mark.parametrize('operation', ['update', 'insert'])
+def test_cam_document_handoff_defers_until_design_returns(monkeypatch, tmp_path, operation):
+    f, ipc, bundles, due = _running(monkeypatch, tmp_path, 'WGLink_wg_cam_' + operation)
+    m = f.module
+    try:
+        original = f.app.activeDocument
+        original.dataFile = types.SimpleNamespace(id='doc-a')
+        _per_request_handoff(
+            ipc, bundles, instance_id='wgi-heartbeat' if operation == 'update' else None,
+            destination={'kind': 'document', 'value': 'fusion:doc-a'},
+        )
+        # Match the fixture's real link for Update; Insert needs an unlinked target.
+        request = ipc / '.fusion-handoffs/req-1.json'
+        payload = json.loads(request.read_text())
+        payload['designId'] = 'wgd-a' if operation == 'update' else 'wgd-new'
+        request.write_text(json.dumps(payload))
+        before = request.read_bytes()
+        writes = []
+        def apply(app, path, options):
+            options['precondition']()
+            writes.append(app.activeDocument)
+        monkeypatch.setattr(m.wglink_core, operation, apply)
+        created = []
+        add = f.app.documents.add
+        def create(kind):
+            created.append(add(kind))
+            return created[-1]
+        monkeypatch.setattr(f.app.documents, 'add', create)
+        f.app.activeProduct = types.SimpleNamespace(objectType='adsk::cam::CAM')
+        for _ in range(2):
+            fired, timers = len(f.app.fired), len(due)
+            _poll(m)
+            _deliver_every_event(f.app)
+            assert len(f.app.fired) == fired + 1
+            assert due[timers:] == [(2.0, m._poll_wg_requests_due)]
+            assert not m._followups and not m._followups_once
+            assert not writes and not created
+            assert f.app.activeDocument is original
+            assert request.read_bytes() == before
+            assert list(request.parent.iterdir()) == [request]
+            assert m._wg_request_memo is None and m._handoff_attempted_id is None
+        f.app.activeProduct = f.design
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert writes == [original] and not created
+        assert not list(request.parent.iterdir())
+        assert m._recent_outcomes[-1]['outcome'] == 'applied'
+    finally:
+        m.stop(None)
+
+
+def test_cam_deferred_insert_still_expires(monkeypatch, tmp_path):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_cam_expiry')
+    m = f.module
+    try:
+        f.app.activeDocument.dataFile = types.SimpleNamespace(id='doc-a')
+        now = m._utc_now()
+        monkeypatch.setattr(m, '_utc_now', lambda: now)
+        _per_request_handoff(ipc, bundles, instance_id=None, requested_at=now.isoformat(),
+                             destination={'kind': 'document', 'value': 'fusion:doc-a'})
+        monkeypatch.setattr(f.app.documents, 'add', lambda *_: pytest.fail('created a document'))
+        monkeypatch.setattr(m.wglink_core, 'insert', lambda *_: pytest.fail('expired insert applied'))
+        f.app.activeProduct = types.SimpleNamespace(objectType='adsk::cam::CAM')
+        _poll(m)
+        _deliver_every_event(f.app)
+        request = ipc / '.fusion-handoffs/req-1.json'
+        assert request.exists() and m._wg_request_memo is None
+        now += timedelta(seconds=m.INSERT_HANDOFF_TTL_SECONDS + 1)
+        f.app.activeProduct = f.design
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert not list(request.parent.iterdir())
+        assert m._recent_outcomes[-1]['outcome'] == 'expired'
+    finally:
+        m.stop(None)
+
+
+def test_no_active_document_still_creates_a_design(monkeypatch, tmp_path):
+    f, _, _, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_no_document')
+    m = f.module
+    try:
+        f.app.activeDocument = None
+        f.app.activeProduct = None
+        assert m._ensure_design_ready()
+        assert f.app.activeDocument is not None and m._design_ready()
     finally:
         m.stop(None)
 

@@ -4422,12 +4422,14 @@ _NEW_DOCUMENT_CLEANUP = (
 
 
 def _ensure_design_ready(*, new_document: bool = False) -> bool:
-    """Create a Fusion Design document for an explicit WG handoff if needed."""
+    """Create only for a new-document handoff or when no document is open."""
 
     if not new_document and _design_ready():
         return True
     app = _app()
     if app is None:
+        return False
+    if not new_document and app.activeDocument is not None:
         return False
     try:
         app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
