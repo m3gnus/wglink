@@ -455,12 +455,14 @@ def _build_mesh_dialog(inputs, state):
         _mesh_button(advanced, "mesh_reset", "Reset to defaults")
         estimate = inputs.itemById("mesh_estimate_section").children
         estimate.addTextBoxCommandInput("mesh_estimate", "", "", 4, True)
-        # One fixed row per role, in DRIVER_LABELS order; a saved source fills
-        # its role's row. Linked sources keep their own read-only rows.
+        # One fixed row per role, in DRIVER_LABELS order. A user-picked source
+        # keeps its row; otherwise show the linked throat there, rather than
+        # saying HF is "not used" above a second HF row holding the throat.
         for source in sources:
             record = {**source, "size_mm": mesh["source_size_mm"][source["id"]]}
             state.original_sources.append(
                 {**record, "original_faces": list(state.context["members"].get(source["id"], []))})
+        promoted = {}
         for role, label in wglink_protocol.DRIVER_LABELS:
             saved_rows = [source for source in state.original_sources if not source.get("instance_id")
                           and wglink_protocol.canonical_source_role(source["role"]) == role]
@@ -472,10 +474,20 @@ def _build_mesh_dialog(inputs, state):
                 state.notice = (f"{label}: {len(saved_rows)} saved drivers were combined into this row; "
                                 "Save keeps them as one.")
             faces = [face for source in saved_rows for face in source["original_faces"]]
+            if not saved_rows:
+                linked = next((source for source in state.original_sources if source.get("instance_id")
+                               and wglink_protocol.canonical_source_role(source["role"]) == role), None)
+                if linked is not None:
+                    record, faces = linked, linked["original_faces"]
+                    promoted[role] = linked["id"]
             _add_mesh_row(inputs, state, "source", record, faces)
         for source in state.original_sources:
-            if source.get("instance_id"):
+            if source.get("instance_id") and source["id"] not in promoted.values():
                 _add_mesh_row(inputs, state, "source", source, source["original_faces"])
+        # Keep an editable row for an additional driver of a linked role.
+        # Linked rows remain read-only and never take ownership of user picks.
+        for role in promoted:
+            _add_mesh_row(inputs, state, "source", {"role": role})
         all_faces = _mesh_faces(state.context.get("bodies", []))
         definitions = list(saved["surface_groups"] if saved is not None else [])
         painted = {}

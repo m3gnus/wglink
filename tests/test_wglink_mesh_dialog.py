@@ -9,7 +9,8 @@ import pytest
 from test_wglink_activation_boundary import _boundary
 from test_wglink_fem_dialog import _building_inputs
 from test_wglink_mesh_settings import AppearanceFace, FailingMeshAttributes
-from test_wglink_send import Attributes, Collection, body, component
+from test_wglink_send import Attributes, Collection, ContractExportManager, body, component, transform
+from test_wglink_source_identity import _Found
 
 
 def advertise_limits(fixture, limits):
@@ -119,6 +120,94 @@ def add_zone(scene, inputs, items, state, preset="Fine"):
 
 def faces_of(state, kind, row):
     return (state.sources if kind == "source" else state.groups)[row]["faces"]
+
+
+def _inserted_horn(scene, wrapper, *, picked_role=None):
+    """Insert's real face/payload writers, then the dialog's real source readers."""
+    core = scene.module.wglink_core
+    root = scene.design.rootComponent
+    horn = body("WG horn", faces=[scene.faces[0]])
+    cabinet_faces = scene.faces[1:]
+    scene.cabinet.faces = Collection(cabinet_faces)
+    if wrapper == "root":
+        holder = root
+        root.bRepBodies.append(horn)
+        horn.parentComponent = root
+    else:
+        holder = component("WG wrapper", [horn])
+        occurrence = types.SimpleNamespace(component=holder, bRepBodies=Collection([horn]), isVisible=True,
+            entityToken="wg-occurrence", fullPathName="WG wrapper:1", transform2=transform())
+        root.occurrences.append(occurrence)
+        root.allOccurrences.append(occurrence)
+    scene.faces[0].body = horn
+    entities = [root, *([holder] if holder is not root else []), horn, scene.cabinet, *scene.faces]
+    # Fusion can enumerate every WGLink attribute, including Insert's payload.
+    scene.design.findAttributes = lambda group, name: Collection([
+        _Found(entity, key) for entity in entities
+        for key in entity.attributes.values if key[0] == group and (not name or key[1] == name)
+    ])
+    scene.faces[0].appearance.name = "unused fixture paint"
+    scene.faces[0].appearance = None
+    core._tag_report(scene.app, scene.design, horn, instance_id="wg-horn", role="HF",
+        throat_z_mm=0.0, expected_area_mm2=10000.0, repair=True)
+    payload = {"instance_id": "wg-horn", "topology": "wg", "source_role": "HF",
+               "design_id": "wg-design", "export_id": "wg-export", "export_sequence": "1",
+               "build_mode": "freestanding", "parameter_prefix": "wg_horn_",
+               "throat_z_mm": "0.0", "expected_throat_area_mm2": "10000.0", "wrapper": wrapper}
+    core._stamp_managed(horn, "wg-horn", "role", "waveguide")
+    core._stamp_payload(horn, payload)
+    core._stamp_wrapper(holder, payload)
+    if picked_role:
+        scene.module.wglink_send.apply_source_faces([scene.faces[1]], picked_role,
+            app=scene.app, design=scene.design)
+    scene.design.exportManager = ContractExportManager()
+    return horn, holder, payload
+
+
+@pytest.mark.parametrize("wrapper", ["root", "occurrence"])
+@pytest.mark.parametrize("identities", [False, True])
+def test_wg_inserted_throat_fills_the_hf_row_without_saved_settings(scene, tmp_path, wrapper, identities):
+    module = scene.module
+    path = scene.ipc / module.wglink_inbox.CAPABILITIES_FILENAME
+    path.write_text(json.dumps({**json.loads(path.read_text()), "sourceIdentity": int(identities)}))
+    horn, holder, payload = _inserted_horn(scene, wrapper)
+    assert module.wglink_send.read_mesh_settings(scene.design) is None
+    context = {}
+    options = {"source_identity": identities, "automatic_domain": True, "capture_document": False}
+    report = module.wglink_send.preflight_scope(scene.app, options, authoring_context=context)
+    assert report["source_error"] is None
+    before = context["sources"]
+    assert len(before) == 1 and before[0]["instance_id"] == "wg-horn"
+    assert context["members"][before[0]["id"]] == [scene.faces[0]]
+    sent = module.wglink_send.send(scene.app, {**options, "output_folder": str(tmp_path / "before")})
+    assert sent["sources"] == before
+    inputs, items, state = build(scene)
+    assert faces_of(state, "source", HF) == [scene.faces[0]]
+    assert state.sources[HF]["instance_id"] == "wg-horn"
+    assert items[f"mesh_source_count_{HF}"].formattedText == "1 face"
+    assert module.wglink_mesh_dialog._apply_mesh_dialog(inputs, state) == {"summary": ""}
+    # Reuse Insert/Update's payload writers: no dialog-owned source identity
+    # or membership replaces the linked throat. Full Update is a live check.
+    module.wglink_core._stamp_payload(horn, payload)
+    module.wglink_core._stamp_wrapper(holder, payload)
+    _, _, reopened = build(scene)
+    assert faces_of(reopened, "source", HF) == [scene.faces[0]]
+    sent = module.wglink_send.send(scene.app, {**options, "output_folder": str(tmp_path / "after")})
+    assert sent["sources"] == before
+
+
+@pytest.mark.parametrize("picked_role", ["HF", "LF"])
+def test_inserted_hf_never_replaces_a_user_picked_source(scene, picked_role):
+    module = scene.module
+    _inserted_horn(scene, "root", picked_role=picked_role)
+    inputs, _, state = build(scene)
+    picked_row = HF if picked_role == "HF" else LF
+    assert faces_of(state, "source", picked_row) == [scene.faces[1]]
+    linked_row = next(row for row, source in state.sources.items() if source.get("instance_id"))
+    assert faces_of(state, "source", linked_row) == [scene.faces[0]]
+    module.wglink_mesh_dialog._apply_mesh_dialog(inputs, state)
+    _, _, reopened = build(scene)
+    assert faces_of(reopened, "source", picked_row) == [scene.faces[1]]
 
 
 
@@ -548,7 +637,9 @@ def test_linked_sources_are_read_only_and_keep_their_faces(scene, monkeypatch):
     monkeypatch.setattr(module.wglink_send, "preflight_scope", linked)
     inputs, items, state = build(scene)
     row = next(row for row, record in state.sources.items() if record.get("instance_id"))
-    assert row == 5 and faces_of(state, "source", HF) == []
+    editable = next(row for row, record in state.sources.items()
+                    if record["role"] == "HF" and not record.get("instance_id"))
+    assert row == HF and faces_of(state, "source", editable) == []
     assert items[f"mesh_source_label_{row}"].formattedText == "HF – high-frequency driver (from the Waveguide Generator design)"
     assert not items[f"mesh_source_size_{row}"].isEnabled
     assert f"mesh_pick_source_{row}" not in items
@@ -556,9 +647,10 @@ def test_linked_sources_are_read_only_and_keep_their_faces(scene, monkeypatch):
     items[f"mesh_source_size_{row}"].value = 100
     sources, _, _ = module.wglink_mesh_dialog._mesh_dialog_values(inputs, state)
     assert [source["size_mm"] for source in sources] == [6]
-    pick(scene, inputs, items, state, scene.faces[0])  # the target is HF, an editable row
+    target(scene, inputs, items, state, "source", editable)
+    pick(scene, inputs, items, state, scene.faces[0])
     assert faces_of(state, "source", row) == [scene.faces[0]]
-    assert faces_of(state, "source", HF) == [] and items["mesh_faces"]._entities == []
+    assert faces_of(state, "source", editable) == [] and items["mesh_faces"]._entities == []
     assert state.notice == "HF – high-frequency driver (from the Waveguide Generator design) keeps its faces; change them in Waveguide Generator."
 
 
