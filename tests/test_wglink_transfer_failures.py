@@ -1056,6 +1056,15 @@ def _startup_checks(module) -> dict[str, int]:
     return module.wglink_activity.LOG.counts().get("pickup_check", {})
 
 
+def _timers_without_wg_request_poll(fixture):
+    """Ignore only the independent, repeating WG handoff poll."""
+    timers = list(fixture.timers)
+    poll = (2.0, fixture.module._poll_wg_requests_due)
+    if poll in timers:
+        timers.remove(poll)
+    return timers
+
+
 @pytest.mark.parametrize("coordination", [False, None], ids=["off", "on"])
 def test_a_request_left_waiting_across_a_restart_is_reported_once_at_start_up(
     monkeypatch, tmp_path: Path, coordination: bool | None
@@ -1080,7 +1089,7 @@ def test_a_request_left_waiting_across_a_restart_is_reported_once_at_start_up(
         _deliver_followups(fixture.module, fixture.app)
         assert [text for title, text in fixture.ui.messages if title == _WAITING] == waiting
         assert _startup_checks(fixture.module) == {"startup": 1}
-        assert fixture.timers == []
+        assert _timers_without_wg_request_poll(fixture) == []
         # Nothing was moved or dropped.
         assert len(_inbox(fixture.ipc)) == 2
     finally:
@@ -1160,7 +1169,7 @@ def test_a_request_younger_than_the_window_gets_the_rest_of_its_minute(
         assert _WAITING not in [title for title, _text in fixture.ui.messages]
         # Recovery's immediate history look is independent of the one pickup
         # check, which must still give the youngest request its full minute.
-        [delay] = [delay for delay, _function in fixture.timers if delay > 0]
+        [delay] = [delay for delay, _function in _timers_without_wg_request_poll(fixture) if delay > 0]
         window = module.wglink_inbox.SOLVE_PICKUP_NOTICE_SECONDS
         assert window - 25.0 < delay <= window - 20.0 + 1.0
         _fire_timers(fixture)
@@ -1219,7 +1228,7 @@ def test_nothing_waiting_means_no_pickup_check_or_notice(monkeypatch, tmp_path: 
         _fire_timers(fixture)
         _deliver_followups(fixture.module, fixture.app)
         assert _WAITING not in [title for title, _text in fixture.ui.messages]
-        assert fixture.timers == []
+        assert _timers_without_wg_request_poll(fixture) == []
         assert _startup_checks(fixture.module) == {}
     finally:
         fixture.module.stop(None)
