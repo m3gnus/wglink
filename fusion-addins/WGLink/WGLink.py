@@ -1567,16 +1567,20 @@ _requests_hint: str | None = None
 _requests_palette_unavailable = False
 # The last outcome reported in Text Commands where palettes are unavailable.
 _requests_fallback_said: str | None = None
-# The solve settings changed in the panel and not yet sent, by document id.
-# WG owns the settings: this holds only edits, until the next Solve carries
-# them (``wglink_protocol.SOLVE_SETTINGS_FIELD``) and WG records them.
+# The solve settings changed in the panel and not yet confirmed, by document id.
+# WG owns the settings: this holds only edits, until WG reports applying them
+# in the request status (``settings``). Publication alone confirms nothing.
 _pending_settings: dict[str, dict[str, object]] = {}
 _SETTINGS_HZ = ("frequencyStartHz", "frequencyEndHz")
 
 
 def _settings_used(document_id: str | None = None) -> dict[str, object]:
     document_id = document_id if document_id is not None else _active_document_id()
-    return wglink_requests.settings_used(_requests.entries(), document_id)
+    entries = _requests.entries()
+    used = wglink_requests.settings_used(entries, document_id)
+    unconfirmed = wglink_requests.settings_unconfirmed(entries, document_id)
+    _settings_confirmed(document_id, {key: value for key, value in used.items() if key not in unconfirmed})
+    return used
 
 
 def _read_setting(key: str, text: object) -> object | None:
@@ -1603,10 +1607,11 @@ def _set_pending_settings(document_id: str, values: object) -> None:
     if not document_id or not isinstance(values, dict):
         return
     used = _settings_used(document_id)
+    unconfirmed = wglink_requests.settings_unconfirmed(_requests.entries(), document_id)
     pending: dict[str, object] = {}
     for key in wglink_protocol.SOLVE_SETTINGS_LABELS:
         value = _read_setting(key, values.get(key))
-        if value is not None and value != used.get(key):
+        if value is not None and (value != used.get(key) or key in unconfirmed):
             pending[key] = value
     if pending:
         _pending_settings[document_id] = pending
@@ -1616,8 +1621,9 @@ def _set_pending_settings(document_id: str, values: object) -> None:
 
 
 def _settings_problems(document_id: str) -> list[str]:
+    used = _settings_used(document_id)
     pending = _pending_settings.get(document_id) or {}
-    return wglink_protocol.solve_settings_problems({**_settings_used(document_id), **pending})
+    return wglink_protocol.solve_settings_problems({**used, **pending})
 
 
 def _settings_to_send() -> dict[str, object]:
@@ -1631,30 +1637,24 @@ def _settings_to_send() -> dict[str, object]:
     ipc = wglink_workspace.ipc_folder()
     if ipc is None or not wglink_requests.can_change_settings(ipc):
         return {}
-    # An inbox request that this press replaces may never reach WG. Carry
-    # its edits forward from the existing request history before withdrawing it.
-    previous = _requests.current()
-    inherited = {}
-    if (wglink_requests.replaces(previous, {"kind": wglink_requests.SOLVE, "documentId": document_id})
-            and wglink_requests.request_path(ipc, previous).is_file()):
-        inherited = previous.get("sentSettings") or {}
-    pending = {**inherited, **(_pending_settings.get(document_id) or {})}
+    used = _settings_used(document_id)
+    pending = _pending_settings.get(document_id) or {}
     if not pending:
         return {}
-    problems = wglink_protocol.solve_settings_problems({**_settings_used(document_id), **pending})
+    problems = wglink_protocol.solve_settings_problems({**used, **pending})
     if problems:
         raise wglink_text.problem("solve_settings", ", ".join(problems))
     return wglink_protocol.request_solve_settings(pending)
 
 
-def _settings_sent(document_id: object, sent: dict[str, object]) -> None:
-    """WG has them now: forget the edits unless they changed while sending."""
+def _settings_confirmed(document_id: object, used: dict[str, object]) -> None:
+    """Forget only edits WG reports applying; keep any newer panel changes."""
 
     key = str(document_id or "")
     pending = _pending_settings.get(key)
     if pending is None:
         return
-    for field, value in sent.items():
+    for field, value in used.items():
         if field in pending and pending[field] == value:
             pending.pop(field)
     if not pending:
@@ -1966,8 +1966,8 @@ def _request_action(action_id: str, request_id: str = "", document_id: str | Non
             _execute_command(operation)
         return
     if action_id == "resetSettings":
-        _pending_settings.pop(document_id if document_id is not None else _active_document_id() or "", None)
-        _show_request_palette()
+        target = document_id if document_id is not None else _active_document_id() or ""
+        _set_pending_settings(target, _settings_used(target))
         return
     if action_id == "clearFinished":
         _requests.clear_finished(_save_followed)
@@ -2162,6 +2162,14 @@ def _recover_request() -> None:
                 )
                 entries[index] = updated
         _requests.restore(entries)
+        # Published edits survive a restart in the existing request history.
+        # Restore only what WG has not confirmed, without replacing newer edits.
+        for document_id in {entry.get("documentId") for entry in entries if entry.get("documentId")}:
+            unconfirmed = wglink_requests.settings_unconfirmed(entries, document_id)
+            if unconfirmed:
+                pending = _pending_settings.setdefault(document_id, {})
+                for key, value in unconfirmed.items():
+                    pending.setdefault(key, value)
         _requests.document_id = _active_document_id()
         _requests.all_documents = False
         if entries:
@@ -2351,8 +2359,6 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                     superseded=superseded,
                     solve_settings=solve_settings,
                 )
-                if solve_settings:
-                    _settings_sent(followed.get("documentId"), solve_settings)
                 report["solve_requested"] = solve
                 _update_export_progress(progress, 3, f"Sent to {PANEL_NAME}.")
             elif self.operation == "source":

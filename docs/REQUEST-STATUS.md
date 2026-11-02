@@ -94,10 +94,14 @@ frequency list with the requested grid, retaining its endpoints and count
 where those fields were not changed.
 
 The panel shows, per field, what the document's newest solve used (the status
-record's `settings`, else what the add-in sent with it) and holds only the edits
-not yet sent, in memory, per document. A Solve carries them and the panel then
-forgets them; a Send never carries them. The panel's settings appear only for a
-WG that advertises the capability.
+record's `settings`) and holds only the edits WG has not yet confirmed, in
+memory, per document. Each Solve carries those edits until WG reports their
+values in `settings`; publishing or consuming a request alone confirms nothing.
+A refusal or failure before setup application, or replacement by another request,
+therefore leaves the edits for the next Solve. A Send never carries them.
+Published edits awaiting confirmation are recovered from the existing request
+history after a restart. The panel's settings appear only for a WG that advertises
+the capability.
 
 ## WG's rhythm, and WG stopping
 

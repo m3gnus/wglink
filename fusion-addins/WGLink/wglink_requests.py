@@ -650,10 +650,9 @@ def can_change_settings(ipc: Path) -> bool:
 def settings_used(entries: Sequence[Mapping[str, Any]], document_id: object) -> dict[str, Any]:
     """The solve settings this document's latest solves used, newest first, field by field.
 
-    What WG reported for a solve wins over what this add-in sent with it (WG
-    may have refused or adjusted nothing, but it is the owner); a request that
-    was never written says nothing. Fields no solve reports stay absent: the
-    panel then shows WG's own value as unknown. ``entries`` are newest first.
+    Only WG's reported setup confirms application: publishing or consuming a
+    request does not mean WG applied its edits. Fields no solve reports stay
+    absent: the panel shows WG's own value as unknown. ``entries`` are newest first.
     """
     found: dict[str, Any] = {}
     for entry in entries:
@@ -661,13 +660,33 @@ def settings_used(entries: Sequence[Mapping[str, Any]], document_id: object) -> 
             continue
         status = entry.get("status") if isinstance(entry.get("status"), Mapping) else {}
         reported = status.get("settings") if isinstance(status.get("settings"), Mapping) else {}
-        sent = (entry.get("sentSettings") if entry.get("submittedAt") is not None
-                and isinstance(entry.get("sentSettings"), Mapping) else {})
-        for source in (reported, sent):
-            for key, value in source.items():
-                found.setdefault(key, value)
+        for key, value in reported.items():
+            found.setdefault(key, value)
         if len(found) == len(wglink_protocol.SOLVE_SETTINGS_LABELS):
             break
+    return found
+
+
+def settings_unconfirmed(entries: Sequence[Mapping[str, Any]], document_id: object) -> dict[str, Any]:
+    """Latest published edits not yet covered by a newer WG setup report.
+
+    An older matching report cannot confirm a revert while a conflicting edit
+    is still in flight. Request history already records publication and replies.
+    """
+    found: dict[str, Any] = {}
+    seen: set[str] = set()
+    for entry in entries:
+        if entry.get("kind") != SOLVE or not document_id or entry.get("documentId") != document_id:
+            continue
+        status = entry.get("status") if isinstance(entry.get("status"), Mapping) else {}
+        reported = status.get("settings") if isinstance(status.get("settings"), Mapping) else {}
+        seen.update(reported)
+        sent = entry.get("sentSettings")
+        if entry.get("submittedAt") is not None and isinstance(sent, Mapping):
+            for key, value in sent.items():
+                if key not in seen:
+                    found[key] = value
+                    seen.add(key)
     return found
 
 

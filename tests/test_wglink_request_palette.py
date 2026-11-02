@@ -1008,7 +1008,8 @@ def test_a_deferred_settings_edit_stays_with_its_rendered_document(monkeypatch, 
 
 
 @pytest.mark.parametrize("fresh_spacing", [False, True])
-def test_replacing_an_unclaimed_solve_carries_the_settings_it_would_withdraw(monkeypatch, tmp_path: Path, fresh_spacing) -> None:
+@pytest.mark.parametrize("recover", [False, True])
+def test_replacing_an_unclaimed_solve_carries_the_settings_it_would_withdraw(monkeypatch, tmp_path: Path, fresh_spacing, recover) -> None:
     fixture = _following_document(monkeypatch, tmp_path, "WGLink_settings_replaced")
     module = fixture.module
     _advertise_settings(fixture.ipc)
@@ -1018,9 +1019,13 @@ def test_replacing_an_unclaimed_solve_carries_the_settings_it_would_withdraw(mon
     _run(module, "solve")
     [first] = _inbox(fixture.ipc)
     assert first["solveSettings"] == {"frequencyCount": 60}
-    assert not module._pending_settings
+    if recover:
+        module._pending_settings.clear()
+        module._recover_request()
+        assert _inbox(fixture.ipc) == [first]  # recovery never resubmits
+    assert module._pending_settings == {"doc-1": {"frequencyCount": 60}}
     if fresh_spacing:
-        _change_settings(fixture, palette, frequencySpacing="linear")
+        _change_settings(fixture, palette, frequencyCount="60", frequencySpacing="linear")
 
     _run(module, "solve")
 
@@ -1028,9 +1033,129 @@ def test_replacing_an_unclaimed_solve_carries_the_settings_it_would_withdraw(mon
     assert replacement["operationId"] != first["operationId"]
     assert replacement["solveSettings"] == {**first["solveSettings"],
                                            **({"frequencySpacing": "linear"} if fresh_spacing else {})}
-    assert not module._pending_settings
+    assert module._pending_settings == {"doc-1": replacement["solveSettings"]}
     _claim(fixture, replacement["operationId"])
+    # Pickup alone says nothing about setup application.
+    assert module._settings_to_send() == replacement["solveSettings"]
+    _status(fixture, "preparing", 1, request_id=replacement["operationId"],
+            settings=replacement["solveSettings"])
+    _tick(fixture)
+    assert module._pending_settings == {}
     assert module._settings_to_send() == {}
+
+
+@pytest.mark.parametrize("early_state", ["refused", "failed"])
+@pytest.mark.parametrize("applied_state", ["preparing", "solved", "failed"])
+def test_unapplied_settings_survive_early_failure_and_retry(
+    monkeypatch, tmp_path: Path, early_state: str, applied_state: str,
+) -> None:
+    """The pin-settings probe: WG stays at 21 when retaining the return fails."""
+    fixture = _following_document(monkeypatch, tmp_path, "WGLink_settings_retry")
+    module = fixture.module
+    _advertise_settings(fixture.ipc)
+    _claim(fixture, fixture.request_id)
+    _status(fixture, "solved", 1, settings={"frequencyCount": 21})
+    _tick(fixture)
+    palette = _palette(fixture)
+    _change_settings(fixture, palette, frequencyCount="41")
+
+    _run(module, "solve")
+    [first] = _inbox(fixture.ipc)
+    assert first["solveSettings"] == {"frequencyCount": 41}
+    _claim(fixture, first["operationId"])
+    # cad_preparation refuses before settings_revision: no settings in its reply.
+    _status(fixture, early_state, 1, request_id=first["operationId"],
+            failure={"code": "disk_full"})
+    shown = _tick(fixture)["settings"]
+    [count] = [field for field in shown["fields"] if field["id"] == "frequencyCount"]
+    assert (count["value"], count["used"], count["changed"]) == (41, 21, True)
+    assert module._pending_settings == {"doc-1": {"frequencyCount": 41}}
+    # A consumed, refused request also recovers from durable history.
+    module._pending_settings.clear()
+    module._recover_request()
+    assert module._pending_settings == {"doc-1": {"frequencyCount": 41}}
+
+    _run(module, "solve")
+    [retry] = _inbox(fixture.ipc)
+    assert retry["operationId"] != first["operationId"]
+    assert retry["solveSettings"] == {"frequencyCount": 41}
+    _claim(fixture, retry["operationId"])
+    # Setup application, even if the solver later fails, is the confirmation.
+    _status(fixture, applied_state, 1, request_id=retry["operationId"],
+            settings={"frequencyCount": 41})
+    shown = _tick(fixture)["settings"]
+    [count] = [field for field in shown["fields"] if field["id"] == "frequencyCount"]
+    assert (count["value"], count["used"], count["changed"]) == (41, 41, False)
+    assert module._pending_settings == {}
+    module._recover_request()
+    assert module._pending_settings == {}
+    assert module._settings_to_send() == {}
+    _run(module, "solve")
+    [next_solve] = _inbox(fixture.ipc)
+    assert "solveSettings" not in next_solve
+
+
+def test_settings_confirmation_keeps_a_newer_edit_and_other_documents(monkeypatch, tmp_path: Path) -> None:
+    fixture = _following_document(monkeypatch, tmp_path, "WGLink_settings_newer_edit")
+    module = fixture.module
+    _advertise_settings(fixture.ipc)
+    palette = _palette(fixture)
+    palette.load()
+    _change_settings(fixture, palette, frequencyCount="41")
+    _run(module, "solve")
+    [first] = _inbox(fixture.ipc)
+    _change_settings(fixture, palette, frequencyCount="61")
+    module._pending_settings["doc-2"] = {"frequencyCount": 41}
+    _claim(fixture, first["operationId"])
+    _status(fixture, "solved", 1, request_id=first["operationId"],
+            settings={"frequencyCount": 41})
+    _tick(fixture)
+    assert module._pending_settings == {"doc-1": {"frequencyCount": 61},
+                                        "doc-2": {"frequencyCount": 41}}
+    assert module._settings_to_send() == {"frequencyCount": 61}
+
+
+@pytest.mark.parametrize("reply_before_retry", [False, True])
+@pytest.mark.parametrize("reset", [False, True])
+def test_reverting_to_the_old_used_value_survives_an_inflight_edit(
+    monkeypatch, tmp_path: Path, reply_before_retry: bool, reset: bool,
+) -> None:
+    fixture = _following_document(monkeypatch, tmp_path, "WGLink_settings_revert")
+    module = fixture.module
+    _advertise_settings(fixture.ipc)
+    _claim(fixture, fixture.request_id)
+    _status(fixture, "solved", 1, settings={"frequencyCount": 21})
+    _tick(fixture)
+    palette = _palette(fixture)
+    _change_settings(fixture, palette, frequencyCount="41")
+    _run(module, "solve")
+    [first] = _inbox(fixture.ipc)
+    if reply_before_retry:
+        _claim(fixture, first["operationId"])
+
+    if reset:
+        palette.click("resetSettings")
+        _deliver_followups(module, fixture.app)
+    else:
+        _change_settings(fixture, palette, frequencyCount="21")
+    # The old report of 21 cannot confirm this revert while 41 is in flight.
+    assert module._settings_to_send() == {"frequencyCount": 21}
+    if reply_before_retry:
+        _status(fixture, "solved", 1, request_id=first["operationId"],
+                settings={"frequencyCount": 41})
+        _tick(fixture)
+        assert module._settings_to_send() == {"frequencyCount": 21}
+
+    _run(module, "solve")
+    [retry] = _inbox(fixture.ipc)
+    assert retry["operationId"] != first["operationId"]
+    assert retry["solveSettings"] == {"frequencyCount": 21}
+    _claim(fixture, retry["operationId"])
+    _status(fixture, "solved", 1, request_id=retry["operationId"],
+            settings={"frequencyCount": 21})
+    _tick(fixture)
+    assert module._settings_to_send() == {}
+    assert module._pending_settings == {}
 
 
 def test_solve_settings_shown_are_the_last_solves_and_edits_go_with_the_next_solve(
@@ -1060,10 +1185,12 @@ def test_solve_settings_shown_are_the_last_solves_and_edits_go_with_the_next_sol
     _run(module, "solve")
     [request] = _new_requests(fixture)
     assert request[wglink_protocol.SOLVE_SETTINGS_FIELD] == {"frequencyCount": 60}
-    # WG has them now: the panel holds no copy, and shows them as last sent.
-    assert module._pending_settings == {}
-    values = {field["id"]: field["value"] for field in module._request_view()["settings"]["fields"]}
-    assert values["frequencyCount"] == 60
+    # Publication is not application: keep the edit, and the last confirmed value.
+    assert module._pending_settings == {"doc-1": {"frequencyCount": 60}}
+    fields = {field["id"]: field for field in module._request_view()["settings"]["fields"]}
+    assert fields["frequencyCount"]["value"] == 60
+    assert fields["frequencyCount"]["used"] == 33
+    assert fields["frequencyCount"]["changed"]
 
 
 def test_unusable_solve_settings_stop_the_solve_before_anything_is_sent(
@@ -1124,7 +1251,7 @@ def test_solve_settings_wire_format_is_checked_on_both_sides() -> None:
     assert status["settings"] == {"frequencyCount": 60}
 
 
-def test_settings_used_prefers_what_wg_reported_and_ignores_requests_never_written() -> None:
+def test_settings_used_only_includes_what_wg_reported() -> None:
     newest = wglink_requests.new_request("r2", SOLVE, "Horn A", document_id="doc")
     newest["sentSettings"] = {"frequencyCount": 99}  # never written
     middle = wglink_requests.new_request("r1", SOLVE, "Horn A", document_id="doc")
@@ -1135,4 +1262,4 @@ def test_settings_used_prefers_what_wg_reported_and_ignores_requests_never_writt
     other = wglink_requests.new_request("x", SOLVE, "Horn B", document_id="other")
     other.update(submittedAt=2.0, status={"settings": {"frequencySpacing": "linear"}})
     assert wglink_requests.settings_used([other, newest, middle, oldest], "doc") == {
-        "frequencyCount": 61, "frequencyStartHz": 20.0, "frequencyEndHz": 20000.0}
+        "frequencyCount": 61, "frequencyStartHz": 50.0, "frequencyEndHz": 20000.0}
