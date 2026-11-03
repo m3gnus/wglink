@@ -1,7 +1,14 @@
 # Changes
 
-## Unreleased
+## 0.3.4 — 2026-11-03
 
+- Refusals identify the affected body, explain the problem and give the next
+  action. Unsupported bodies remain refused before export.
+- Solve settings and actions stay available in the Fusion panel. Pending edits
+  remain until WG confirms applying them, and transient CAD handoffs retry
+  without opening an unrelated document or running in an unsuitable edit state.
+- Sources & Mesh shows the linked throat in the default HF driver row while
+  preserving user-picked sources.
 - WGLink no longer carries its own triangle limits. It shows and applies only the limits Waveguide Generator
   advertises; when WG advertises none (an older version), the estimate states no limit, has no limit colour
   and Solve asks no mesh-ceiling question.
