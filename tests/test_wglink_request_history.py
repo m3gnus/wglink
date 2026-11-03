@@ -454,6 +454,94 @@ def test_clear_finished_tombstones_survive_stale_session_saves(tmp_path):
     assert {e["requestId"] for e in requests.load_history(tmp_path)} == {"live", "other"}
 
 
+@pytest.mark.parametrize("resume_saved_first", [False, True])
+def test_clear_stale_failure_keeps_another_sessions_resumed_request(tmp_path, resume_saved_first):
+    save = lambda payload: requests.save(tmp_path, payload)
+    requests.save(tmp_path, entry("shared", state="couldNotFinish"))
+    a, b = requests.RequestTracker(), requests.RequestTracker()
+    a.restore(requests.load_history(tmp_path))
+    b.restore(requests.load_history(tmp_path))
+    previous = b.get("shared")
+    resumed = {**previous, "status": {**previous["status"], "seq": 2, "state": "preparing"}}
+    assert b.update_entry(previous, resumed)  # B has heard from WG but has not saved yet.
+    if resume_saved_first:
+        b.save(save)
+    a.clear_finished(save)
+    b.save(save)
+    [recovered] = requests.load_history(tmp_path)
+    assert recovered["requestId"] == "shared"
+    assert recovered["status"] == resumed["status"]
+    # A's later stale clear must also leave the resumed request visible.
+    a.restore([previous])
+    a.clear_finished(save)
+    assert requests.load_history(tmp_path) == [recovered]
+
+
+@pytest.mark.parametrize(("state", "seq", "visible"), [
+    ("preparing", 2, False), ("preparing", 3, False), ("preparing", 4, True),
+    ("couldNotFinish", 4, False), ("solved", 4, False),
+])
+def test_cleared_history_only_accepts_a_newer_active_sequence(tmp_path, state, seq, visible):
+    save = lambda payload: requests.save(tmp_path, payload)
+    failed = entry("shared", state="couldNotFinish")
+    failed["status"]["seq"] = 3
+    requests.save(tmp_path, failed)
+    tracker = requests.RequestTracker()
+    tracker.restore(requests.load_history(tmp_path))
+    tracker.clear_finished(save)
+    snapshot = {**failed, "status": {**failed["status"], "seq": seq, "state": state}}
+    requests.save(tmp_path, snapshot)
+    recovered = requests.load_history(tmp_path)
+    assert bool(recovered) is visible
+    if visible:
+        assert recovered[0]["status"] == snapshot["status"]
+        requests.save(tmp_path, failed)  # A later local edit to an older status is still stale.
+        assert requests.load_history(tmp_path) == recovered
+
+
+@pytest.mark.parametrize("saved_before", [False, True])
+def test_clear_finished_keeps_the_latest_unsaved_failure_sequence(tmp_path, saved_before):
+    failed = entry("shared", state="couldNotFinish")
+    if saved_before:
+        requests.save(tmp_path, failed)
+    failed["status"]["seq"] = 3
+    tracker = requests.RequestTracker()
+    tracker.restore([failed])  # A has heard a later failure but has not saved it.
+    tracker.clear_finished(lambda payload: requests.save(tmp_path, payload))
+    requests.save(tmp_path, {**failed, "status": {**failed["status"], "seq": 2, "state": "preparing"}})
+    assert requests.load_history(tmp_path) == []
+    requests.save(tmp_path, {**failed, "status": {**failed["status"], "seq": 4, "state": "preparing"}})
+    [recovered] = requests.load_history(tmp_path)
+    assert recovered["status"]["seq"] == 4
+    assert recovered["status"]["state"] == "preparing"
+
+
+def test_a_later_failure_advances_the_cleared_sequence_before_another_retry(tmp_path):
+    failed = entry("shared", state="couldNotFinish")
+    requests.save(tmp_path, failed)
+    tracker = requests.RequestTracker()
+    tracker.restore(requests.load_history(tmp_path))
+    tracker.clear_finished(lambda payload: requests.save(tmp_path, payload))
+    requests.save(tmp_path, {**failed, "status": {**failed["status"], "seq": 3}})
+    requests.save(tmp_path, {**failed, "status": {**failed["status"], "seq": 2, "state": "preparing"}})
+    assert requests.load_history(tmp_path) == []
+    tracker.restore([{**failed, "status": {**failed["status"], "seq": 5}}])
+    tracker.clear_finished(lambda payload: requests.save(tmp_path, payload))
+    requests.save(tmp_path, {**failed, "status": {**failed["status"], "seq": 4, "state": "preparing"}})
+    assert requests.load_history(tmp_path) == []
+    requests.save(tmp_path, {**failed, "status": {**failed["status"], "seq": 6, "state": "preparing"}})
+    [recovered] = requests.load_history(tmp_path)
+    assert recovered["status"]["seq"] == 6
+
+
+@pytest.mark.parametrize(("removed", "visible"), [({"shared": False}, False), (["shared"], False), ({"shared": True}, True)])
+def test_legacy_history_tombstones_keep_their_meaning(tmp_path, removed, visible):
+    path = tmp_path / requests.RECORD_FILENAME
+    path.write_text(json.dumps({"schema": 1, "entries": [], "removedIds": removed}))
+    requests.save(tmp_path, entry("shared", state="preparing"))
+    assert bool(requests.load_history(tmp_path)) is visible
+
+
 def test_clear_finished_does_not_remove_another_sessions_active_export(tmp_path):
     save = lambda payload: requests.save(tmp_path, payload)
     a = requests.RequestTracker()

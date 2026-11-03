@@ -664,9 +664,10 @@ def load_history(ipc: Path, *, now: float | None = None, on_corrupt: Callable[[]
 def save(ipc: Path, request: Mapping[str, Any]) -> Path:
     """Merge mutations by request ID under an OS lock, then atomically publish.
 
-    Removed IDs are durable tombstones: a pre-clear snapshot cannot resurrect
-    finished rows. An export cleared before submission may still be submitted
-    by its live command. IDs are unique per press and are never reused.
+    Removed IDs retain their last WG sequence: only a newer active status can
+    restore a cleared row. An export cleared before submission may still be
+    submitted by its live command. Legacy boolean tombstones keep their meaning
+    (True allows submission; False has no known sequence and stays removed).
     WG sequence orders status updates; mutation time orders other row changes.
     """
     with _history_lock(ipc):
@@ -675,23 +676,38 @@ def save(ipc: Path, request: Mapping[str, Any]) -> Path:
         disk_by_id = {e["requestId"]: e for e in disk}
         tombstones = record.get("removedIds", {})
         removed = dict(tombstones) if isinstance(tombstones, dict) else dict.fromkeys(tombstones, False)
-        proposed = set(request.get("removedIds", []))
+        requested = request.get("removedIds", {})
+        proposed = dict(requested) if isinstance(requested, dict) else dict.fromkeys(requested, False)
         incoming = list(request["entries"]) if "entries" in request else [_updated(request)]
         if request.get("clearFinished", False):
-            proposed.update(e["requestId"] for e in [*disk, *incoming] if terminal(e))
+            for entry in [*disk, *incoming]:
+                if terminal(entry):
+                    proposed.setdefault(entry["requestId"], _update_order(entry)[0])
         # A stale finished snapshot cannot remove a request WG has resumed.
         # Recovery calls an export without a submission abandoned. Remember
         # that distinction so Clear works after a crash, while a still-live
         # export can later publish its submission using the same request ID.
-        for rid in proposed:
+        for rid, seq in proposed.items():
             previous = disk_by_id.get(rid)
             exporting = previous is not None and previous.get("local") == EXPORTING
             if previous is None or terminal(previous) or exporting:
-                removed.setdefault(rid, exporting)
+                marker = _update_order(previous)[0] if previous is not None else seq
+                if type(marker) is int and type(seq) is int:
+                    marker = max(marker, seq)
+                if exporting:
+                    marker = True
+                held = removed.get(rid)
+                if rid not in removed or (type(held) is int and type(marker) is int and marker > held):
+                    removed[rid] = marker
         for entry in incoming:
             rid = entry["requestId"]
-            if removed.get(rid) is True and entry.get("submittedAt") is not None:
+            marker = removed.get(rid)
+            seq = _update_order(entry)[0]
+            resumed = type(marker) is int and seq > marker and not terminal(entry)
+            if (marker is True and entry.get("submittedAt") is not None) or resumed:
                 removed.pop(rid)
+            elif type(marker) is int:
+                removed[rid] = max(marker, seq)
         by_id = {e["requestId"]: e for e in disk if e["requestId"] not in removed}
         for entry in incoming:
             rid = entry["requestId"]
@@ -874,7 +890,7 @@ class RequestTracker:
 
     def clear_finished(self, save: Callable) -> None:
         with self._lock:
-            removed = [e["requestId"] for e in self._entries if terminal(e)]
+            removed = {e["requestId"]: _update_order(e)[0] for e in self._entries if terminal(e)}
             self._entries = [e for e in self._entries if not terminal(e)]
             if self._request and terminal(self._request):
                 self._request = copy.deepcopy(self._entries[0]) if self._entries else None
