@@ -20,8 +20,11 @@ else:
 class UserFacing(WgLinkError):
     """An intentional model message, with its stable diagnostic code."""
 
-    def __init__(self, code: str, text: str, next_step: str = "", *, detail: str | None = None):
+    def __init__(self, code: str, text: str, next_step: str = "", *, detail: str | None = None,
+                 names: Sequence[str] = ()):
         self.code, self.text, self.next_step = code, text, next_step
+        # The user's own names the text quotes (body names), exempt from the wording guard.
+        self.names = tuple(names)
         # Preserve the original evidence for logs and headless callers.
         super().__init__(detail if detail is not None else " ".join(filter(None, (text, next_step))))
 
@@ -161,7 +164,7 @@ def user_message(value: BaseException | str | None, *, action: str = "use", docu
              + "".join(traceback.format_exception(type(value), value, value.__traceback__)))
         if known is not None:
             text = " ".join(filter(None, (known.text, known.next_step)))
-            if not wglink_protocol.user_text_violations(text, names=(document, *names)):
+            if not wglink_protocol.user_text_violations(text, names=(document, *names, *known.names)):
                 return text
         elif isinstance(value, WgLinkError):
             return (f"Waveguide Generator could not {action} {document}. "
@@ -173,12 +176,59 @@ def user_message(value: BaseException | str | None, *, action: str = "use", docu
     return f"Waveguide Generator could not {action} {document}. This has been recorded."
 
 
+# How a required body was left out, and how to bring it back.
+_LEFT_OUT = {
+    "hidden_body": ("hidden", "show it in the browser"),
+    "excluded_body": ("left out with Declare Body…", "clear its Declare Body… setting"),
+    "suppressed": ("suppressed", "unsuppress it"),
+}
+# What a required body holds that the solve cannot do without.
+_HOLDS = {
+    "contains_solver_anchor": "carries the WG link",
+    "contains_required_source": "holds driver faces",
+    "only_enclosing_exterior": "is the only exterior body",
+    "requested_fem_air_volume": "is a FEM air volume this solve uses",
+}
+
+
+def _scope_sentence(reason: dict) -> str | None:
+    """One body's problem and its fix in the user's words, or None without wording."""
+    name = str(reason.get("name") or "").strip()
+    if not name:
+        return None
+    body = f"“{name}”"
+    code = reason.get("reason_code")
+    roles = ", ".join(role_label(role) for role in reason.get("source_roles") or ())
+    if code == "hidden_painted":
+        return f"{body} is hidden but has {roles} driver faces: show it, or clear those faces with Sources & Mesh…"
+    if code == "excluded_painted":
+        return (f"{body} is left out with Declare Body… but has {roles} driver faces: clear that setting, "
+                "or clear those faces with Sources & Mesh…")
+    if code == "excluded_visible":
+        return f"{body} is left out with Declare Body… but still visible: hide it, or clear that setting."
+    if code == "unresolved_link":
+        return f"{body} is an external link Fusion cannot resolve: resolve or remove the link."
+    if code == "required_body" and reason.get("left_out") in _LEFT_OUT:
+        state, fix = _LEFT_OUT[str(reason["left_out"])]
+        holds = [_HOLDS[key] for key in reason.get("dependencies") or () if key in _HOLDS]
+        if holds:
+            return f"{body} is {state}, but it {' and '.join(holds)}: {fix}."
+    return None
+
+
 def scope_problem(exc: BaseException) -> UserFacing:
-    reasons = getattr(exc, "reasons", ())
-    code = ("unclassified_visible_surface" if any(
-        reason.get("reason_code") == "unclassified_visible_surface" for reason in reasons
-    ) else "scope_invalid")
-    return problem(code, exc)
+    reasons = [reason for reason in getattr(exc, "reasons", ()) if isinstance(reason, dict)]
+    if any(reason.get("reason_code") == "unclassified_visible_surface" for reason in reasons):
+        return problem("unclassified_visible_surface", exc)
+    sentences = [_scope_sentence(reason) for reason in reasons]
+    worded = [text for text in sentences if text is not None]
+    if not worded:
+        return problem("scope_invalid", exc)
+    if len(worded) < len(sentences):
+        worded.append(PROBLEMS["scope_invalid"][1])
+    names = [str(reason["name"]).strip() for reason, text in zip(reasons, sentences) if text is not None]
+    return UserFacing("scope_invalid", "WG cannot use this model as it is.", " ".join(worded),
+                      detail=str(exc), names=names)
 
 
 def scope_message(exc: BaseException) -> str:

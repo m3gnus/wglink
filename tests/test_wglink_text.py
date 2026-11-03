@@ -112,3 +112,54 @@ def test_success_report_preserves_user_names_and_logs_technical_warnings(monkeyp
         title + message, names=shell.wglink_text.report_names(report)) == []
     assert "Timeline marker restoration failed: selector" in "\n".join(ui.text_palette.written)
     assert "could not use" not in message
+
+
+def _body(name, *, visible, painted=(), **flags):
+    return {"kind": "body", "object_id": name, "name": name, "path": f"Horn:1/{name}", "body_kind": "solid",
+            "visible": visible, "suppressed": False, "external_reference": "none", "declaration": None,
+            "component": "Horn", "source_face_roles": painted, **flags}
+
+
+def test_a_scope_refusal_names_each_body_and_its_fix(monkeypatch):
+    # A WG body split by hand: the linked original and two painted pieces are
+    # hidden, one piece is shown.
+    from wglink_return import WgReturnError, plan_export_scope
+
+    plan = plan_export_scope("root", [
+        _body("WG enclosure", visible=False, wglink_managed=True, wglink_role="enclosure",
+              contains_solver_anchor=True, contains_required_source=True),
+        _body("WG enclosure (1)", visible=False, painted=("HF",)),
+        _body("WG enclosure (2)", visible=True, painted=("MF", "HF")),
+    ])
+    with pytest.raises(WgReturnError) as exc:
+        plan.manifest_scope()
+    monkeypatch.setattr(wording, "log", lambda _text: None)
+
+    message = wording.scope_message(exc.value)
+
+    assert message == (
+        "WG cannot use this model as it is. "
+        "“WG enclosure (1)” is hidden but has HF driver faces: show it, or clear those faces with Sources & Mesh… "
+        "“WG enclosure” is hidden, but it carries the WG link and holds driver faces: show it in the browser."
+    )
+
+
+def test_a_scope_refusal_without_wording_keeps_the_general_remedy(monkeypatch):
+    monkeypatch.setattr(wording, "log", lambda _text: None)
+    from wglink_return import WgReturnError
+
+    worded = {"name": "Piece", "reason_code": "hidden_painted", "source_roles": ["HF"], "reason": "r"}
+    unworded = {"name": "Odd", "reason": "cannot be classified"}
+
+    assert wording.scope_message(WgReturnError("x", reasons=[unworded])) == " ".join(wording.PROBLEMS["scope_invalid"])
+    assert wording.scope_message(WgReturnError("x", reasons=[worded, unworded])).endswith(
+        wording.PROBLEMS["scope_invalid"][1])
+
+
+def test_a_body_name_with_a_guarded_word_still_reaches_the_user(monkeypatch):
+    monkeypatch.setattr(wording, "log", lambda _text: None)
+    from wglink_return import WgReturnError
+
+    reason = {"name": "Gate manifest", "reason_code": "hidden_painted", "source_roles": ["HF"], "reason": "r"}
+
+    assert "“Gate manifest”" in wording.scope_message(WgReturnError("x", reasons=[reason]))

@@ -21,6 +21,12 @@ else:
 
 MANAGE_DROPDOWN_NAME = "Advanced"
 SCOPE_REASON_UNCLASSIFIED_VISIBLE_SURFACE = "unclassified_visible_surface"
+# Refusals a user can fix on one named body; wglink_text words each of them.
+SCOPE_REASON_EXCLUDED_VISIBLE = "excluded_visible"
+SCOPE_REASON_EXCLUDED_PAINTED = "excluded_painted"
+SCOPE_REASON_HIDDEN_PAINTED = "hidden_painted"
+SCOPE_REASON_UNRESOLVED_LINK = "unresolved_link"
+SCOPE_REASON_REQUIRED_BODY = "required_body"
 
 SUPPORTED_RETURN_FEATURES = wglink_protocol.SUPPORTED_RETURN_FEATURES
 # With this feature every ``sources[].id`` is a CAD-authored identity that WG
@@ -228,8 +234,7 @@ def _scope_identity(candidate: Mapping[str, Any], index: int) -> dict[str, Any]:
     return record
 
 
-def _dependency_reason(candidate: Mapping[str, Any]) -> str | None:
-    dependencies = (
+_DEPENDENCIES = (
         ("contains_solver_anchor", "it contains the solver anchor"),
         (
             "contains_required_source",
@@ -240,9 +245,28 @@ def _dependency_reason(candidate: Mapping[str, Any]) -> str | None:
             "it is the only enclosing exterior body",
         ),
         ("requested_fem_air_volume", "it is a requested FEM air volume"),
-    )
-    matches = [reason for key, reason in dependencies if candidate.get(key) is True]
+)
+
+
+def _dependency_reason(candidate: Mapping[str, Any]) -> str | None:
+    matches = [reason for key, reason in _DEPENDENCIES if candidate.get(key) is True]
     return ", and ".join(matches) if matches else None
+
+
+def _required_refusal(
+    candidate: Mapping[str, Any], index: int, name: str, dependency: str, *, left_out: str
+) -> dict[str, Any]:
+    """A body the export cannot leave out, with what it holds and how it was left out."""
+
+    record = _refusal_record(
+        candidate,
+        index,
+        reason=f"cannot skip {name!r} because {dependency}",
+        reason_code=SCOPE_REASON_REQUIRED_BODY,
+    )
+    record["dependencies"] = [key for key, _reason in _DEPENDENCIES if candidate.get(key) is True]
+    record["left_out"] = left_out
+    return record
 
 
 def _included_record(
@@ -379,6 +403,7 @@ def plan_export_scope(
                             "hide the body or its occurrence in Fusion before return "
                             "export, or clear the 'exclude' declaration to include it"
                         ),
+                        reason_code=SCOPE_REASON_EXCLUDED_VISIBLE,
                     )
                 )
                 continue
@@ -396,8 +421,10 @@ def plan_export_scope(
                             "declaration to solve with them, or clear the paint "
                             "with Sources & Mesh…"
                         ),
+                        reason_code=SCOPE_REASON_EXCLUDED_PAINTED,
                     )
                 )
+                refusals[-1]["source_roles"] = list(painted)
                 continue
             record = _skipped_record(
                 candidate,
@@ -418,6 +445,7 @@ def plan_export_scope(
                         f"external linked occurrence {name!r} is unresolved; "
                         "resolve or remove the link before export"
                     ),
+                    reason_code=SCOPE_REASON_UNRESOLVED_LINK,
                 )
             )
             continue
@@ -473,11 +501,7 @@ def plan_export_scope(
             dependency = _dependency_reason(candidate)
             if dependency:
                 refusals.append(
-                    _refusal_record(
-                        candidate,
-                        index,
-                        reason=f"cannot skip {name!r} because {dependency}",
-                    )
+                    _required_refusal(candidate, index, name, dependency, left_out="construction")
                 )
             continue
 
@@ -590,8 +614,10 @@ def plan_export_scope(
                             f"{', '.join(painted)}; show the body to solve with "
                             "them, or clear the paint with Sources & Mesh…"
                         ),
+                        reason_code=SCOPE_REASON_HIDDEN_PAINTED,
                     )
                 )
+                refusals[-1]["source_roles"] = list(painted)
                 continue
             record = _skipped_record(
                 candidate,
@@ -719,11 +745,7 @@ def plan_export_scope(
         if dependency:
             name = _display_name(candidate, 0)
             refusals.append(
-                _refusal_record(
-                    candidate,
-                    0,
-                    reason=f"cannot skip {name!r} because {dependency}",
-                )
+                _required_refusal(candidate, 0, name, dependency, left_out=record["kind"])
             )
 
     return ScopePlan(
