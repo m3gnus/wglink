@@ -88,6 +88,46 @@ def claim_owner_terminated(name: str) -> bool:
         return False
     return False
 
+
+# An optional command on the existing WG -> Fusion handoff channel. Older
+# add-ins keep their delivery version; WG requires this capability separately.
+OPEN_DOCUMENT_KIND = "open_document"
+OPEN_DOCUMENT_CAPABILITY = "openDocument"
+OPEN_DOCUMENT_UNAVAILABLE = (
+    "Fusion could not find or open this cloud document. Connect to the internet, "
+    "sign in to the account and hub that own it, then try again. "
+    "If it was deleted, restore it in Fusion or import the captured Fusion file if available."
+)
+
+
+def fusion_request_identity(payload: object) -> tuple[str, int] | None:
+    """Identity shared by every command on the Fusion file request transport."""
+    if (not isinstance(payload, Mapping)
+            or type(payload.get("schemaVersion")) is not int
+            or payload["schemaVersion"] != FUSION_REQUEST_DELIVERY_VERSION
+            or payload.get("target") != "fusion360"):
+        return None
+    request_id = payload.get("requestId")
+    sequence = payload.get("deliverySequence")
+    if (not isinstance(request_id, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", request_id) is None
+            or payload.get("operationId") != request_id
+            or type(sequence) is not int or sequence < 1):
+        return None
+    return request_id, sequence
+
+
+def validate_open_document_request(payload: object) -> dict[str, Any] | None:
+    """A cloud id, never a path or URL, within a fully correlated handoff frame."""
+    if fusion_request_identity(payload) is None or payload.get("kind") != OPEN_DOCUMENT_KIND:
+        return None
+    for field in ("documentId", "sessionId"):
+        value = payload.get(field)
+        if (not isinstance(value, str) or not value.strip() or len(value) > 2048
+                or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+            return None
+    return dict(payload)
+
 SOURCE_ROLES = ("LF", "MF", "HF", "PASSIVE_CARDIOID")
 LEGACY_SOURCE_ROLE_ALIASES = {"PORT_EXIT": "PASSIVE_CARDIOID"}
 RECOGNISED_SOURCE_ROLES = SOURCE_ROLES + tuple(LEGACY_SOURCE_ROLE_ALIASES)
