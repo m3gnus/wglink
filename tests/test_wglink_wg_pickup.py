@@ -265,12 +265,12 @@ def test_unusable_file_changed_before_claim_is_retried_without_refusal(monkeypat
         request = ipc / '.fusion-handoffs/req-1.json'
         payload = request.read_text()
         request.write_text('{}')
-        rename = m.wglink_handoff.os.rename
+        rename = m.wglink_protocol.take_by_rename
         def changed(source, target):
             if source == request:
                 request.write_text(payload)
             return rename(source, target)
-        monkeypatch.setattr(m.wglink_handoff.os, 'rename', changed)
+        monkeypatch.setattr(m.wglink_protocol, 'take_by_rename', changed)
         _poll(m)
         _deliver_every_event(f.app)
         assert request.exists() and not writes
@@ -658,12 +658,12 @@ def test_not_ready_release_retains_failed_claim_and_publishes_no_false_pickup(mo
     try:
         writes, _ = _submit(monkeypatch, f, ipc, bundles)
         monkeypatch.setattr(m, '_ensure_design_ready', lambda **_: False)
-        rename = m.wglink_handoff.os.rename
+        rename = m.wglink_protocol.take_by_rename
         def release(source, target):
             if release_fails and Path(source).name.startswith(m.wglink_handoff.CLAIM_PREFIX):
                 raise PermissionError('release is held open')
             return rename(source, target)
-        monkeypatch.setattr(m.wglink_handoff.os, 'rename', release)
+        monkeypatch.setattr(m.wglink_protocol, 'take_by_rename', release)
         _poll(m)
         _deliver_every_event(f.app)
         assert not writes

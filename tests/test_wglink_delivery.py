@@ -507,7 +507,7 @@ def test_a_failed_claim_leaves_the_request_for_the_next_pass(
     kind: str, ipc: Path, bundles: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     request_id = WG(ipc, bundles).publish(kind, 1)
-    real_rename = os.rename
+    real_rename = wglink_handoff.wglink_protocol.take_by_rename
     refusals = {"left": 1}
 
     def busy_rename(source, destination, *args, **kwargs):
@@ -516,7 +516,7 @@ def test_a_failed_claim_leaves_the_request_for_the_next_pass(
             raise PermissionError("WG has the file open")
         return real_rename(source, destination, *args, **kwargs)
 
-    monkeypatch.setattr(os, "rename", busy_rename)
+    monkeypatch.setattr(wglink_handoff.wglink_protocol, "take_by_rename", busy_rename)
 
     assert _take(kind, ipc, bundles) == []
     assert _taken_names(ipc / KINDS[kind][0]) == [request_id]
@@ -569,14 +569,14 @@ def test_a_superseded_update_being_claimed_elsewhere_is_left_to_that_claim(
     wg = WG(ipc, bundles)
     older = wg.publish(HANDOFFS, 1, instance="instance-a")
     wg.publish(HANDOFFS, 2, instance="instance-a")
-    real_rename = os.rename
+    real_rename = wglink_handoff.wglink_protocol.take_by_rename
 
     def taken_first(source, destination, *args, **kwargs):
         if Path(source).name == f"{older}.json":
             raise FileNotFoundError("another reader claimed it")
         return real_rename(source, destination, *args, **kwargs)
 
-    monkeypatch.setattr(os, "rename", taken_first)
+    monkeypatch.setattr(wglink_handoff.wglink_protocol, "take_by_rename", taken_first)
 
     assert wglink_handoff.discard_superseded_handoffs(ipc, bundle_root=bundles) == []
 
@@ -585,7 +585,7 @@ def test_a_superseded_update_being_claimed_elsewhere_is_left_to_that_claim(
 
 
 def test_leftover_claims_are_listed_with_what_reconciliation_reads(
-    ipc: Path, bundles: Path
+    monkeypatch, ipc: Path, bundles: Path
 ) -> None:
     wg = WG(ipc, bundles)
     handoff = wg.publish(HANDOFFS, 1, instance="instance-a")
@@ -608,6 +608,8 @@ def test_leftover_claims_are_listed_with_what_reconciliation_reads(
     assert (first.expected_document_id, first.expected_instance_id) == (
         "fusion:doc-a", "instance-a",
     )
+    assert claims[1].session_id == SESSION
+    monkeypatch.setattr(wglink_handoff.wglink_protocol, "claim_owner_terminated", lambda _: True)
     assert all(wglink_handoff.remove_leftover_claim(claim) for claim in claims)
     assert wglink_handoff.leftover_claims(ipc) == []
 
