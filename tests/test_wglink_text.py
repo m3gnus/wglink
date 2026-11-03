@@ -53,7 +53,7 @@ def test_failure_matrix_keeps_detail_and_request_in_log(monkeypatch, code, bound
 def test_matrix_covers_every_explicit_user_facing_code():
     codes = set()
     for path in ADDIN.glob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text())):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if not isinstance(node, ast.Call):
                 continue
             name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
