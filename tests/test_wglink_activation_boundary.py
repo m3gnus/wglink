@@ -567,6 +567,7 @@ def _leftover_applied_claim(monkeypatch, module, tmp_path: Path):
 
     ipc, bundles = _per_request_folders(monkeypatch, module, tmp_path)
     _per_request_handoff(ipc, bundles, export_id="wge_5")
+    monkeypatch.setattr(module.wglink_protocol, "claim_owner_terminated", lambda _: True)
     left = module.wglink_handoff.claim_request(
         module.wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles)
     )

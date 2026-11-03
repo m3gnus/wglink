@@ -14,7 +14,6 @@ import importlib.util
 import json
 import inspect
 import math
-import os
 from pathlib import Path
 import sys
 import tempfile
@@ -4185,6 +4184,7 @@ def test_a_pending_update_targets_the_exact_selected_duplicate_instance(
     app = _Application(ui)
     app.activeProduct = types.SimpleNamespace(objectType="adsk::fusion::Design")
     module = _load_instance(monkeypatch, "WGLink_pending_exact_instance", ui, app)
+    monkeypatch.setattr(module, "_active_document_id", lambda: "fusion:doc-a")
     bundle_root = tmp_path / "wglink"
     bundle = bundle_root / "horn.wglink"
     bundle.mkdir(parents=True)
@@ -4272,6 +4272,7 @@ def test_a_duplicate_pending_update_refuses_missing_stale_or_ambiguous_identity(
         ui,
         app,
     )
+    monkeypatch.setattr(module, "_active_document_id", lambda: "fusion:doc-a")
     bundle_root = tmp_path / "wglink"
     bundle = bundle_root / "horn.wglink"
     bundle.mkdir(parents=True)
@@ -4834,7 +4835,10 @@ def _design_module(monkeypatch, name: str):
     ui = _UI(_Panels(), _Definitions(reserve_ids=False))
     app = _Application(ui)
     app.activeProduct = types.SimpleNamespace(objectType="adsk::fusion::Design")
-    return _load_instance(monkeypatch, name, ui, app), ui
+    module = _load_instance(monkeypatch, name, ui, app)
+    # These transport fixtures name doc-a in their snapshots and WG requests.
+    monkeypatch.setattr(module, "_active_document_id", lambda: "fusion:doc-a")
+    return module, ui
 
 
 def _shared_snapshot() -> dict[str, object]:
@@ -4846,6 +4850,26 @@ def _shared_snapshot() -> dict[str, object]:
         ],
         "diagnostics": {"watchIntervalSeconds": 4.0},
     }
+
+
+def test_wrong_document_consumer_leaves_update_for_its_destination(monkeypatch, tmp_path):
+    wrong, _ = _design_module(monkeypatch, "WGLink_routing_wrong")
+    intended, _ = _design_module(monkeypatch, "WGLink_routing_intended")
+    ipc, bundles = _per_request_folders(monkeypatch, intended, tmp_path)
+    _per_request_handoff(ipc, bundles)
+    monkeypatch.setattr(wrong.wglink_workspace, "ipc_folder", lambda **_: ipc)
+    monkeypatch.setattr(wrong.wglink_workspace, "bundle_folder", lambda: bundles)
+    monkeypatch.setattr(wrong, "_active_document_id", lambda: "fusion:doc-b")
+    monkeypatch.setattr(intended, "_active_document_id", lambda: "fusion:doc-a")
+    mutations = []
+    monkeypatch.setattr(intended.wglink_core, "update", lambda *args: mutations.append(args))
+
+    assert wrong._apply_pending_handoff({**_shared_snapshot(), "document_id": "fusion:doc-b"}) == wrong.IDLE
+    assert (ipc / ".fusion-handoffs/req-1.json").exists()
+    assert wrong._recent_outcomes == []
+    assert intended._apply_pending_handoff(_shared_snapshot()) == intended.HANDLED
+    assert len(mutations) == 1
+    assert not list((ipc / ".fusion-handoffs").iterdir())
 
 
 def test_a_per_request_handoff_updates_once_with_its_operation_id(
@@ -5346,7 +5370,7 @@ def test_a_claim_that_fails_while_the_design_cannot_be_made_ready_waits_for_the_
         raise module.wglink_core.WgLinkError("no design")
 
     monkeypatch.setattr(module, "_ensure_design_ready", cannot_open_a_design)
-    real_rename = os.rename
+    real_rename = module.wglink_protocol.take_by_rename
     held = {"left": 1}
 
     def held_open(source, destination, *args, **kwargs):
@@ -5355,7 +5379,7 @@ def test_a_claim_that_fails_while_the_design_cannot_be_made_ready_waits_for_the_
             raise PermissionError("WG has the file open")
         return real_rename(source, destination, *args, **kwargs)
 
-    monkeypatch.setattr(os, "rename", held_open)
+    monkeypatch.setattr(module.wglink_protocol, "take_by_rename", held_open)
     snapshot = _shared_snapshot()
 
     assert module._apply_pending_handoff(snapshot) == module.IDLE
@@ -5492,6 +5516,7 @@ def test_a_claim_an_interrupted_session_left_is_settled_once_and_never_run(
     module, ui = _design_module(monkeypatch, f"WGLink_leftover_{outcome}")
     ipc, bundles = _per_request_folders(monkeypatch, module, tmp_path)
     _per_request_handoff(ipc, bundles, export_id="wge_5")
+    monkeypatch.setattr(module.wglink_protocol, "claim_owner_terminated", lambda _: True)
     left = module.wglink_handoff.claim_request(
         module.wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles)
     )
@@ -5646,6 +5671,7 @@ def test_leftover_claims_wait_for_an_active_document(monkeypatch, tmp_path: Path
     module, _ui = _design_module(monkeypatch, "WGLink_leftover_waits")
     ipc, bundles = _per_request_folders(monkeypatch, module, tmp_path)
     _per_request_handoff(ipc, bundles, export_id="wge_5")
+    monkeypatch.setattr(module.wglink_protocol, "claim_owner_terminated", lambda _: True)
     left = module.wglink_handoff.claim_request(
         module.wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles)
     )
@@ -5677,6 +5703,7 @@ def test_a_file_claim_for_another_document_is_retained_not_discarded(
     module, _ui, ipc, _bundle = _file_module(monkeypatch, tmp_path, "WGLink_file_other_doc")
     bundles = tmp_path / "workspace" / "wglink"
     _per_request_handoff(ipc, bundles, export_id="wge_5")
+    monkeypatch.setattr(module.wglink_protocol, "claim_owner_terminated", lambda _: True)
     left = module.wglink_handoff.claim_request(
         module.wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles)
     )
