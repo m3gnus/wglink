@@ -338,16 +338,20 @@ def next_return_request(
 
 
 def next_pending_handoff(
-    ipc_folder: Path, *, bundle_root: Path | None, document_id: str | None = None
+    ipc_folder: Path, *, bundle_root: Path | None, document_id: str | None = None,
+    session_id: str | None = None
 ) -> PendingHandoff | PendingOpenDocument | None:
     """Next handoff for this document; leave other destinations unclaimed.
 
     ``None`` permits an unfiltered inventory. The consumer passes its live
     identity (or an empty string with no document), then checks again at execution.
+    Cloud opens are filtered by session before claiming.
     """
 
     for path in _requests_in_order(Path(ipc_folder) / HANDOFFS_DIRECTORY):
         handoff = read_pending_handoff(path, bundle_root=bundle_root)
+        if isinstance(handoff, PendingOpenDocument) and handoff.session_id != session_id:
+            continue
         if handoff is not None and _matches_document(handoff, document_id):
             return handoff
     return None

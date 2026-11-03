@@ -1,4 +1,5 @@
 """Cloud opening uses the real handoff dispatch, with main-thread Fusion fakes."""
+from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -38,7 +39,8 @@ def test_frame_claim_order_and_no_update_supersession(tmp_path):
     assert wglink_protocol.validate_open_document_request(frame()) == frame()
     assert wglink_handoff.has_requests(tmp_path)
     assert wglink_handoff.discard_superseded_handoffs(tmp_path, bundle_root=tmp_path) == []
-    pending = wglink_handoff.next_pending_handoff(tmp_path, bundle_root=tmp_path)
+    assert wglink_handoff.next_pending_handoff(tmp_path, bundle_root=tmp_path) is None
+    pending = wglink_handoff.next_pending_handoff(tmp_path, bundle_root=tmp_path, session_id="session-a")
     assert isinstance(pending, wglink_handoff.PendingOpenDocument)
     assert wglink_handoff.unusable_handoffs(tmp_path, bundle_root=tmp_path) == []
     claim = wglink_handoff.claim_request(pending)
@@ -71,6 +73,44 @@ class Documents(MainThreadOnly):
         return self.document
 
 
+def test_other_consumer_leaves_open_request_for_its_intended_session(monkeypatch, tmp_path):
+    intended, ipc, bundles, _ = _running(monkeypatch, tmp_path / "intended", "WGLink_open_intended_consumer")
+    # Separate Fusion processes have separate registration leases.
+    monkeypatch.delitem(sys.modules, intended.module._RUNTIME_MODULE_NAME)
+    other, _, _, _ = _running(monkeypatch, tmp_path / "other", "WGLink_open_other_consumer")
+    # Both processes poll the same WG inbox, with independent session identities.
+    monkeypatch.setattr(other.module.wglink_workspace, "ipc_folder", lambda **_kwargs: ipc)
+    monkeypatch.setattr(other.module.wglink_workspace, "bundle_folder", lambda: bundles)
+    assert intended.module._watch_session_id != other.module._watch_session_id
+    opened, other_opened = [], []
+    try:
+        intended.ui.activeCommand = other.ui.activeCommand = "SelectCommand"
+        intended.app.documents = Documents(intended.app, opened, already_open=True)
+        other.app.documents = Documents(other.app, other_opened, already_open=True)
+        folder = ipc / wglink_handoff.HANDOFFS_DIRECTORY
+        folder.mkdir(exist_ok=True)
+        path = folder / "open-1.json"
+        original = json.dumps(frame(sessionId=intended.module._watch_session_id))
+        path.write_text(original)
+        _poll(other.module)
+        _deliver_every_event(other.app)
+        assert path.exists(), "The other session consumed the open request"
+        assert path.read_text() == original
+        assert not opened and not other_opened
+        assert not any(item["requestId"] == "open-1" for item in other.module._recent_outcomes)
+        # The intended consumer shares the inbox and can still claim and open it.
+        _poll(intended.module)
+        _deliver_every_event(intended.app)
+        assert opened == ["activate"]
+        assert not list(folder.iterdir())
+        report = json.loads((ipc / ".fusion-status.json").read_text())
+        assert any(item["requestId"] == "open-1" and item["outcome"] == "applied"
+                   for item in report["diagnostics"]["recentOutcomes"])
+    finally:
+        intended.module.stop(None)
+        other.module.stop(None)
+
+
 @pytest.mark.parametrize("mode", ["open", "activate", "missing", "offline", "fault", "session", "old_wg"])
 def test_open_through_worker_and_main_dispatch(monkeypatch, tmp_path, mode):
     f, ipc, bundles, _ = _running(monkeypatch, tmp_path, "WGLink_open_" + mode)
@@ -89,7 +129,14 @@ def test_open_through_worker_and_main_dispatch(monkeypatch, tmp_path, mode):
             def incompatible():
                 raise m.wglink_text.UserFacing("wg_outdated", "Update Waveguide Generator.", "Restart it, then try again.", detail="private compatibility diagnostic")
             monkeypatch.setattr(m, "_require_compatible_wg", incompatible)
-        payload = frame(sessionId="old-session" if mode == "session" else m._watch_session_id)
+        if mode == "session":
+            execute = m._execute_open_document
+
+            def restarted_after_selection(request):
+                execute(replace(request, session_id="previous-session"))
+
+            monkeypatch.setattr(m, "_execute_open_document", restarted_after_selection)
+        payload = frame(sessionId=m._watch_session_id)
         folder = ipc / wglink_handoff.HANDOFFS_DIRECTORY
         folder.mkdir(exist_ok=True)
         (folder / "open-1.json").write_text(json.dumps(payload))
