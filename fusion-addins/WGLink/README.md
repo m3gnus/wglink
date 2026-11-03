@@ -913,3 +913,16 @@ was gone after each Fusion restart until it was started by hand.
 Icons live in `resources/<operation>/{16x16,32x32,64x64}.png` and are generated
 by `scripts/make_wglink_icons.py`. A checkout without them still works; Fusion
 falls back to unadorned buttons.
+
+## Opening a live cloud document from WG
+
+WG can send an `open_document` command in the existing `.fusion-handoffs`
+inbox. It uses the shared delivery identity, sequence and claim mechanism;
+`sessionId` binds it to the add-in session whose `openDocument: 1` capability
+WG read. The command runs through the usual main-thread idle gate, activates
+an already open matching document, or resolves its native id with
+`app.data.findFileById` and opens it with `app.documents.open`. It never
+imports a captured file or changes the document's content. Outcomes use the
+existing correlated handoff receipts. WG's counterpart is
+`server/cadlink/fusion/fusion_documents.py` in Waveguide Generator; WG vendors
+`wglink_protocol.py` byte for byte with source provenance.

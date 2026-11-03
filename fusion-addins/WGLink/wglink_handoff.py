@@ -84,6 +84,21 @@ class PendingReturnRequest:
         return self.request_id
 
 
+@dataclass(frozen=True)
+class PendingOpenDocument:
+    """Open a live cloud document, using the handoff's ordering and claim owner."""
+
+    marker_path: Path
+    request_id: str
+    delivery_sequence: int
+    session_id: str
+    document_id: str
+
+    @property
+    def operation_id(self) -> str:
+        return self.request_id
+
+
 def _sequence(payload: Any) -> int | None:
     value = payload.get(SEQUENCE_FIELD) if isinstance(payload, Mapping) else None
     if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
@@ -99,22 +114,7 @@ def _request_identity(payload: Any) -> tuple[str, int] | None:
     version's requests, and is left where it is.
     """
 
-    if (
-        not isinstance(payload, Mapping)
-        or payload.get("schemaVersion") != REQUEST_SCHEMA_VERSION
-        or payload.get("target") != "fusion360"
-    ):
-        return None
-    request_id = payload.get("requestId")
-    sequence = _sequence(payload)
-    if (
-        not isinstance(request_id, str)
-        or not _PLAIN_ID.fullmatch(request_id)
-        or payload.get("operationId") != request_id
-        or sequence is None
-    ):
-        return None
-    return request_id, sequence
+    return wglink_protocol.fusion_request_identity(payload)
 
 
 def read_return_request(
@@ -149,7 +149,7 @@ def return_request_from_document(
 
 def read_pending_handoff(
     marker_path: Path, *, bundle_root: Path | None = None
-) -> PendingHandoff | None:
+) -> PendingHandoff | PendingOpenDocument | None:
     """Read one handoff without trusting an arbitrary bundle path."""
 
     return handoff_from_document(
@@ -159,11 +159,19 @@ def read_pending_handoff(
 
 def handoff_from_document(
     payload: Any, *, bundle_root: Path | None, marker_path: Path
-) -> PendingHandoff | None:
+) -> PendingHandoff | PendingOpenDocument | None:
     """Parse a version 3 handoff and validate its path against the bundle root."""
 
     identity = _request_identity(payload)
     if identity is None:
+        return None
+    if payload.get("kind") == wglink_protocol.OPEN_DOCUMENT_KIND:
+        frame = wglink_protocol.validate_open_document_request(payload)
+        if frame is None:
+            return None
+        return PendingOpenDocument(marker_path, identity[0], identity[1],
+                                   frame["sessionId"], frame["documentId"])
+    if payload.get("kind") is not None:
         return None
     bundle_id = payload.get("bundleId")
     export_id = payload.get("exportId")
@@ -223,7 +231,7 @@ def acknowledge_return_request(request: PendingReturnRequest) -> bool:
     return _remove_claim(request.marker_path)
 
 
-def acknowledge_handoff(handoff: PendingHandoff | UnusableHandoff) -> bool:
+def acknowledge_handoff(handoff: PendingHandoff | PendingOpenDocument | UnusableHandoff) -> bool:
     """Retire a handled handoff: delete its claim."""
 
     return _remove_claim(handoff.marker_path)
@@ -271,7 +279,7 @@ class UnusableHandoff:
     state: tuple[str, int, int]
 
 
-_Pending = TypeVar("_Pending", PendingHandoff, PendingReturnRequest, UnusableHandoff)
+_Pending = TypeVar("_Pending", PendingHandoff, PendingReturnRequest, PendingOpenDocument, UnusableHandoff)
 
 
 def unusable_handoffs(ipc: Path, *, bundle_root: Path) -> list[UnusableHandoff]:
@@ -331,7 +339,7 @@ def next_return_request(
 
 def next_pending_handoff(
     ipc_folder: Path, *, bundle_root: Path | None, document_id: str | None = None
-) -> PendingHandoff | None:
+) -> PendingHandoff | PendingOpenDocument | None:
     """Next handoff for this document; leave other destinations unclaimed.
 
     ``None`` permits an unfiltered inventory. The consumer passes its live
@@ -345,8 +353,8 @@ def next_pending_handoff(
     return None
 
 
-def _matches_document(handoff: PendingHandoff, document_id: str | None) -> bool:
-    return (document_id is None or not handoff.expected_document_id
+def _matches_document(handoff: PendingHandoff | PendingOpenDocument, document_id: str | None) -> bool:
+    return (isinstance(handoff, PendingOpenDocument) or document_id is None or not handoff.expected_document_id
             or handoff.expected_document_id == document_id)
 
 
@@ -367,7 +375,7 @@ def discard_superseded_handoffs(
     handoffs = [
         handoff
         for path in _requests_in_order(Path(ipc_folder) / HANDOFFS_DIRECTORY)
-        if (handoff := read_pending_handoff(path, bundle_root=bundle_root)) is not None
+        if isinstance((handoff := read_pending_handoff(path, bundle_root=bundle_root)), PendingHandoff)
         and _matches_document(handoff, document_id)
     ]
     newest: dict[tuple[str, str], PendingHandoff] = {}
@@ -403,6 +411,7 @@ class LeftoverClaim:
     expected_document_id: str
     expected_instance_id: str
     session_id: str = ""
+    kind: str = ""
 
 
 def leftover_claims(ipc_folder: Path) -> list[LeftoverClaim]:
@@ -439,6 +448,7 @@ def _claim_from_document(path: Path, channel: str, payload: Any) -> LeftoverClai
         ),
         expected_instance_id=str(fields.get("expectedInstanceId") or fields.get("instanceId") or ""),
         session_id=str(fields.get("sessionId") or ""),
+        kind=str(fields.get("kind") or ""),
     )
 
 

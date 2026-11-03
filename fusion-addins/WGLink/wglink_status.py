@@ -181,6 +181,7 @@ def fusion_status_payload(
         "sessionId": str(session_id),
         "adapterVersion": str(adapter_version or "") or None,
         "deliveryVersion": DELIVERY_VERSION,
+        wglink_protocol.OPEN_DOCUMENT_CAPABILITY: 1,
         "immutableBundles": IMMUTABLE_BUNDLES,
         "workspaceRoot": (
             str(workspace_root.expanduser().resolve())
