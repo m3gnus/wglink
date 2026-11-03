@@ -4282,7 +4282,7 @@ def _pending_handoff() -> wglink_handoff.PendingHandoff | wglink_handoff.Pending
         # Visible in the heartbeat: which request was dropped, and why.
         _note_outcome("handoff", request_id, "superseded")
     handoff = wglink_handoff.next_pending_handoff(
-        ipc, bundle_root=bundles, document_id=document_id
+        ipc, bundle_root=bundles, document_id=document_id, session_id=_watch_session_id
     )
     if handoff is None:
         # An absent result alone proves nothing: a valid file's read may have

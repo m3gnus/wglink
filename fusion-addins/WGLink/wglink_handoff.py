@@ -338,17 +338,25 @@ def next_return_request(
 
 
 def next_pending_handoff(
-    ipc_folder: Path, *, bundle_root: Path | None, document_id: str | None = None
+    ipc_folder: Path,
+    *,
+    bundle_root: Path | None,
+    document_id: str | None = None,
+    session_id: str | None = None,
 ) -> PendingHandoff | PendingOpenDocument | None:
-    """Next handoff for this document; leave other destinations unclaimed.
+    """Next handoff for this document and session; leave other destinations unclaimed.
 
-    ``None`` permits an unfiltered inventory. The consumer passes its live
-    identity (or an empty string with no document), then checks again at execution.
+    ``document_id=None`` permits an unfiltered inventory of insert/update handoffs.
+    The consumer passes its live identity (or an empty string with no document),
+    then checks again at execution. Cloud opens name one Fusion session and are
+    filtered by ``session_id`` before claiming.
     """
 
     for path in _requests_in_order(Path(ipc_folder) / HANDOFFS_DIRECTORY):
         handoff = read_pending_handoff(path, bundle_root=bundle_root)
         if isinstance(handoff, PendingOpenDocument):
+            if handoff.session_id != session_id:
+                continue
             return handoff
         if handoff is not None and _matches_document(handoff, document_id):
             return handoff
