@@ -25,10 +25,12 @@ unfinished entry offers a calm way to check in WG.
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import math
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -533,7 +535,7 @@ def bounded(entries: list[dict[str, Any]], *, now: float | None = None) -> list[
     return sorted(by_id.values(), key=_pressed, reverse=True)[:wglink_protocol.REQUEST_HISTORY_LIMIT]
 
 
-def _read_entry(found: object) -> dict[str, Any] | None:
+def _read_entry(found: object, *, recovering: bool = True) -> dict[str, Any] | None:
     if (not isinstance(found, dict) or found.get("schema") != RECORD_SCHEMA
             or not isinstance(found.get("requestId"), str)
             or not wglink_protocol._STATUS_ID.fullmatch(found["requestId"])
@@ -547,7 +549,7 @@ def _read_entry(found: object) -> dict[str, Any] | None:
     if not found.get("pressedAt"):
         return None
     found["heardAt"] = float(found.get("heardAt") or _pressed(found))
-    if found.get("local") == EXPORTING:
+    if recovering and found.get("local") == EXPORTING:
         found["local"] = NOT_SENT
     if found.get("status") is not None:
         found["status"] = wglink_protocol.validate_request_status(found["status"], request_id=found["requestId"])
@@ -572,25 +574,75 @@ def _corrupt_history(ipc: Path, on_corrupt: Callable[[], None] | None) -> list[d
     return []
 
 
-def _history_entries(ipc: Path, on_corrupt: Callable[[], None] | None = None) -> list[dict[str, Any]]:
+def _history_record(ipc: Path, on_corrupt: Callable[[], None] | None = None,
+                    *, recovering: bool = True) -> dict[str, Any]:
     try:
         record = json.loads((Path(ipc) / RECORD_FILENAME).read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return []
+        return {"entries": []}
     except (ValueError, UnicodeError, RecursionError):
-        return _corrupt_history(ipc, on_corrupt)
+        return {"entries": _corrupt_history(ipc, on_corrupt)}
     if isinstance(record, dict) and type(record.get("schema")) is int and record["schema"] != RECORD_SCHEMA:
         raise HistoryUnavailable(wglink_protocol.REQUEST_HISTORY_TEXT["historyUnavailable"])
     if (not isinstance(record, dict) or type(record.get("schema")) is not int
             or not isinstance(record.get("entries"), list)):
-        return _corrupt_history(ipc, on_corrupt)
-    return [entry for value in record["entries"] if (entry := _read_entry(value)) is not None]
+        return {"entries": _corrupt_history(ipc, on_corrupt)}
+    record["entries"] = [entry for value in record["entries"] if (entry := _read_entry(value, recovering=recovering)) is not None]
+    return record
+
+
+def _history_entries(ipc: Path, on_corrupt: Callable[[], None] | None = None) -> list[dict[str, Any]]:
+    return _history_record(ipc, on_corrupt)["entries"]
+
+
+@contextmanager
+def _history_lock(ipc: Path):
+    """Serialize history read/merge/write across threads and Fusion processes.
+
+    Keep the lock file in place: unlinking it would let another writer lock a
+    different inode while this one is still held. The OS releases it on exit.
+    """
+    Path(ipc).mkdir(parents=True, exist_ok=True)
+    with (Path(ipc) / (RECORD_FILENAME + ".lock")).open("a+b") as stream:
+        if os.name == "nt":
+            import msvcrt
+            stream.seek(0, 2)
+            if not stream.tell():
+                stream.write(b"\0")
+                stream.flush()
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _updated(entry: Mapping[str, Any]) -> dict[str, Any]:
+    # Stamp mutations, never mere saves of a restored snapshot. Both processes
+    # share the system clock; an older snapshot cannot overwrite a newer edit.
+    return {**copy.deepcopy(dict(entry)), "historyUpdatedAt": time.time_ns()}
+
+
+def _update_order(entry: Mapping[str, Any]) -> tuple[int, int]:
+    status = entry.get("status") or {}
+    seq = status.get("seq", 0) if isinstance(status, Mapping) else 0
+    stamp = entry.get("historyUpdatedAt", 0)
+    return (seq if type(seq) is int else 0, stamp if type(stamp) is int else 0)
 
 
 def load_history(ipc: Path, *, now: float | None = None, on_corrupt: Callable[[], None] | None = None) -> list[dict[str, Any]]:
     """Recover all readable entries before best-effort legacy migration. Never resubmit."""
     root = Path(ipc)
-    entries = _history_entries(root, on_corrupt)
+    with _history_lock(root):
+        entries = _history_entries(root, on_corrupt)
     legacy = root / LEGACY_RECORD_FILENAME
     try:
         old = _read_entry(wglink_inbox._read_json(legacy))
@@ -610,19 +662,44 @@ def load_history(ipc: Path, *, now: float | None = None, on_corrupt: Callable[[]
 
 
 def save(ipc: Path, request: Mapping[str, Any]) -> Path:
-    """Write with the one atomic writer; incomplete recovery merges instead of truncating."""
-    disk = _history_entries(ipc)  # only valid JSON with an unknown schema stays read-only
-    if request.get("clearFinished", False):
-        disk = [e for e in disk if not terminal(e)]
-    if "entries" in request:
-        entries = list(request["entries"])
-        if request.get("mergeDisk", False):
-            ids = {e["requestId"] for e in entries} | set(request.get("removedIds", []))
-            entries += [e for e in disk if e["requestId"] not in ids]
-    else:
-        entries = [dict(request), *[e for e in disk if e["requestId"] != request["requestId"]]]
-    payload = {"schema": RECORD_SCHEMA, "entries": bounded(entries)}
-    return wglink_status.write_status_record(Path(ipc), RECORD_FILENAME, payload)
+    """Merge mutations by request ID under an OS lock, then atomically publish.
+
+    Removed IDs are durable tombstones: a pre-clear snapshot cannot resurrect
+    finished rows. An export cleared before submission may still be submitted
+    by its live command. IDs are unique per press and are never reused.
+    WG sequence orders status updates; mutation time orders other row changes.
+    """
+    with _history_lock(ipc):
+        record = _history_record(ipc, recovering=False)  # unknown schemas remain read-only
+        disk = record["entries"]
+        disk_by_id = {e["requestId"]: e for e in disk}
+        tombstones = record.get("removedIds", {})
+        removed = dict(tombstones) if isinstance(tombstones, dict) else dict.fromkeys(tombstones, False)
+        proposed = set(request.get("removedIds", []))
+        incoming = list(request["entries"]) if "entries" in request else [_updated(request)]
+        if request.get("clearFinished", False):
+            proposed.update(e["requestId"] for e in [*disk, *incoming] if terminal(e))
+        # A stale finished snapshot cannot remove a request WG has resumed.
+        # Recovery calls an export without a submission abandoned. Remember
+        # that distinction so Clear works after a crash, while a still-live
+        # export can later publish its submission using the same request ID.
+        for rid in proposed:
+            previous = disk_by_id.get(rid)
+            exporting = previous is not None and previous.get("local") == EXPORTING
+            if previous is None or terminal(previous) or exporting:
+                removed.setdefault(rid, exporting)
+        for entry in incoming:
+            rid = entry["requestId"]
+            if removed.get(rid) is True and entry.get("submittedAt") is not None:
+                removed.pop(rid)
+        by_id = {e["requestId"]: e for e in disk if e["requestId"] not in removed}
+        for entry in incoming:
+            rid = entry["requestId"]
+            if rid not in removed and (rid not in by_id or _update_order(entry) > _update_order(by_id[rid])):
+                by_id[rid] = entry
+        payload = {"schema": RECORD_SCHEMA, "entries": bounded(list(by_id.values())),
+                   "removedIds": removed}
+        return wglink_status.write_status_record(Path(ipc), RECORD_FILENAME, payload)
 
 
 def load(ipc: Path, *, now: float | None = None) -> dict[str, Any] | None:
@@ -717,7 +794,6 @@ class RequestTracker:
         self._entries: list[dict[str, Any]] = []
         self.document_id: str | None = None
         self.all_documents = False
-        self._recovered = False
 
     def current(self) -> dict[str, Any] | None:
         with self._lock:
@@ -726,10 +802,9 @@ class RequestTracker:
     def begin(self, request: Mapping[str, Any] | None,
               save: Callable[[dict[str, Any]], object] | None = None) -> None:
         with self._lock:
-            self._request = copy.deepcopy(dict(request)) if request is not None else None
+            self._request = _updated(request) if request is not None else None
             if self._request is None:
                 self._entries = []
-                self._recovered = False
             else:
                 self._entries = bounded([self._request, *[e for e in self._entries if e["requestId"] != request["requestId"]]], now=_pressed(self._request))
             if save is not None and self._request is not None:
@@ -744,20 +819,18 @@ class RequestTracker:
             previous = copy.deepcopy(self._request)
             if previous is None or previous.get("requestId") != request.get("requestId"):
                 return previous, False
-            self._request = copy.deepcopy(dict(request))
+            self._request = _updated(request)
             self._entries = [copy.deepcopy(self._request) if e["requestId"] == request["requestId"] else e for e in self._entries]
             if save is not None:
                 save(self._payload())
             return previous, True
 
     def _payload(self) -> dict[str, Any]:
-        return {"schema": RECORD_SCHEMA, "entries": copy.deepcopy(self._entries),
-                "mergeDisk": not self._recovered}
+        return {"schema": RECORD_SCHEMA, "entries": copy.deepcopy(self._entries)}
 
     def restore(self, entries: list[dict[str, Any]]) -> None:
         with self._lock:
             self._entries = copy.deepcopy(entries)
-            self._recovered = True
             self._request = copy.deepcopy(entries[0]) if entries else None
 
     def entries(self, *, filtered: bool = False) -> list[dict[str, Any]]:
@@ -772,9 +845,9 @@ class RequestTracker:
         with self._lock:
             for index, entry in enumerate(self._entries):
                 if entry == previous:
-                    self._entries[index] = copy.deepcopy(dict(updated))
+                    self._entries[index] = _updated(updated)
                     if self._request and self._request["requestId"] == entry["requestId"]:
-                        self._request = copy.deepcopy(dict(updated))
+                        self._request = copy.deepcopy(self._entries[index])
                     if save is not None:
                         save(self._payload())
                     return True
@@ -791,9 +864,11 @@ class RequestTracker:
             for entry in self._entries:
                 if entry.get("documentId") == local_id:
                     entry["documentId"] = saved_id
+                    entry.update(_updated(entry))
                     changed = True
             if self._request and self._request.get("documentId") == local_id:
-                self._request["documentId"] = saved_id
+                self._request = copy.deepcopy(next(
+                    entry for entry in self._entries if entry["requestId"] == self._request["requestId"]))
             if changed:
                 save(self._payload())
 

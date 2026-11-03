@@ -3523,3 +3523,65 @@ def test_design_appearance_lookup_treats_a_raising_miss_as_absent(core):
     # A journal must not record "absent" for an appearance that exists.
     assert core._design_appearance(design, "HF", strict=True) is found
     assert core._design_appearance(design, "LF", strict=True) is None
+
+
+@pytest.mark.parametrize("mode", ["false", "false_after", "raise_after", "kept"])
+def test_detach_failure_restores_the_complete_metadata_set(core, monkeypatch, mode):
+    app, design, original, _, _ = _copied_component_document(core)
+    before = [(a.parent, a.name, a.value) for a in core._all_link_attributes(design)]
+    attribute = core._attribute(original, "topology")
+    delete = attribute.deleteMe
+
+    def refuse():
+        if mode in {"false_after", "raise_after"}:
+            delete()
+            if mode == "raise_after":
+                raise RuntimeError("Fusion threw after deleting")
+            return False
+        return mode == "kept"
+
+    monkeypatch.setattr(attribute, "deleteMe", refuse)
+    with pytest.raises(core.WgLinkError, match="changes were restored.*Detach again"):
+        core.detach(app, {"instance_id": "wg-1"})
+    assert {(id(a.parent), a.name, a.value) for a in core._all_link_attributes(design)} == {
+        (id(parent), name, value) for parent, name, value in before
+    }
+
+
+def test_detach_failed_restoration_names_undo(core, monkeypatch):
+    app, design, original, _, _ = _copied_component_document(core)
+    attribute = core._attribute(original, "topology")
+    monkeypatch.setattr(attribute, "deleteMe", lambda: False)
+    monkeypatch.setattr(design.rootComponent.attributes, "add", lambda *_: None)
+    with pytest.raises(core.WgLinkError, match="Undo this command.*some changes could not be restored"):
+        core.detach(app, {"instance_id": "wg-1"})
+
+
+@pytest.mark.parametrize("mode", ["same_token", "equal", "resolved"])
+def test_direct_link_metadata_groups_fresh_parent_wrappers(core, monkeypatch, mode):
+    _, design, original, _, _ = _copied_component_document(core)
+
+    class Base:
+        pass
+
+    class Parent(Base):
+        def __init__(self, entity, index):
+            self.entity = entity
+            self.entityToken = entity.entityToken + (str(index) if mode != "same_token" else "")
+
+        def __getattr__(self, name):
+            return getattr(self.entity, name)
+
+        def __eq__(self, other):
+            return mode != "resolved" and isinstance(other, Parent) and self.entity is other.entity
+
+    monkeypatch.setattr(core.adsk.core, "Base", Base, raising=False)
+    attributes = list(original.attributes.items)
+    for index, attribute in enumerate(attributes):
+        attribute.parent = Parent(original, index)
+    design.findAttributes = lambda *_: attributes
+    design.findEntityByToken = lambda _token: [original]
+    record = core._link_records(design)["wg-1"]
+    assert record["payload"]["topology"] == "wg"
+    assert record["payload"]["instance_id"] == "wg-1"
+    assert len(record["entities"]) == 1

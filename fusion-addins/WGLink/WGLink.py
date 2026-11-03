@@ -123,6 +123,7 @@ COMMANDS = wglink_text.COMMANDS
 PROMOTED_COMMANDS = ("source", "solve", "requests")
 
 _handlers: list[object] = []
+_command_handlers: list[object] = []
 _definitions: list[object] = []
 _controls: list[object] = []
 _panel = None
@@ -863,17 +864,19 @@ def _anchor_id(label: str) -> str:
     return _anchor_choice_ids.get(label, label)
 
 
-def _sync_anchor_choices(command_inputs: object) -> None:
+def _sync_anchor_choices(command_inputs: object) -> dict[str, object] | None:
     anchor = _input(command_inputs, "anchor_instance_id")
     if anchor is None:
         return
+    inventory: dict[str, object] | None = {}
     try:
         report = wglink_send.inspect_scope(
-            _app(), {"selection": _send_selection(command_inputs)}
+            _app(), {"selection": _send_selection(command_inputs)}, inventory=inventory
         )
         instance_ids = list(report.get("instance_ids", []))
     except Exception:  # noqa: BLE001 - execute will present the actionable refusal
         instance_ids = []
+        inventory = None
     anchor.isVisible = len(instance_ids) > 1
     try:
         previous = _anchor_id(str(anchor.selectedItem.name)) if anchor.selectedItem else None
@@ -888,6 +891,7 @@ def _sync_anchor_choices(command_inputs: object) -> None:
             anchor.listItems.add(label, instance_id == previous or (previous is None and index == 0))
     except Exception:  # noqa: BLE001
         pass
+    return inventory
 
 
 class SendDialogState:
@@ -903,7 +907,8 @@ class SendDialogState:
         self.findings: list[dict[str, object]] = []
 
 
-def _sync_preflight(command_inputs: object, state: SendDialogState | None = None) -> None:
+def _sync_preflight(command_inputs: object, state: SendDialogState | None = None,
+                    inventory: dict[str, object] | None = None) -> None:
     """Refresh the read-only summary the Send and Solve dialogs show.
 
     Everything Fusion-specific happens here, on the main thread; the verdict
@@ -927,7 +932,9 @@ def _sync_preflight(command_inputs: object, state: SendDialogState | None = None
                 options["anchor_instance_id"] = _anchor_id(str(anchor.selectedItem.name))
         except Exception:  # noqa: BLE001 - an untouched dropdown has no choice yet
             pass
-        report = wglink_send.preflight_scope(_app(), options)
+        report = wglink_send.preflight_scope(
+            _app(), options, **({"inventory": inventory} if inventory is not None else {})
+        )
         findings = wglink_protocol.preflight_findings(
             {**report, "kind": state.kind if state is not None else None},
             limits=wglink_inbox.wg_mesh_limits(wglink_workspace.ipc_folder()),
@@ -3011,8 +3018,8 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
             input_id = str(getattr(changed, "id", ""))
             inputs = args.inputs
             if input_id == "send_selection":
-                _sync_anchor_choices(inputs)
-                _sync_preflight(inputs, self.send_state)
+                inventory = _sync_anchor_choices(inputs)
+                _sync_preflight(inputs, self.send_state, inventory)
             elif input_id == "anchor_instance_id":
                 _sync_preflight(inputs, self.send_state)
             elif input_id == "refresh_preflight":
@@ -3020,8 +3027,8 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
                 # is open without producing a command-input event. Re-survey on
                 # an explicit read-only action so the displayed body inventory
                 # and anchor choices cannot remain stale.
-                _sync_anchor_choices(inputs)
-                _sync_preflight(inputs, self.send_state)
+                inventory = _sync_anchor_choices(inputs)
+                _sync_preflight(inputs, self.send_state, inventory)
                 try:
                     changed.value = False
                 except Exception:  # noqa: BLE001 - old Fusion buttons may be write-only
@@ -3056,8 +3063,53 @@ def _mesh_dialog_services() -> object:
     )
 
 
-def _initialize_authoring_dialog(command, operation):
+class _CommandHandlers(adsk.core.CommandEventHandler):
+    """Own only one command's subscriptions, until Fusion destroys it.
+
+    Backend continuations retain their execute handler themselves. Releasing
+    subscriptions here leaves those continuations and their plain send state
+    alive, while authoring states release their command and entity wrappers.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.subscriptions = []
+        self.states = []
+        self.destroy_attached = False
+        _command_handlers.append(self)
+
+    def add(self, event, handler):
+        event.add(handler)
+        self.subscriptions.append((event, handler))
+
+    def attach_destroy(self, command):
+        event = getattr(command, "destroy", None)
+        if event is not None and not self.destroy_attached:
+            self.add(event, self)
+            self.destroy_attached = True
+
+    def notify(self, _args):
+        self.close()
+
+    def close(self):
+        for event, handler in self.subscriptions:
+            try:
+                event.remove(handler)
+            except Exception as exc:  # noqa: BLE001 - a destroyed command may refuse
+                _log(f"[{PANEL_NAME}] could not release a dialog subscription: {exc}")
+        self.subscriptions.clear()
+        for state in self.states:
+            state.__dict__.clear()
+            state.construction_failed = True
+            state.command = None
+        self.states.clear()
+        if self in _command_handlers:
+            _command_handlers.remove(self)
+
+
+def _initialize_authoring_dialog(command, operation, lifetime=None):
     """Install every handler before construction; only a complete dialog may save."""
+    lifetime = lifetime or _CommandHandlers()
     execute = CommandExecuteHandler(operation)
     if operation == "source":
         dialog = wglink_mesh_dialog
@@ -3079,12 +3131,13 @@ def _initialize_authoring_dialog(command, operation):
     # The dialog state names its command: whoever holds only the state (the
     # handlers, a scripted check) reaches the live inputs through it.
     state.command = command
+    lifetime.states.append(state)
     # Keep events inert during construction too: Fusion may dispatch them while
     # inputs are being added, or while the outer reporter displays an error.
     state.construction_failed = True
     for event, handler in (*handlers, (command.execute, execute)):
-        event.add(handler)
-        _handlers.append(handler)
+        lifetime.add(event, handler)
+    lifetime.attach_destroy(command)
     if operation == "source":
         command.parentCommandDefinition.name = wglink_mesh_dialog.MESH_DIALOG_TITLE
         command.isExecutedWhenPreEmpted = False
@@ -3107,6 +3160,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             self._created(args)
 
     def _created(self, args: object) -> None:
+        lifetime = None
         try:
             if self.operation == "fem":
                 _require_fem_regions()
@@ -3115,6 +3169,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 # so the command changes nothing and has nothing to undo.
                 _show_request_palette(open_it=True)
                 return
+            lifetime = _CommandHandlers()
             inputs = args.command.commandInputs
             send_state = SendDialogState(self.operation) if self.operation in {"send", "solve"} else None
             if send_state is not None:
@@ -3140,14 +3195,14 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                     adsk.core.DropDownStyles.TextListDropDownStyle,
                 )
                 anchor.isVisible = False
-                _sync_anchor_choices(inputs)
+                inventory = _sync_anchor_choices(inputs)
                 # State the export before it happens: what goes in, whether it
                 # is linked, which sources drive it, and -- for an unlinked
                 # model, whose assembly frame WG solves as-is -- how far the
                 # model sits from that frame. A missing source used to be a
                 # dead-end modal raised after the user pressed OK.
                 inputs.addTextBoxCommandInput("preflight", "Pre-flight", "", 8, True)
-                _sync_preflight(inputs, send_state)
+                _sync_preflight(inputs, send_state, inventory)
                 inputs.addBoolValueInput(
                     "refresh_preflight",
                     "Refresh body inventory",
@@ -3156,13 +3211,11 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                     False,
                 )
                 changed = CommandInputChangedHandler(self.operation, send_state)
-                args.command.inputChanged.add(changed)
-                _handlers.append(changed)
+                lifetime.add(args.command.inputChanged, changed)
                 validate = SendValidateInputsHandler(send_state)
-                args.command.validateInputs.add(validate)
-                _handlers.append(validate)
+                lifetime.add(args.command.validateInputs, validate)
             if self.operation == "source":
-                _initialize_authoring_dialog(args.command, self.operation)
+                _initialize_authoring_dialog(args.command, self.operation, lifetime)
                 return
             if self.operation == "declare":
                 bodies = inputs.addSelectionInput(
@@ -3191,8 +3244,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                     True,
                 )
                 changed = CommandInputChangedHandler(self.operation)
-                args.command.inputChanged.add(changed)
-                _handlers.append(changed)
+                lifetime.add(args.command.inputChanged, changed)
             if self.operation == "insert":
                 source = inputs.addDropDownCommandInput(
                     "bundle_source",
@@ -3222,7 +3274,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                     True,
                 )
             if self.operation == "fem":
-                _initialize_authoring_dialog(args.command, self.operation)
+                _initialize_authoring_dialog(args.command, self.operation, lifetime)
                 return
             if self.operation not in {"insert", "send", "solve", "source", "declare"}:
                 # A document with one link needs no choice, and the old free
@@ -3244,10 +3296,12 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             handler.send_state = send_state
             if send_state is not None:
                 handler.force_new = _take_force_new_request(self.operation)
-            args.command.execute.add(handler)
-            _handlers.append(handler)
+            lifetime.add(args.command.execute, handler)
         except Exception as exc:  # noqa: BLE001
             _report_error("Building a dialog for the Waveguide Generator add-in", PANEL_NAME, exc)
+        finally:
+            if lifetime is not None:
+                lifetime.attach_destroy(args.command)
 
 
 def _delete_quietly(entity: object) -> None:
@@ -3947,25 +4001,17 @@ def _document_links(timings: dict[str, float] | None = None) -> list[dict[str, o
     return links
 
 
+# Keep the first local identity of each live root for this registration. Tokens
+# can drift; the existing Fusion entity comparator recognizes subsequent handles.
+_local_document_roots: list[tuple[object, str]] = []
+
+
 def _active_document_id() -> str | None:
-    """A durable identity for the active document, saved or not.
+    """Name a saved file or a live unsaved document, through token changes.
 
-    A saved document has one: its data file id. An unsaved one has no data
-    file, and neither Python's identity for the ``Document`` object nor its
-    address is a substitute. Fusion's bindings construct a fresh proxy for a
-    property read, so ``document is other`` and ``id(document)`` answer about a
-    temporary wrapper rather than about the document -- a stable answer and an
-    unstable one are both accidents of when that wrapper was collected. This
-    repository already identifies Fusion entities by ``entityToken`` for
-    exactly that reason (``wglink_core._entity_token``), and the root
-    component's token is that same handle for the document holding it. It is
-    hashed because a raw token is long and belongs to Fusion, not to the wire.
-
-    ``None`` means this add-in cannot name the active document. It is not an
-    identity and is never treated as one: nothing is cached under it, nothing
-    is refreshed for it, and the heartbeat answers "cannot tell" -- because two
-    documents that cannot be named would otherwise share one cache entry, which
-    is how one document's measurement reaches another's links.
+    Retain the first token's hash for compatibility with existing pending edits.
+    First save migrates that identity's settings and history to the data file id.
+    An unreadable document with no known root still has no identity.
     """
 
     app = _app()
@@ -3978,10 +4024,29 @@ def _active_document_id() -> str | None:
     except Exception:  # noqa: BLE001 - unsaved local document
         pass
     try:
-        token = str(app.activeProduct.rootComponent.entityToken or "").strip()
+        design = app.activeProduct
+        root = design.rootComponent
     except Exception:  # noqa: BLE001 - a product with no root component
-        token = ""
-    local_id = "local:" + hashlib.sha256(token.encode("utf-8")).hexdigest() if token else None
+        design, root = None, None
+    live_roots = []
+    for known, identity in _local_document_roots:
+        try:
+            if getattr(known, "isValid", True):
+                live_roots.append((known, identity))
+        except Exception:  # noqa: BLE001, S112 - invalid Fusion handles can refuse every read
+            continue
+    _local_document_roots[:] = live_roots
+    local_id = next((identity for known, identity in _local_document_roots
+                     if wglink_core._same_live_entity(root, known)), None)
+    if local_id is None and root is not None:
+        # Resolution handles bindings that cannot compare the original wrapper.
+        local_id = next((identity for known, identity in _local_document_roots
+                         if wglink_send._same_fusion_entity(root, known, design)), None)
+    if local_id is None:
+        token = wglink_core._entity_token(root)
+        if token:
+            local_id = "local:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+            _local_document_roots.append((root, local_id))
     if native_id:
         saved_id = f"fusion:{native_id}"
         if local_id:
@@ -5685,7 +5750,10 @@ def _clear_registration_state() -> None:
     global _panel, _owned
     _controls.clear()
     _definitions.clear()
+    for lifetime in _command_handlers[:]:
+        lifetime.close()
     _handlers.clear()
+    _local_document_roots.clear()
     _panel = None
     _owned = False
 
@@ -5706,7 +5774,10 @@ def _delete_owned_ui(ui: object | None) -> None:
     _delete_quietly(_panel)
     _panel = None
     _owned = False
+    for lifetime in _command_handlers[:]:
+        lifetime.close()
     _handlers.clear()
+    _local_document_roots.clear()
     _close_request_palette()
 
 

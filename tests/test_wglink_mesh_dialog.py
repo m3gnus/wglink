@@ -370,6 +370,8 @@ def _dialog_command(inputs):
             self.handlers = []
         def add(self, handler):
             self.handlers.append(handler)
+        def remove(self, handler):
+            self.handlers.remove(handler)
     initial, minimum = [], []
     command = types.SimpleNamespace(commandInputs=inputs, parentCommandDefinition=types.SimpleNamespace(name="Sources & Mesh…"),
         setDialogInitialSize=lambda *size: initial.append(size), setDialogMinimumSize=lambda *size: minimum.append(size),
@@ -433,8 +435,8 @@ def test_failed_construction_keeps_handlers_and_refuses_save_once(
             command.activate.handlers[0].notify(types.SimpleNamespace())
 
     def broken_build(inputs, state):
-        assert all(len(getattr(command, event).handlers) == 1 for event in events)
-        assert all(getattr(command, event).handlers[0] in module._handlers for event in events)
+        assert all(len(getattr(command, event).handlers) == (2 if event == "destroy" else 1) for event in events)
+        assert all(getattr(command, event).handlers[0] in [h for lifetime in module._command_handlers for _, h in lifetime.subscriptions] for event in events)
         assert state.construction_failed
         # Events can also arrive while inputs are still being constructed.
         refuse_partial_dialog()
@@ -1280,7 +1282,7 @@ def test_preview_repaints_after_fusion_rollback_without_survey_or_settings_write
     command, _initial, _minimum = _dialog_command(inputs)
     module.CommandCreatedHandler("source").notify(types.SimpleNamespace(command=command))
     [preview] = command.executePreview.handlers
-    assert isinstance(preview, dialog.MeshPreviewHandler) and preview in module._handlers
+    assert isinstance(preview, dialog.MeshPreviewHandler) and preview in [h for lifetime in module._command_handlers for _, h in lifetime.subscriptions]
     state = preview.state
     args = types.SimpleNamespace(command=command, isValidResult=True)
     preview.notify(args)  # before activation: nothing to show yet
@@ -1309,3 +1311,100 @@ def test_preview_repaints_after_fusion_rollback_without_survey_or_settings_write
     assert scene.faces[1].appearance.name == "MF"
     assert state.preview_failure is None
     assert (module.wglink_send._source_authoring_generation, module.wglink_send._mesh_authoring_generation) == generations
+
+
+@pytest.mark.parametrize("operation", ["source", "fem", "send", "solve"])
+def test_closed_dialogs_release_command_handlers_and_entity_state(scene, monkeypatch, operation):
+    import gc
+    import weakref
+
+    module = scene.module
+    monkeypatch.setattr(module, "_require_fem_regions", lambda: None)
+    monkeypatch.setattr(module, "_sync_anchor_choices", lambda *_: None)
+    monkeypatch.setattr(module, "_sync_preflight", lambda *_: None)
+    baseline = len(module._handlers)
+    retained = []
+    for _ in range(10):
+        inputs, _items = _building_inputs(module)
+        command, _, _ = _dialog_command(inputs)
+        module.CommandCreatedHandler(operation).notify(types.SimpleNamespace(command=command))
+        assert scene.ui.messages == []
+        execute = command.execute.handlers[0]
+        state = execute.mesh_state if operation == "source" else execute.fem_state if operation == "fem" else execute.send_state
+        retained.append(weakref.ref(state))
+        if operation in {"source", "fem"}:
+            state.loaded_body = scene.cabinet
+        for handler in list(command.destroy.handlers):
+            handler.notify(types.SimpleNamespace(command=command))
+        assert len(module._handlers) == baseline
+        assert not getattr(module, "_command_handlers", [])
+        if operation in {"source", "fem"}:
+            assert state.command is None
+            assert not getattr(state, "loaded_body", None)
+            assert not getattr(state, "context", {})
+        del execute, state, inputs, _items, command, handler
+    gc.collect()
+    assert all(ref() is None for ref in retained)
+
+
+def test_send_refresh_reuses_one_inventory_with_identical_preview(scene, monkeypatch):
+    import hashlib
+    import os
+    import time
+    from pathlib import Path
+
+    module = scene.module
+    send = module.wglink_send
+    inputs, items = _building_inputs(module)
+    command, _, _ = _dialog_command(inputs)
+    calls = {"walk": 0, "records": 0}
+    for name, key in (("_scope_walk", "walk"), ("_records_in_scope", "records")):
+        original = getattr(send, name)
+        def counted(*args, _original=original, _key=key, **kwargs):
+            calls[_key] += 1
+            return _original(*args, **kwargs)
+        monkeypatch.setattr(send, name, counted)
+    module.CommandCreatedHandler("send").notify(types.SimpleNamespace(command=command))
+    assert scene.ui.messages == []
+    opening_calls = dict(calls)
+    state = command.execute.handlers[0].send_state
+    before = json.dumps([items["preflight"].formattedText, state.findings], sort_keys=True).encode()
+    samples = []
+    for event_id in ("send_selection", "refresh_preflight"):
+        calls.update(walk=0, records=0)
+        command.inputChanged.handlers[0].notify(types.SimpleNamespace(
+            inputs=inputs, input=types.SimpleNamespace(id=event_id, value=True)))
+        samples.append(dict(calls))
+        after = json.dumps([items["preflight"].formattedText, state.findings], sort_keys=True).encode()
+        assert after == before
+    path = os.environ.get("WGLINK2_BENCH_PATH")
+    if path:
+        started = time.perf_counter()
+        for _ in range(100):
+            command.inputChanged.handlers[0].notify(types.SimpleNamespace(
+                inputs=inputs, input=types.SimpleNamespace(id="refresh_preflight", value=True)))
+        elapsed = time.perf_counter() - started
+        Path(path).write_text(json.dumps({"refreshes": 100, "seconds": elapsed,
+                                         "preview_sha256": hashlib.sha256(before).hexdigest(),
+                                         "preview_bytes": before.decode(), "inventories": samples}))
+    assert opening_calls == {"walk": 1, "records": 1}
+    assert samples == [{"walk": 1, "records": 1}] * 2
+
+
+def test_destroy_preserves_execute_handler_retained_by_backend_work(scene, monkeypatch):
+    module = scene.module
+    inputs, _ = _building_inputs(module)
+    command, _, _ = _dialog_command(inputs)
+    monkeypatch.setattr(module, "_sync_anchor_choices", lambda *_: None)
+    monkeypatch.setattr(module, "_sync_preflight", lambda *_: None)
+    module.CommandCreatedHandler("solve").notify(types.SimpleNamespace(command=command))
+    execute = command.execute.handlers[0]
+    execute.send_state.findings = [{"code": "mesh_ceiling"}]
+    continued = []
+    def resume():
+        continued.append((execute.operation, execute.send_state.findings))
+    for handler in list(command.destroy.handlers):
+        handler.notify(types.SimpleNamespace(command=command))
+    resume()
+    assert continued == [("solve", [{"code": "mesh_ceiling"}])]
+    assert not module._command_handlers

@@ -520,3 +520,54 @@ def test_explicit_commands_exchange_files_between_processes(tmp_path: Path, oper
         assert len(set(results[0]["ids"])) == 2
     else:
         assert results == [{"writes": ["req-1"], "outcome": "reconciled"}, {"published": 2}]
+
+
+def test_two_restored_processes_merge_history_under_one_file_lock(tmp_path):
+    ipc = tmp_path / "ipc"
+    ipc.mkdir()
+    worker = tmp_path / "history_worker.py"
+    worker.write_text(textwrap.dedent('''
+        import sys, time
+        from pathlib import Path
+        sys.path.insert(0, sys.argv[1])
+        import wglink_requests as r
+        ipc, label, go = Path(sys.argv[2]), sys.argv[3], Path(sys.argv[4])
+        tracker = r.RequestTracker()
+        tracker.restore(r.load_history(ipc))
+        (ipc / (label + ".ready")).touch()
+        deadline = time.monotonic() + 10
+        while not go.exists():
+            assert time.monotonic() < deadline
+            time.sleep(.001)
+        write = r.wglink_status.write_status_record
+        def delayed_write(*args):
+            time.sleep(.01)  # expose a read/merge/write race without serialization
+            return write(*args)
+        r.wglink_status.write_status_record = delayed_write
+        for i in range(10):
+            request = r.new_request(label + "-" + str(i), r.SEND, label)
+            tracker.begin(request, lambda payload: r.save(ipc, payload))
+        tracker.save(lambda payload: r.save(ipc, payload))
+    '''))
+    go = tmp_path / "go"
+    workers = [subprocess.Popen([sys.executable, str(worker), str(ADDIN), str(ipc), label, str(go)],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+               for label in ("a", "b")]
+    try:
+        deadline = time.monotonic() + 10
+        while not all((ipc / (label + ".ready")).exists() for label in ("a", "b")):
+            assert time.monotonic() < deadline
+            time.sleep(.001)
+        go.touch()
+        for process in workers:
+            stdout, stderr = process.communicate(timeout=15)
+            assert process.returncode == 0, stdout + stderr
+    finally:
+        for process in workers:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+    history = json.loads((ipc / ".fusion-request-history.json").read_text())
+    assert {e["requestId"] for e in history["entries"]} == {
+        label + "-" + str(i) for label in ("a", "b") for i in range(10)
+    }

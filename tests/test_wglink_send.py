@@ -3836,3 +3836,29 @@ def test_an_unresolvable_wrapper_is_refused_in_words_a_modeller_can_act_on(send_
     assert "wgi-gone" in text
     assert "defaulted to identity" not in text
     assert "nested" not in text
+
+
+@pytest.mark.parametrize("kind", ["painted", "missing_source", "scope_refusal", "linked_root", "linked_occurrence"])
+def test_refresh_inventory_preserves_preflight_values_and_refusals(send_module, monkeypatch, kind):
+    if kind.startswith("linked"):
+        design, app, occurrence = _linked_wrapper_document(send_module, token_lookup="equivalent-wrapper")
+        monkeypatch.setattr(send_module.wglink_core, "_design", lambda _app: design)
+        selection = occurrence if kind == "linked_occurrence" else "root"
+    else:
+        members = [body("Cabinet", faces=[face("HF" if kind == "painted" else "Steel")])]
+        if kind == "scope_refusal":
+            members = [body("Shell A", solid=False, faces=[face("HF")]), body("Shell B", solid=False)]
+        app = _design_of(component("Assembly", members), monkeypatch, send_module)
+        selection = "root"
+    options = {"selection": selection, "anchor_instance_id": "wgi-occ", "display_automatic_domain": True}
+    expected = send_module.preflight_scope(app, options)
+    inventory = {}
+    choices = send_module.inspect_scope(app, options, inventory=inventory)
+    assert choices == {"selection": expected["selection"], "instance_ids": expected["instance_ids"]}
+    original_walk = send_module._scope_walk
+    monkeypatch.setattr(send_module, "_scope_walk", lambda *_: pytest.fail("inventory was gathered twice"))
+    reused = send_module.preflight_scope(app, options, inventory=inventory)
+    assert json.dumps(reused, sort_keys=True).encode() == json.dumps(expected, sort_keys=True).encode()
+    monkeypatch.setattr(send_module, "_scope_walk", original_walk)
+    # A subsequent read-only preview also validates fresh state, just as execute does.
+    assert send_module.preflight_scope(app, options) == expected

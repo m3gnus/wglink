@@ -736,13 +736,15 @@ def _stamp_wrapper(component: object, payload: dict[str, str]) -> None:
         _set_attribute(component, "entity_token", token)
 
 
-def _direct_attributes(entity: object) -> dict[str, str]:
+def _direct_attributes(entity: object, *, strict: bool = False) -> dict[str, str]:
     result: dict[str, str] = {}
-    for attribute in _items(_attributes(entity)):
+    for attribute in _items(_attributes(entity, strict=strict), strict=strict):
         try:
             if attribute.groupName == ATTRIBUTE_GROUP:
                 result[str(attribute.name)] = str(attribute.value)
-        except Exception:  # noqa: BLE001
+        except Exception:
+            if strict:
+                raise
             continue
     return result
 
@@ -763,19 +765,30 @@ def _parent(attribute: object) -> object | None:
 
 @wglink_activity.counted(wglink_activity.LINK_RESOLUTION)
 def _link_records(design: adsk.fusion.Design) -> dict[str, dict[str, Any]]:
-    by_parent: dict[int, dict[str, Any]] = {}
+    by_parent: list[dict[str, Any]] = []
+    by_token: dict[str, dict[str, Any]] = {}
     for attribute in _all_link_attributes(design):
         parent = _parent(attribute)
         if parent is None:
             continue
-        entry = by_parent.setdefault(id(parent), {"entity": parent, "attrs": {}})
+        token = _entity_token(parent)
+        entry = by_token.get(token) if token else None
+        if entry is None:
+            entry = next((seen for seen in by_parent
+                          if _same_live_entity(parent, seen["entity"])
+                          or _same_fusion_entity(parent, seen["entity"], design)), None)
+        if entry is None:
+            entry = {"entity": parent, "attrs": {}}
+            by_parent.append(entry)
+        if token:
+            by_token[token] = entry
         try:
             entry["attrs"][str(attribute.name)] = str(attribute.value)
         except Exception:  # noqa: BLE001
             continue
 
     records: dict[str, dict[str, Any]] = {}
-    for entry in by_parent.values():
+    for entry in by_parent:
         attrs = entry["attrs"]
         # One parent can host several links: a root component carries one
         # ``link_<id>`` payload per root-fallback link. Each payload is its own
@@ -4574,14 +4587,6 @@ def set_link_name(
     }
 
 
-def _delete_attribute(attribute: object) -> bool:
-    try:
-        attribute.deleteMe()
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def _same_entity(left: object, right: object) -> bool:
     """Whether two Fusion handles name the same object.
 
@@ -4597,6 +4602,53 @@ def _same_entity(left: object, right: object) -> bool:
         return True
     token = _entity_token(left)
     return bool(token) and token == _entity_token(right)
+
+
+def _same_live_entity(left: object, right: object) -> bool:
+    """Whether two Fusion handles wrap one entity.
+
+    Fusion mints a Python wrapper per lookup, and Autodesk documents that the
+    token strings two reads report for one entity may differ -- compare the
+    entities, it says, not the strings. Fusion's own wrapper equality does
+    that. ``_same_entity``'s token comparison is only the fallback for a handle
+    that is not a Fusion object.
+    """
+
+    if left is None or right is None:
+        return False
+    if left is right:
+        return True
+    base = getattr(adsk.core, "Base", None)
+    if isinstance(base, type) and isinstance(left, base) and isinstance(right, base):
+        try:
+            return bool(left == right)
+        except Exception:  # noqa: BLE001 - fall back to the entity token
+            pass
+    return _same_entity(left, right)
+
+
+def _same_fusion_entity(left: object, right: object, design: object) -> bool:
+    """Best-effort identity check across Fusion's fresh Python wrappers."""
+
+    left = getattr(left, "nativeObject", None) or left
+    right = getattr(right, "nativeObject", None) or right
+    # Autodesk documents that one entity's token string may change. Resolve
+    # each token and compare the entities returned; never compare the strings.
+    resolved: list[list[object]] = []
+    for candidate in (left, right):
+        aliases = [candidate]
+        token = _entity_token(candidate)
+        if token:
+            aliases.extend(_find_by_token(design, token))
+        resolved.append(aliases)
+    for candidate in resolved[0]:
+        for target in resolved[1]:
+            try:
+                if candidate is target or candidate == target:
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+    return False
 
 
 def _parent_component(entity: object) -> object | None:
@@ -4710,38 +4762,43 @@ def detach(
                 "the link, or Detach with no target to unmanage every copy."
             )
         entities = scoped
-    removed: list[dict[str, str]] = []
-    wrapper_name = _wrapper_attribute_name(instance_id)
-    for entity in entities:
-        attrs = _direct_attributes(entity)
-        direct_owner = attrs.get("instance_id") == instance_id
-        names = list(attrs) if direct_owner else [wrapper_name]
-        for name in names:
-            if name not in attrs:
-                continue
-            attribute = _attribute(entity, name)
-            if attribute is None:
-                continue
-            if preview or _delete_attribute(attribute):
-                removed.append({"entity": _entity_label(entity), "name": name})
-        if not direct_owner and wrapper_name in attrs:
-            # A root component may host more than one fallback link.  Keep its
-            # shared entity-token cross-check while any wrapper record remains.
-            # A preview deletes nothing, so it has to reason about the state
-            # the real call would have left rather than re-read the live one.
-            remaining = (
-                {name: value for name, value in attrs.items() if name != wrapper_name}
-                if preview
-                else _direct_attributes(entity)
-            )
-            if not any(name.startswith("link_") for name in remaining):
-                token_attribute = _attribute(entity, "entity_token")
-                if token_attribute is not None and (
-                    preview or _delete_attribute(token_attribute)
-                ):
-                    removed.append(
-                        {"entity": _entity_label(entity), "name": "entity_token"}
-                    )
+    # Use the existing document-edit owner, imported here to keep core/send's
+    # module initialization acyclic. Plan every deletion before the first write.
+    if __package__:
+        from . import wglink_send
+    else:
+        import wglink_send
+
+    def deletion_set():
+        planned = []
+        wrapper_name = _wrapper_attribute_name(instance_id)
+        for entity in entities:
+            attrs = _direct_attributes(entity, strict=True)
+            direct_owner = attrs.get("instance_id") == instance_id
+            names = list(attrs) if direct_owner else [wrapper_name]
+            if not direct_owner and wrapper_name in attrs:
+                remaining = [name for name in attrs if name != wrapper_name]
+                if not any(name.startswith("link_") for name in remaining):
+                    names.append("entity_token")
+            planned.extend((entity, name) for name in names if name in attrs)
+        return planned
+
+    planned = wglink_send.read_for_edit(
+        "detach the Waveguide Generator model", deletion_set, retry="Detach again."
+    )
+    if not preview:
+        def prepare(edit):
+            for entity, name in planned:
+                edit.remember_attribute(entity, name)
+
+        def mutate(edit):
+            for entity, name in planned:
+                edit.set_attribute(entity, name, None)
+
+        wglink_send.document_edit(
+            "detach the Waveguide Generator model", prepare, mutate, retry="Detach again."
+        )
+    removed = [{"entity": _entity_label(entity), "name": name} for entity, name in planned]
     warnings: list[str] = []
     clashing = record.get("clashing_objects") or []
     if clashing and target is None:

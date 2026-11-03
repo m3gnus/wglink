@@ -1252,16 +1252,22 @@ def _records_in_scope(design: object, walk: dict[str, Any]) -> list[dict[str, An
     return sorted(chosen, key=lambda item: str(item["instance_id"]))
 
 
-def inspect_scope(app: object, options: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Return selection and linked-instance choices without exporting anything."""
-
-    opts = dict(options or {})
+def _scope_inventory(app: object, selection: object) -> dict[str, Any]:
+    """One refresh's Fusion handles; never cached between dialog events."""
     design = wglink_core._design(app)
-    walk = _scope_walk(design, opts.get("selection"))
-    records = _records_in_scope(design, walk)
+    walk = _scope_walk(design, selection)
+    return {"design": design, "walk": walk, "records": _records_in_scope(design, walk)}
+
+
+def inspect_scope(app: object, options: dict[str, Any] | None = None,
+                  *, inventory: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return choices, optionally lending this refresh's inventory to preflight."""
+    found = _scope_inventory(app, (options or {}).get("selection"))
+    if inventory is not None:
+        inventory.update(found)
     return {
-        "selection": walk["selection"],
-        "instance_ids": [record["instance_id"] for record in records],
+        "selection": found["walk"]["selection"],
+        "instance_ids": [record["instance_id"] for record in found["records"]],
     }
 
 
@@ -1328,7 +1334,8 @@ def _source_faces(
 
 
 def preflight_scope(app: object, options: dict[str, Any] | None = None,
-                    *, authoring_context: dict[str, Any] | None = None) -> dict[str, Any]:
+                    *, authoring_context: dict[str, Any] | None = None,
+                    inventory: dict[str, Any] | None = None) -> dict[str, Any]:
     """Gather what the Send and Solve dialogs preview, without exporting.
 
     Deliberately fail-soft: a scope or source problem is reported as text for
@@ -1339,9 +1346,8 @@ def preflight_scope(app: object, options: dict[str, Any] | None = None,
     """
 
     opts = dict(options or {})
-    design = wglink_core._design(app)
-    walk = _scope_walk(design, opts.get("selection"))
-    records = _records_in_scope(design, walk)
+    found = inventory if inventory is not None else _scope_inventory(app, opts.get("selection"))
+    design, walk, records = found["design"], found["walk"], found["records"]
     instance_ids = [str(record["instance_id"]) for record in records]
     requested_anchor = _nullable(opts.get("anchor_instance_id"))
     if len(instance_ids) == 1:
@@ -2074,27 +2080,7 @@ _CONTRACT_DATUM_KINDS = {
 _DATUM_KINDS = frozenset(kind for kind, _collection in _CONTRACT_DATUM_KINDS.values())
 
 
-def _same_live_entity(left: object, right: object) -> bool:
-    """Whether two Fusion handles wrap one entity.
-
-    Fusion mints a Python wrapper per lookup, and Autodesk documents that the
-    token strings two reads report for one entity may differ -- compare the
-    entities, it says, not the strings. Fusion's own wrapper equality does
-    that. ``_same_entity``'s token comparison is only the fallback for a handle
-    that is not a Fusion object.
-    """
-
-    if left is None or right is None:
-        return False
-    if left is right:
-        return True
-    base = getattr(adsk.core, "Base", None)
-    if isinstance(base, type) and isinstance(left, base) and isinstance(right, base):
-        try:
-            return bool(left == right)
-        except Exception:  # noqa: BLE001 - fall back to the entity token
-            pass
-    return _same_entity(left, right)
+_same_live_entity = wglink_core._same_live_entity
 
 
 def _distinct_entities(entities: list[object]) -> list[object]:
@@ -4026,28 +4012,7 @@ _ORIGIN_PLANE_ATTRIBUTES = {
 _AXIS_FOR_ORIGIN_PLANE = {"YZ": 0, "XZ": 1, "XY": 2}
 
 
-def _same_fusion_entity(left: object, right: object, design: object) -> bool:
-    """Best-effort identity check across Fusion's fresh Python wrappers."""
-
-    left = getattr(left, "nativeObject", None) or left
-    right = getattr(right, "nativeObject", None) or right
-    # Autodesk documents that one entity's token string may change. Resolve
-    # each token and compare the entities returned; never compare the strings.
-    resolved: list[list[object]] = []
-    for candidate in (left, right):
-        aliases = [candidate]
-        token = wglink_core._entity_token(candidate)
-        if token:
-            aliases.extend(wglink_core._find_by_token(design, token))
-        resolved.append(aliases)
-    for candidate in resolved[0]:
-        for target in resolved[1]:
-            try:
-                if candidate is target or candidate == target:
-                    return True
-            except Exception:  # noqa: BLE001
-                continue
-    return False
+_same_fusion_entity = wglink_core._same_fusion_entity
 
 
 def _origin_plane_name(entity: object, component: object, design: object) -> str | None:

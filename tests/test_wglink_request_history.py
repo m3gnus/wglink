@@ -362,3 +362,136 @@ window.fusionJavaScriptHandler.handle('status', JSON.stringify(view));
 assert.equal(ids.history.children[0].children[0].textContent, name + ' / Solve / ' + new Date(0).toLocaleString());
 '''
     subprocess.run([node, "-e", harness + script + after], check=True, capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("mode", ["same", "equal", "resolved"])
+def test_unsaved_identity_survives_token_drift_switch_and_first_save(monkeypatch, tmp_path, mode):
+    from types import SimpleNamespace as NS
+    fixture = _following(monkeypatch, tmp_path, "WGLink_local_drift")
+    module = fixture.module
+
+    class Base:
+        pass
+
+    class Root(Base):
+        def __init__(self, target):
+            self.target = target
+            self.initial_token = target.token
+
+        @property
+        def entityToken(self):
+            return self.initial_token if mode == "resolved" else self.target.token
+
+        def __eq__(self, other):
+            return mode != "resolved" and isinstance(other, Root) and self.target is other.target
+
+    target = NS(token="root-token-a")
+    root = Root(target)
+
+    class Design:
+        @property
+        def rootComponent(self):
+            return Root(target) if mode != "same" else root
+
+        def findEntityByToken(self, _token):
+            return [target]
+
+    monkeypatch.setattr(module.wglink_core.adsk.core, "Base", Base, raising=False)
+    document = NS(dataFile=None)
+    app = NS(activeDocument=document, activeProduct=Design())
+    monkeypatch.setattr(module, "_app", lambda: app)
+    local_id = module._active_document_id()
+    module._set_pending_settings(local_id, {"frequencyCount": 41})
+    module._follow(entry("drift-request", local_id))
+    target.token = "root-token-b"
+    assert module._active_document_id() == local_id
+    assert module._pending_values(local_id) == {"frequencyCount": 41}
+    original_design = app.activeProduct
+    app.activeDocument = NS(dataFile=None)
+    app.activeProduct = NS(rootComponent=NS(entityToken="another-root"))
+    assert module._active_document_id() != local_id
+    app.activeDocument, app.activeProduct = document, original_design
+    assert module._active_document_id() == local_id
+    document.dataFile = NS(id="saved-after-drift")
+    saved_id = module._active_document_id()
+    assert saved_id == "fusion:saved-after-drift"
+    assert module._pending_values(saved_id) == {"frequencyCount": 41}
+    assert local_id not in module._pending_settings
+    assert module._requests.get("drift-request")["documentId"] == saved_id
+    changed_at = module._pending_settings[saved_id]["frequencyCount"]["after"]
+    module._active_document_id()
+    assert module._pending_settings[saved_id]["frequencyCount"]["after"] == changed_at
+    assert next(e for e in requests.load_history(fixture.ipc) if e["requestId"] == "drift-request")["documentId"] == saved_id
+
+
+def test_restored_sessions_merge_new_history_and_preserve_newer_updates(tmp_path):
+    save = lambda payload: requests.save(tmp_path, payload)
+    seed = entry("shared")
+    requests.save(tmp_path, seed)
+    a, b = requests.RequestTracker(), requests.RequestTracker()
+    a.restore(requests.load_history(tmp_path))
+    b.restore(requests.load_history(tmp_path))
+    a.begin(entry("request-a"), save)
+    b.begin(entry("request-b"), save)
+    previous = a.get("shared")
+    a.update_entry(previous, {**previous, "quiet": True}, save)
+    b.save(save)
+    history = {e["requestId"]: e for e in requests.load_history(tmp_path)}
+    assert set(history) == {"shared", "request-a", "request-b"}
+    assert history["shared"]["quiet"] is True
+
+
+def test_clear_finished_tombstones_survive_stale_session_saves(tmp_path):
+    save = lambda payload: requests.save(tmp_path, payload)
+    requests.save(tmp_path, {"entries": [entry("done", state="solved"), entry("live")]})
+    a, b = requests.RequestTracker(), requests.RequestTracker()
+    a.restore(requests.load_history(tmp_path))
+    b.restore(requests.load_history(tmp_path))
+    a.clear_finished(save)
+    b.begin(entry("other"), save)
+    old = b.get("done")
+    b.update_entry(old, {**old, "quiet": True}, save)
+    assert {e["requestId"] for e in requests.load_history(tmp_path)} == {"live", "other"}
+
+
+def test_clear_finished_does_not_remove_another_sessions_active_export(tmp_path):
+    save = lambda payload: requests.save(tmp_path, payload)
+    a = requests.RequestTracker()
+    a.begin(requests.new_request("exporting", requests.SEND, "Horn"), save)
+    b = requests.RequestTracker()
+    b.restore(requests.load_history(tmp_path))  # recovery calls an unfinished export notSent
+    b.clear_finished(save)
+    submitted = requests.submitted(a.current(), manifest_sha256="a" * 64,
+                                  acknowledgement=True, request_status=True, confirmed=True)
+    a.replace(submitted, save)
+    [recovered] = requests.load_history(tmp_path)
+    assert recovered["requestId"] == "exporting"
+    assert recovered["local"] == requests.SUBMITTED
+
+
+def test_newer_wg_sequence_wins_over_a_later_stale_snapshot_edit(tmp_path):
+    save = lambda payload: requests.save(tmp_path, payload)
+    seed = entry("shared", state="solving")
+    requests.save(tmp_path, seed)
+    a, b = requests.RequestTracker(), requests.RequestTracker()
+    a.restore(requests.load_history(tmp_path))
+    b.restore(requests.load_history(tmp_path))
+    previous = a.get("shared")
+    a.update_entry(previous, {**previous, "status": {**previous["status"], "seq": 2, "state": "solved"}}, save)
+    stale = b.get("shared")
+    b.update_entry(stale, {**stale, "quiet": True}, save)
+    [latest] = requests.load_history(tmp_path)
+    assert latest["status"]["seq"] == 2
+    assert latest["status"]["state"] == "solved"
+
+
+def test_clear_finished_can_remove_a_recovered_abandoned_export(tmp_path):
+    tracker = requests.RequestTracker()
+    save = lambda payload: requests.save(tmp_path, payload)
+    tracker.begin(requests.new_request("abandoned", requests.SEND, "Horn"), save)
+    recovered = requests.RequestTracker()
+    recovered.restore(requests.load_history(tmp_path))
+    assert recovered.current()["local"] == requests.NOT_SENT
+    recovered.clear_finished(save)
+    tracker.save(save)  # an old exporting snapshot cannot resurrect it
+    assert requests.load_history(tmp_path) == []
