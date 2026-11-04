@@ -7,17 +7,17 @@ main thread; this module only reads and claims request files.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import os
 from pathlib import Path
 from typing import Any, Mapping, TypeVar
 import uuid
 
 if __package__:
     from .wglink_inbox import _PLAIN_ID, _read_json
-    from . import wglink_protocol, wglink_status
+    from . import wglink_protocol
 else:
     from wglink_inbox import _PLAIN_ID, _read_json
     import wglink_protocol
-    import wglink_status
 
 REQUEST_SCHEMA_VERSION = wglink_protocol.FUSION_REQUEST_DELIVERY_VERSION
 RETURN_REQUESTS_DIRECTORY = ".fusion-return-requests"
@@ -84,21 +84,6 @@ class PendingReturnRequest:
         return self.request_id
 
 
-@dataclass(frozen=True)
-class PendingOpenDocument:
-    """Open a live cloud document, using the handoff's ordering and claim owner."""
-
-    marker_path: Path
-    request_id: str
-    delivery_sequence: int
-    session_id: str
-    document_id: str
-
-    @property
-    def operation_id(self) -> str:
-        return self.request_id
-
-
 def _sequence(payload: Any) -> int | None:
     value = payload.get(SEQUENCE_FIELD) if isinstance(payload, Mapping) else None
     if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
@@ -114,7 +99,22 @@ def _request_identity(payload: Any) -> tuple[str, int] | None:
     version's requests, and is left where it is.
     """
 
-    return wglink_protocol.fusion_request_identity(payload)
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("schemaVersion") != REQUEST_SCHEMA_VERSION
+        or payload.get("target") != "fusion360"
+    ):
+        return None
+    request_id = payload.get("requestId")
+    sequence = _sequence(payload)
+    if (
+        not isinstance(request_id, str)
+        or not _PLAIN_ID.fullmatch(request_id)
+        or payload.get("operationId") != request_id
+        or sequence is None
+    ):
+        return None
+    return request_id, sequence
 
 
 def read_return_request(
@@ -149,7 +149,7 @@ def return_request_from_document(
 
 def read_pending_handoff(
     marker_path: Path, *, bundle_root: Path | None = None
-) -> PendingHandoff | PendingOpenDocument | None:
+) -> PendingHandoff | None:
     """Read one handoff without trusting an arbitrary bundle path."""
 
     return handoff_from_document(
@@ -159,19 +159,11 @@ def read_pending_handoff(
 
 def handoff_from_document(
     payload: Any, *, bundle_root: Path | None, marker_path: Path
-) -> PendingHandoff | PendingOpenDocument | None:
+) -> PendingHandoff | None:
     """Parse a version 3 handoff and validate its path against the bundle root."""
 
     identity = _request_identity(payload)
     if identity is None:
-        return None
-    if payload.get("kind") == wglink_protocol.OPEN_DOCUMENT_KIND:
-        frame = wglink_protocol.validate_open_document_request(payload)
-        if frame is None:
-            return None
-        return PendingOpenDocument(marker_path, identity[0], identity[1],
-                                   frame["sessionId"], frame["documentId"])
-    if payload.get("kind") is not None:
         return None
     bundle_id = payload.get("bundleId")
     export_id = payload.get("exportId")
@@ -231,7 +223,7 @@ def acknowledge_return_request(request: PendingReturnRequest) -> bool:
     return _remove_claim(request.marker_path)
 
 
-def acknowledge_handoff(handoff: PendingHandoff | PendingOpenDocument | UnusableHandoff) -> bool:
+def acknowledge_handoff(handoff: PendingHandoff | UnusableHandoff) -> bool:
     """Retire a handled handoff: delete its claim."""
 
     return _remove_claim(handoff.marker_path)
@@ -279,7 +271,7 @@ class UnusableHandoff:
     state: tuple[str, int, int]
 
 
-_Pending = TypeVar("_Pending", PendingHandoff, PendingReturnRequest, PendingOpenDocument, UnusableHandoff)
+_Pending = TypeVar("_Pending", PendingHandoff, PendingReturnRequest, UnusableHandoff)
 
 
 def unusable_handoffs(ipc: Path, *, bundle_root: Path) -> list[UnusableHandoff]:
@@ -338,32 +330,19 @@ def next_return_request(
 
 
 def next_pending_handoff(
-    ipc_folder: Path, *, bundle_root: Path | None, document_id: str | None = None,
-    session_id: str | None = None
-) -> PendingHandoff | PendingOpenDocument | None:
-    """Next handoff for this document; leave other destinations unclaimed.
-
-    ``None`` permits an unfiltered inventory. The consumer passes its live
-    identity (or an empty string with no document), then checks again at execution.
-    Cloud opens are filtered by session before claiming.
-    """
+    ipc_folder: Path, *, bundle_root: Path | None
+) -> PendingHandoff | None:
+    """The next handoff, in sequence order, or None; claim it before it runs."""
 
     for path in _requests_in_order(Path(ipc_folder) / HANDOFFS_DIRECTORY):
         handoff = read_pending_handoff(path, bundle_root=bundle_root)
-        if isinstance(handoff, PendingOpenDocument) and handoff.session_id != session_id:
-            continue
-        if handoff is not None and _matches_document(handoff, document_id):
+        if handoff is not None:
             return handoff
     return None
 
 
-def _matches_document(handoff: PendingHandoff | PendingOpenDocument, document_id: str | None) -> bool:
-    return (isinstance(handoff, PendingOpenDocument) or document_id is None or not handoff.expected_document_id
-            or handoff.expected_document_id == document_id)
-
-
 def discard_superseded_handoffs(
-    ipc_folder: Path, *, bundle_root: Path | None, document_id: str | None = None
+    ipc_folder: Path, *, bundle_root: Path | None
 ) -> list[str]:
     """Drop every unstarted update a newer update for the same target replaces.
 
@@ -379,8 +358,7 @@ def discard_superseded_handoffs(
     handoffs = [
         handoff
         for path in _requests_in_order(Path(ipc_folder) / HANDOFFS_DIRECTORY)
-        if isinstance((handoff := read_pending_handoff(path, bundle_root=bundle_root)), PendingHandoff)
-        and _matches_document(handoff, document_id)
+        if (handoff := read_pending_handoff(path, bundle_root=bundle_root)) is not None
     ]
     newest: dict[tuple[str, str], PendingHandoff] = {}
     for handoff in handoffs:
@@ -400,7 +378,7 @@ def discard_superseded_handoffs(
 
 @dataclass(frozen=True)
 class LeftoverClaim:
-    """An inventoried claim, potentially still owned by a live process.
+    """A claim an earlier session made and never finished.
 
     Claims are hidden from every listing, so nothing else will ever look at
     one again. ``channel`` is ``"handoff"`` or ``"returnRequest"``; the other
@@ -414,12 +392,10 @@ class LeftoverClaim:
     design_id: str
     expected_document_id: str
     expected_instance_id: str
-    session_id: str = ""
-    kind: str = ""
 
 
 def leftover_claims(ipc_folder: Path) -> list[LeftoverClaim]:
-    """Inventory hidden claims; the caller must prove owner termination."""
+    """Every claim left in WG's request folders by an interrupted session."""
 
     found: list[LeftoverClaim] = []
     for directory, channel in (
@@ -435,60 +411,27 @@ def leftover_claims(ipc_folder: Path) -> list[LeftoverClaim]:
             continue
         for path in paths:
             payload = _read_json(path)
-            found.append(_claim_from_document(path, channel, payload))
+            fields = payload if isinstance(payload, Mapping) else {}
+            found.append(
+                LeftoverClaim(
+                    path=path,
+                    channel=channel,
+                    request_id=str(fields.get("requestId") or ""),
+                    export_id=str(fields.get("exportId") or ""),
+                    design_id=str(fields.get("designId") or ""),
+                    expected_document_id=str(
+                        fields.get("expectedDocumentId") or fields.get("documentId") or ""
+                    ),
+                    expected_instance_id=str(
+                        fields.get("expectedInstanceId") or fields.get("instanceId") or ""
+                    ),
+                )
+            )
     return found
 
 
-def _claim_from_document(path: Path, channel: str, payload: Any) -> LeftoverClaim:
-    fields = payload if isinstance(payload, Mapping) else {}
-    return LeftoverClaim(
-        path=path, channel=channel,
-        request_id=str(fields.get("requestId") or ""),
-        export_id=str(fields.get("exportId") or ""),
-        design_id=str(fields.get("designId") or ""),
-        expected_document_id=str(
-            fields.get("recoveryDocumentId") or fields.get("expectedDocumentId")
-            or fields.get("documentId") or ""
-        ),
-        expected_instance_id=str(fields.get("expectedInstanceId") or fields.get("instanceId") or ""),
-        session_id=str(fields.get("sessionId") or ""),
-        kind=str(fields.get("kind") or ""),
-    )
-
-
-def refresh_leftover_claim(claim: LeftoverClaim) -> LeftoverClaim | None:
-    """Re-read after owner termination; confirmed absence raises FileNotFoundError."""
-    try:
-        payload = _read_json(claim.path, raise_io_errors=True)
-    except FileNotFoundError:
-        raise
-    except OSError:
-        return None
-    if _request_identity(payload) is None:
-        return None  # Unreadable or unrecognized content proves no outcome.
-    return _claim_from_document(claim.path, claim.channel, payload)
-
-
 def remove_leftover_claim(claim: LeftoverClaim) -> bool:
-    return wglink_protocol.claim_owner_terminated(claim.path.name) and _remove_claim(claim.path)
-
-
-def bind_handoff_destination(handoff: PendingHandoff, document_id: str | None) -> None:
-    """Persist the newly created document identity before any model mutation.
-
-    The status record writer supplies file fsync, atomic replacement and POSIX
-    directory fsync. A failed binding stops execution and retains the claim.
-    """
-    path = handoff.marker_path
-    payload = _read_json(path)
-    if (not document_id or not path.name.startswith(CLAIM_PREFIX)
-            or not isinstance(payload, Mapping)
-            or _request_identity(payload) != (handoff.request_id, handoff.delivery_sequence)):
-        raise OSError("Could not identify this insert's claimed destination. "
-                      "Inspect the new Fusion document before sending again.")
-    wglink_status.write_status_record(path.parent, path.name, {
-        **payload, "recoveryDocumentId": document_id,
-    })
+    return _remove_claim(claim.path)
 
 
 def outdated_wg_requests(ipc_folder: Path) -> list[str]:
@@ -528,11 +471,10 @@ def claim_request(pending: _Pending) -> _Pending | None:
         return None
     source = pending.marker_path
     claim = source.with_name(
-        f"{CLAIM_PREFIX}{pending.request_id}-{uuid.uuid4().hex[:12]}-"
-        f"{wglink_protocol.claim_owner_suffix()}.json"
+        f"{CLAIM_PREFIX}{pending.request_id}-{uuid.uuid4().hex[:12]}.json"
     )
     try:
-        wglink_protocol.take_by_rename(source, claim)
+        os.rename(source, claim)
     except OSError:
         return None
     if isinstance(pending, UnusableHandoff):
@@ -549,7 +491,7 @@ def claim_request(pending: _Pending) -> _Pending | None:
         )
     if not matches:
         try:
-            wglink_protocol.take_by_rename(claim, source)
+            os.rename(claim, source)
         except OSError:
             pass
         return None
@@ -564,7 +506,7 @@ def release_claim(pending: _Pending) -> bool:
         return False
     source = claim.with_name(f"{pending.request_id}.json")
     try:
-        wglink_protocol.take_by_rename(claim, source)
+        os.rename(claim, source)
     except OSError:
         return False
     return True

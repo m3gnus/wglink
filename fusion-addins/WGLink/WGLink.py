@@ -4268,22 +4268,17 @@ def _publish_fusion_status(snapshot: dict[str, object] | None = None) -> bool:
     return True
 
 
-def _pending_handoff() -> wglink_handoff.PendingHandoff | wglink_handoff.PendingOpenDocument | None:
+def _pending_handoff() -> wglink_handoff.PendingHandoff | None:
     global _wg_request_memo
     _wg_request_memo = None
     ipc = wglink_workspace.ipc_folder(create=True)
     bundles = wglink_workspace.bundle_folder()
     if ipc is None or bundles is None:
         return None
-    document_id = str(_active_document_id() or "")
-    for request_id in wglink_handoff.discard_superseded_handoffs(
-        ipc, bundle_root=bundles, document_id=document_id
-    ):
+    for request_id in wglink_handoff.discard_superseded_handoffs(ipc, bundle_root=bundles):
         # Visible in the heartbeat: which request was dropped, and why.
         _note_outcome("handoff", request_id, "superseded")
-    handoff = wglink_handoff.next_pending_handoff(
-        ipc, bundle_root=bundles, document_id=document_id, session_id=_watch_session_id
-    )
+    handoff = wglink_handoff.next_pending_handoff(ipc, bundle_root=bundles)
     if handoff is None:
         # An absent result alone proves nothing: a valid file's read may have
         # failed transiently. Only successful validation can suppress wakeups.
@@ -4651,10 +4646,6 @@ def _consume_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
     handoff = claimed
     retire_claim = True
     try:
-        if isinstance(handoff, wglink_handoff.PendingOpenDocument):
-            _handoff_attempted_id = attempt_key
-            _execute_open_document(handoff)
-            return HANDLED
         # Destination is a live guard, not heartbeat-cached identity. The snapshot
         # may already be stale if the user switched documents during this tick.
         issue = _insert_handoff_issue(handoff, _active_document_id())
@@ -4700,9 +4691,6 @@ def _consume_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
         new_document_id = None
         if create_new:
             new_document_id = _active_document_id()
-            retire_claim = False
-            wglink_handoff.bind_handoff_destination(handoff, new_document_id)
-            retire_claim = True
             snapshot = None
         _handoff_attempted_id = attempt_key
         _execute_handoff(handoff, snapshot, new_document_id=new_document_id)
@@ -4719,49 +4707,6 @@ def _consume_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
     finally:
         if retire_claim:
             wglink_handoff.acknowledge_handoff(handoff)
-
-
-def _execute_open_document(request: wglink_handoff.PendingOpenDocument) -> None:
-    """Fusion main thread only, after the shared handoff idle gate and claim."""
-    trace = _begin_request("handoff", request.operation_id, DELIVERY)
-    outcome, message = "refused", ""
-    try:
-        _require_compatible_wg()
-        if request.session_id != _watch_session_id:
-            message = "Fusion restarted before this open request arrived. Choose Open in Fusion in WG again."
-            return
-        _note_outcome("handoff", request.operation_id, "claimed")
-        _publish_fusion_status()
-        app = _app()
-        # Check open tabs first: even offline, an already open document can
-        # be activated without resolving its cloud record again.
-        for document in app.documents:
-            data_file = document.dataFile
-            if data_file is not None and data_file.id == request.document_id:
-                if document.activate() is False:
-                    message = wglink_protocol.OPEN_DOCUMENT_UNAVAILABLE
-                    return
-                outcome, message = "applied", "Activated the cloud document in Fusion."
-                return
-        data_file = app.data.findFileById(request.document_id)
-        if data_file is None or app.documents.open(data_file) is None:
-            message = wglink_protocol.OPEN_DOCUMENT_UNAVAILABLE
-            return
-        outcome, message = "applied", "Opened the cloud document in Fusion."
-    except wglink_text.UserFacing as exc:
-        message = wglink_text.user_message(exc, action="open", request_id=request.request_id)
-    except RuntimeError:
-        # Fusion reports unavailable cloud data (including offline/hub access)
-        # as RuntimeError. Never expose its raw API exception as user text.
-        message = wglink_protocol.OPEN_DOCUMENT_UNAVAILABLE
-    except Exception as exc:  # noqa: BLE001 - program faults go to diagnostics
-        outcome = "failed"
-        message = "Fusion could not finish opening this document. Try again; the problem has been recorded."
-        _report_error("Opening the WG cloud document", PANEL_NAME, exc,
-                      request_id=request.request_id)
-    finally:
-        trace.update(outcome=outcome, message=message)
-        _note_outcome("handoff", request.operation_id, outcome, message=message)
 
 
 def _execute_handoff(
@@ -4930,12 +4875,11 @@ def _sweep_leftover_claims(snapshot: dict[str, object]) -> None:
     claimed it, and a handoff is reconciled against the document, read-only.
     Its evidence on a link means it applied; the applying marker without
     evidence means it was interrupted, which needs recovery and is reported;
-    neither in its known destination means it never started, and WG's user
-    sends it again. A live or unverifiable owner is always left alone.
+    neither means it never started, and WG's user sends it again.
 
-    Without positive operation evidence, a claim for another or an unknown
-    document is kept. With another document open, absence of evidence cannot
-    establish the answers above. Reporting "never
+    **A claim whose document is not the active one is kept, not discarded.**
+    Reconciliation is a read of that exact document, so with another one open
+    none of the three answers above can be established. Reporting "never
     started" there would cancel an operation that may have applied, or may
     need recovery, and it would collapse *target document unavailable* into
     *operation never started*. Such a claim stays on disk and is settled when
@@ -4967,22 +4911,16 @@ def _settle_file_claims(
     deferred: list[object] = []
     evidence = _link_evidence(snapshot)
     for claim in claims:
-        if not wglink_protocol.claim_owner_terminated(claim.path.name):
-            deferred.append(claim)
-            continue
-        try:
-            refreshed = wglink_handoff.refresh_leftover_claim(claim)
-        except FileNotFoundError:
-            # The owner may have completed and retired it after our initial
-            # inventory. Forget the cached entry without inventing an outcome.
-            continue
-        if refreshed is None:
-            deferred.append(claim)
-            continue
-        claim = refreshed
-        reconcilable = (claim.channel == "handoff" and bool(claim.request_id)
-                        and claim.kind != wglink_protocol.OPEN_DOCUMENT_KIND)
-        if reconcilable and evidence is None:
+        reconcilable = claim.channel == "handoff" and bool(claim.request_id)
+        if reconcilable and (
+            evidence is None
+            or (
+                claim.expected_document_id
+                and claim.expected_document_id != snapshot.get("document_id")
+            )
+        ):
+            # Kept, never discarded: with no reading of this document's links
+            # there is no evidence either way.
             deferred.append(claim)
             continue
         outcome = "discarded"
@@ -4995,21 +4933,14 @@ def _settle_file_claims(
                     _refusal_text(_RECOVERY_REQUIRED_TEXT, _HANDOFF_RETRY_HINT),
                     f"{PANEL_NAME} update interrupted",
                 )
-            elif (not claim.expected_document_id
-                  or claim.expected_document_id != snapshot.get("document_id")):
-                # Positive operation evidence above survives a document's first
-                # save (local -> saved ID). Without it, only the bound destination
-                # can establish non-execution; an unbound insert stays unknown.
-                deferred.append(claim)
-                continue
         if wglink_handoff.remove_leftover_claim(claim):
             _note_outcome(claim.channel, claim.request_id or claim.path.name, outcome)
     _deferred_file_claims[:] = deferred
     if deferred and announce:
         _log(
-            f"The Waveguide Generator add-in is holding {len(deferred)} WG claim(s) awaiting "
-            "owner termination or destination evidence. Close the owning Fusion process and "
-            "open the destination document to settle them; it never re-runs one."
+            f"The Waveguide Generator add-in is holding {len(deferred)} interrupted WG update(s) whose Fusion "
+            "document is not open. Open that document to let the Waveguide Generator add-in settle them; it "
+            "never re-runs one."
         )
 
 
