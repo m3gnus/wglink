@@ -77,7 +77,11 @@ def claim_owner_terminated(name: str) -> bool:
     if os.name != "posix":
         return False
     try:
-        os.kill(pid, 0)
+        # Read process existence without a signal API. A live or reused PID
+        # has a process group; only ESRCH proves that this owner is gone.
+        # Keep this shared probe separate from termination of children WGLink
+        # started, which belongs exclusively to the containment owner.
+        os.getpgid(pid)
     except ProcessLookupError:
         return True
     except (OSError, OverflowError):

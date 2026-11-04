@@ -146,8 +146,34 @@ def test_inaccessible_claim_owner_is_unverifiable(monkeypatch, tmp_path):
     monkeypatch.setattr(m.wglink_protocol, "sys", types.SimpleNamespace(platform="darwin"))
     def denied(*_):
         raise PermissionError("owner is not inspectable")
-    monkeypatch.setattr(m.wglink_protocol.os, "kill", denied)
+    monkeypatch.setattr(m.wglink_protocol.os, "getpgid", denied, raising=False)
     assert not m.wglink_protocol.claim_owner_terminated(".wglink-claim-req-1-0123456789ab-pid-123.json")
+
+
+@pytest.mark.parametrize("result, terminated", [
+    (42, False), (ProcessLookupError(), True), (PermissionError(), False),
+    (OSError(), False), (OverflowError(), False),
+])
+def test_claim_owner_probe_is_read_only(monkeypatch, tmp_path, result, terminated):
+    m = _boundary(monkeypatch, tmp_path, "WGLink_owner_read_only", coordination=False).module
+    import types
+
+    queried = []
+    def getpgid(pid):
+        queried.append(pid)
+        if isinstance(result, Exception):
+            raise result
+        return result
+    def signal_process(*_):
+        pytest.fail("claim recovery must not signal another process")
+    monkeypatch.setattr(m.wglink_protocol, "sys", types.SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(m.wglink_protocol, "os", types.SimpleNamespace(
+        name="posix", getpgid=getpgid, kill=signal_process,
+    ))
+    assert m.wglink_protocol.claim_owner_terminated(
+        ".wglink-claim-req-1-0123456789ab-pid-123.json"
+    ) is terminated
+    assert queried == [123]
 
 
 def test_unreadable_claim_is_retained_and_refreshed_before_settlement(monkeypatch, tmp_path):
