@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, TypeVar
+import time
 import uuid
 
 if __package__:
@@ -26,6 +27,9 @@ SEQUENCE_FIELD = "deliverySequence"
 LEGACY_HANDOFF_FILENAME = ".fusion-handoff.json"
 LEGACY_RETURN_REQUEST_FILENAME = ".fusion-return-request.json"
 CLAIM_PREFIX = ".wglink-claim-"
+# Opening a tab is an immediate action, not a mutation to replay after restart.
+# The atomic request file records its publication time even for older publishers.
+OPEN_DOCUMENT_MAX_AGE_SECONDS = 120
 
 
 @dataclass(frozen=True)
@@ -349,18 +353,31 @@ def next_pending_handoff(
     ``document_id=None`` permits an unfiltered inventory of insert/update handoffs.
     The consumer passes its live identity (or an empty string with no document),
     then checks again at execution. Cloud opens name one Fusion session and are
-    filtered by ``session_id`` before claiming.
+    filtered by ``session_id`` before claiming. Expired opens may be claimed
+    by any session for refusal only, so a restart cannot strand them forever.
     """
 
     for path in _requests_in_order(Path(ipc_folder) / HANDOFFS_DIRECTORY):
         handoff = read_pending_handoff(path, bundle_root=bundle_root)
         if isinstance(handoff, PendingOpenDocument):
-            if handoff.session_id != session_id:
+            if handoff.session_id != session_id and not open_document_expired(handoff):
                 continue
             return handoff
         if handoff is not None and _matches_document(handoff, document_id):
             return handoff
     return None
+
+
+def open_document_expired(request: PendingOpenDocument) -> bool:
+    """Use the publication mtime, preserved by the existing claiming rename.
+
+    A failed stat proves no expiry. Call again after claiming and immediately
+    before opening; an expired request can only produce a terminal refusal.
+    """
+    try:
+        return time.time() - request.marker_path.stat().st_mtime > OPEN_DOCUMENT_MAX_AGE_SECONDS
+    except OSError:
+        return False
 
 
 def _matches_document(handoff: PendingHandoff, document_id: str | None) -> bool:

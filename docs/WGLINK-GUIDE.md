@@ -281,6 +281,9 @@ occurrence placed at the assembly origin.
   settles it against the open document without running it again. Open the
   document it was for. If it reports **Update interrupted — recovery
   required**, undo the partial change and send it from WG again.
+- **Open in Fusion expired before the document opened.** An open request
+  expires after two minutes, including when Fusion restarts before pickup.
+  Choose **Open in Fusion** in WG again.
 - **The add-in cannot find the component that holds the WG waveguide.** It
   will not guess where the waveguide sits. If you deleted or replaced that
   component, undo it and send again. If it is still there, do not insert a

@@ -4652,6 +4652,13 @@ def _consume_pending_handoff(snapshot: dict[str, object] | None = None) -> str:
     retire_claim = True
     try:
         if isinstance(handoff, wglink_handoff.PendingOpenDocument):
+            if (handoff.session_id != _watch_session_id
+                    and not wglink_handoff.open_document_expired(handoff)):
+                # A publisher may have refreshed the file after selection.
+                # A fresh command still belongs exclusively to its session.
+                retire_claim = False
+                wglink_handoff.release_claim(handoff)
+                return IDLE
             _handoff_attempted_id = attempt_key
             _execute_open_document(handoff)
             return HANDLED
@@ -4727,6 +4734,9 @@ def _execute_open_document(request: wglink_handoff.PendingOpenDocument) -> None:
     outcome, message = "refused", ""
     try:
         _require_compatible_wg()
+        if wglink_handoff.open_document_expired(request):
+            message = "This open request expired before Fusion could open it. Choose Open in Fusion in WG again."
+            return
         if request.session_id != _watch_session_id:
             message = "Fusion restarted before this open request arrived. Choose Open in Fusion in WG again."
             return

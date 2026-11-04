@@ -1,9 +1,11 @@
 """Cloud opening uses the real handoff dispatch, with main-thread Fusion fakes."""
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 import sys
 import types
+import time
 
 import pytest
 
@@ -165,6 +167,83 @@ def test_other_consumer_leaves_open_request_for_its_intended_session(monkeypatch
     finally:
         intended.module.stop(None)
         other.module.stop(None)
+
+
+@pytest.mark.parametrize('same_session', [False, True])
+def test_queued_open_expires_through_real_selection_without_opening(monkeypatch, tmp_path, same_session):
+    f, ipc, _, _ = _running(monkeypatch, tmp_path, 'WGLink_open_expired_queue')
+    m = f.module
+    opened = []
+    try:
+        folder = ipc / wglink_handoff.HANDOFFS_DIRECTORY
+        folder.mkdir(exist_ok=True)
+        path = folder / 'open-1.json'
+        path.write_text(json.dumps(frame(sessionId=m._watch_session_id if same_session else 'previous-session')))
+        # The publisher records time in the atomic request file's mtime. This
+        # queued frame predates this session; no selection or execution is mocked.
+        published_at = time.time()
+        clock = {'now': published_at}
+        monkeypatch.setattr(m.wglink_handoff, 'time', types.SimpleNamespace(time=lambda: clock['now']))
+        os.utime(path, (published_at, published_at))
+        f.app.documents = Documents(f.app, opened, already_open=True)
+        if not same_session:
+            original = path.read_bytes()
+            for _ in range(3):
+                _poll(m)
+                _deliver_every_event(f.app)
+            assert path.read_bytes() == original and not opened
+            assert m._recent_outcomes == []
+        # Time alone changes eligibility: the queued file stays unchanged.
+        clock['now'] += 121
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert not list(folder.iterdir())
+        receipt = next(item for item in m._recent_outcomes if item['requestId'] == 'open-1')
+        assert receipt['outcome'] == 'refused'
+        assert 'expired' in receipt['message'].lower()
+        assert 'Open in Fusion' in receipt['message']
+        assert opened == []
+    finally:
+        m.stop(None)
+
+
+def test_open_expiry_is_rechecked_after_claim_without_taking_a_fresh_foreign_request(monkeypatch, tmp_path):
+    f, ipc, _, _ = _running(monkeypatch, tmp_path, 'WGLink_open_expiry_race')
+    m = f.module
+    try:
+        folder = ipc / wglink_handoff.HANDOFFS_DIRECTORY
+        folder.mkdir(exist_ok=True)
+        path = folder / 'open-1.json'
+        path.write_text(json.dumps(frame(sessionId='another-live-session')))
+        original = path.read_bytes()
+        now = time.time()
+        os.utime(path, (now - 121, now - 121))
+        claim = m.wglink_handoff.claim_request
+        def refresh_then_claim(pending):
+            os.utime(path, (now, now))
+            return claim(pending)
+        monkeypatch.setattr(m.wglink_handoff, 'claim_request', refresh_then_claim)
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert path.read_bytes() == original
+        assert list(folder.iterdir()) == [path]
+        assert m._recent_outcomes == []
+        assert m._handoff_attempted_id is None
+    finally:
+        m.stop(None)
+
+
+def test_failed_expiry_stat_preserves_a_foreign_open(monkeypatch, tmp_path):
+    path = tmp_path / 'open-1.json'
+    path.write_text(json.dumps(frame()))
+    pending = wglink_handoff.read_pending_handoff(path, bundle_root=tmp_path)
+    stat = Path.stat
+    def denied(candidate, **kwargs):
+        if candidate == path:
+            raise PermissionError('not inspectable')
+        return stat(candidate, **kwargs)
+    monkeypatch.setattr(Path, 'stat', denied)
+    assert not wglink_handoff.open_document_expired(pending)
 
 
 @pytest.mark.parametrize("mode", ["open", "activate", "missing", "offline", "fault", "session", "old_wg"])
