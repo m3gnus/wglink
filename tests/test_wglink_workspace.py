@@ -63,6 +63,43 @@ def test_the_data_dir_override_wins(tmp_path: Path) -> None:
     ) == override
 
 
+def test_installed_routing_survives_a_reboot_before_wg_starts(monkeypatch, tmp_path):
+    addin = tmp_path / 'AddIns' / 'WGLink'
+    addin.mkdir(parents=True)
+    data = tmp_path / 'development-data'
+    workspace = tmp_path / 'exchange'
+    workspace.mkdir()
+    _wg_data_dir(tmp_path, None)  # An installed app's unrelated data folder.
+    data.mkdir()
+    (data / ws.SETTINGS_NAME).write_text(json.dumps({ws.SETTINGS_KEY: str(workspace)}))
+    (addin / 'wglink_runtime.json').write_text(json.dumps({
+        'schema': 1, 'root': str(tmp_path / 'runtime'), 'python': '/unused/python',
+        'dataDir': str(data),
+    }))
+    monkeypatch.setattr(ws, '__file__', str(addin / 'wglink_workspace.py'))
+    monkeypatch.delenv(ws.DATA_DIR_ENV, raising=False)
+    # No backend or launchctl environment exists yet. Fusion must still use
+    # the folder recorded by the installer for workspace, IPC and admission.
+    assert ws.data_dir() == data
+    assert ws.workspace_root() == workspace
+    assert ws.ipc_folder(create=True) == data / ws.IPC_SUBDIRECTORY
+    assert ws.launcher_data_dir() == data
+    monkeypatch.setenv(ws.DATA_DIR_ENV, str(tmp_path / 'explicit'))
+    assert ws.data_dir() == tmp_path / 'explicit'
+
+
+@pytest.mark.parametrize('payload', [{}, {'schema': 2, 'dataDir': '/bad'},
+                                     {'schema': 1, 'dataDir': 'relative'},
+                                     {'schema': 1, 'dataDir': 7}])
+def test_invalid_installed_routing_keeps_the_platform_default(monkeypatch, tmp_path, payload):
+    addin = tmp_path / 'WGLink'
+    addin.mkdir()
+    (addin / 'wglink_runtime.json').write_text(json.dumps(payload))
+    monkeypatch.setattr(ws, '__file__', str(addin / 'wglink_workspace.py'))
+    assert ws.data_dir(system='Darwin', environ={}, home=tmp_path) == (
+        tmp_path / 'Library' / 'Application Support' / ws.APP_DIRECTORY)
+
+
 def test_windows_without_appdata_is_unknown_not_a_crash(tmp_path: Path) -> None:
     assert ws.data_dir(system="Windows", environ={}, home=tmp_path) is None
 

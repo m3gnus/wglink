@@ -42,6 +42,7 @@ BUNDLE_SUBDIRECTORY = "wglink"
 BUNDLE_SUFFIX = ".wglink"
 RETURN_SUBDIRECTORY = "wgreturn"
 IPC_SUBDIRECTORY = Path("ipc") / "wglink"
+RUNTIME_FILE = "wglink_runtime.json"
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,38 @@ def data_dir(
     if configured:
         return Path(configured).expanduser().absolute()
 
+    installed = _installed_data_dir()
+    if installed is not None:
+        return installed
+    return _default_data_dir(system=system, environ=env, home=home)
+
+
+def _installed_data_dir() -> Path | None:
+    """The installer's persisted routing, independent of Fusion's launch order.
+
+    Additive to its existing runtime marker; old installs use platform defaults.
+    Read the installer's routing without inheriting a shell environment or
+    copying settings into another application folder.
+    """
+    marker = Path(__file__).parent / RUNTIME_FILE
+    try:
+        if marker.is_symlink() or marker.stat().st_size > 65536:
+            return None
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        value = payload.get("dataDir") if isinstance(payload, Mapping) else None
+        if (type(payload.get("schema")) is not int or payload["schema"] != 1
+                or not isinstance(value, str) or not value or "\x00" in value):
+            return None
+        folder = Path(value)
+        return folder if folder.is_absolute() else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _default_data_dir(*, system: str | None, environ: Mapping[str, str],
+                      home: str | os.PathLike[str] | None) -> Path | None:
+    env = environ
+
     os_name = platform.system() if system is None else system
     home_dir = Path.home() if home is None else Path(home)
     if os_name == "Darwin":
@@ -85,12 +118,12 @@ def data_dir(
 
 
 def launcher_data_dir() -> Path | None:
-    """Only a configured non-default data folder is a launcher override."""
+    """A configured non-default folder, including installed routing, for admission."""
 
-    if not os.environ.get(DATA_DIR_ENV):
+    if not os.environ.get(DATA_DIR_ENV) and _installed_data_dir() is None:
         return None
     configured = data_dir()
-    default = data_dir(environ={key: value for key, value in os.environ.items() if key != DATA_DIR_ENV})
+    default = _default_data_dir(system=None, environ=os.environ, home=None)
     if configured is not None and default is not None and configured.resolve() == default.resolve():
         return None
     return configured

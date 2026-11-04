@@ -597,9 +597,13 @@ no valid capabilities launcher is available. Start a moved bundle manually once
 to refresh its advertisement. An invalid advertised launcher still reports its
 validation error if the install marker cannot provide a valid fallback.
 
-With `WG2_DATA_DIR`, Fusion must inherit the same override; a per-launch WG
-`--data-dir` choice is not discoverable by Fusion. A fresh override installation
-still needs a root chosen in WG before the resumed Send can export; otherwise
+The installer records WG's data folder as additive `dataDir` metadata in
+`wglink_runtime.json`. WGLink uses it for settings, IPC and backend admission
+even when Fusion starts first after a reboot. An explicit `WG2_DATA_DIR` in
+Fusion still takes precedence. Older runtime markers without `dataDir` keep
+the platform default; reinstall from the intended WG data folder once to
+record its routing. Developer sync preserves this installer-owned marker.
+A fresh override installation still needs a root chosen in WG before the resumed Send can export; otherwise
 the existing no-workspace message appears. `folders.json` changes the run and CAD
 exchange folders, not IPC discovery in the application data folder.
 
@@ -692,7 +696,17 @@ change it. A missing or invalid value leaves coordination off; only a JSON
 
 The heartbeat’s `diagnostics.activation` states the setting and additive
 `wgRequestPickup: 1` capability. `recentOutcomes` retains each handoff’s correlated
-claim or result, including a refusal’s reason. WG records the result durably.
+claim or result, including a refusal’s reason. It holds the newest 16 distinct
+channel/request pairs in this registration for up to 30 minutes, replacing a
+claim with its result. Explicit work and status publication prune by private
+monotonic elapsed time; receipt fields stay unchanged and there is no extra timer.
+If deleting a published legacy claim fails, retries retain its original outcome
+and age for cleanup; an expired receipt is never admitted again by that claim.
+Stop/start clears the in-memory ring and shutdown
+removes this session's heartbeat. A last on-disk heartbeat is a snapshot until
+replaced or removed, so WG can still settle its exact terminal receipts after
+the 20-second live-observation window. WG's ledger owns durable settled history;
+this ring is bounded delivery evidence, not a durable queue or a replay source.
 The heartbeat’s
 `diagnostics.activity` carries the execution counters: every link resolution,
 geometry measurement, source inventory, document signature, status

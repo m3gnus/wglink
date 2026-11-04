@@ -111,11 +111,10 @@ def _sequence(payload: Any) -> int | None:
 
 
 def _request_identity(payload: Any) -> tuple[str, int] | None:
-    """``(request_id, sequence)`` of a request file WG wrote, or None.
+    """Delegate identity validation to ``wglink_protocol.fusion_request_identity``.
 
-    WG writes schema version 3, the request id as the operation id, and a
-    positive sequence. A file without all of them is not one of this delivery
-    version's requests, and is left where it is.
+    The protocol owns the delivery version and correlation rules for every
+    request kind. An unrecognised identity is left on disk.
     """
 
     return wglink_protocol.fusion_request_identity(payload)
@@ -156,9 +155,12 @@ def read_pending_handoff(
 ) -> PendingHandoff | PendingOpenDocument | None:
     """Read one handoff without trusting an arbitrary bundle path."""
 
-    return handoff_from_document(
-        _read_json(marker_path), bundle_root=bundle_root, marker_path=marker_path
-    )
+    try:
+        return handoff_from_document(
+            _read_json(marker_path), bundle_root=bundle_root, marker_path=marker_path
+        )
+    except OSError:
+        return None  # No selection this pass; a later pass retries the same file.
 
 
 def handoff_from_document(
@@ -182,11 +184,10 @@ def handoff_from_document(
     bundle_value = payload.get("bundlePath")
     if not all(isinstance(value, str) and value for value in (bundle_id, export_id, bundle_value)):
         return None
-    try:
-        allowed_bundle_root = (bundle_root or marker_path.parent).resolve()
-        bundle_path = Path(str(bundle_value)).expanduser().absolute()
-    except OSError:
-        return None
+    # I/O failure is not proof of an invalid request. Let the inventory's
+    # OSError boundary retry it, rather than claim and retire it as unusable.
+    allowed_bundle_root = (bundle_root or marker_path.parent).resolve()
+    bundle_path = Path(str(bundle_value)).expanduser().absolute()
     if bundle_path.parent.resolve() != allowed_bundle_root:
         return None
     # Keep the explicit basename (including a missing path) for core to refuse

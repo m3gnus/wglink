@@ -18,6 +18,18 @@ import wglink_handoff  # noqa: E402
 import wglink_status  # noqa: E402
 
 
+def test_request_identity_documents_and_uses_the_protocol_owner(monkeypatch):
+    assert 'fusion_request_identity' in wglink_handoff._request_identity.__doc__
+    payload = object()
+    seen = []
+    def identity(value):
+        seen.append(value)
+        return ('request', 42)
+    monkeypatch.setattr(wglink_handoff.wglink_protocol, 'fusion_request_identity', identity)
+    assert wglink_handoff._request_identity(payload) == ('request', 42)
+    assert seen == [payload]
+
+
 def _bundle(root: Path, name: str, export_id: str, sequence: int = 1) -> Path:
     bundle = root / f"{name}.wglink"
     bundle.mkdir(parents=True, exist_ok=True)

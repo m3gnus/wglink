@@ -125,6 +125,67 @@ def test_repeated_start_does_not_report_legacy_claim_twice(monkeypatch, tmp_path
     assert not claim.exists()
 
 
+@pytest.mark.parametrize("prune_first", [False, True])
+@pytest.mark.parametrize("kind,outcome", [
+    ("update_link", "reconciled"),
+    ("update_link", "recoveryRequired"),
+    ("update_link", "refused"),
+    ("request_return", "failed"),
+])
+def test_held_legacy_claim_does_not_renew_an_expired_receipt(
+    monkeypatch, tmp_path, prune_first, kind, outcome,
+):
+    module, ipc, snapshot = _fixture(monkeypatch, tmp_path)
+    record = {"outcome": outcome}
+    if outcome == "reconciled":
+        record["evidence"] = {"operationId": "req-1", "exportId": "wge_5"}
+    claim = _claim(ipc, kind=kind, state="outcome", outcome=record)
+    original_claim = claim.read_bytes()
+    now = 0.0
+    monkeypatch.setattr(module.time, "monotonic", lambda: now)
+    unlink = Path.unlink
+    deletions = []
+    def held(path, *args, **kwargs):
+        if path == claim:
+            deletions.append(now)
+            raise PermissionError("held claim")
+        return unlink(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", held)
+
+    module._settle_claims(snapshot)
+    receipt = {"channel": "returnRequest" if kind == "request_return" else "handoff",
+               "requestId": "req-1", "outcome": outcome}
+    assert module._recent_outcomes == [receipt]
+    trace = dict(module._request_trace)
+    lifetime = module._RECENT_OUTCOMES_LIFETIME_SECONDS
+    # Retry through settlement, both with and without an intervening status
+    # publication removing the old receipt from the on-disk snapshot.
+    for now in (45.0, float(lifetime), 1860.0, 3600.0, 3720.0):
+        if prune_first:
+            assert module._publish_fusion_status(snapshot)
+        module._settle_claims(snapshot)
+        assert module._publish_fusion_status(snapshot)
+        status = json.loads((ipc / ".fusion-status.json").read_text())
+        expected = [receipt] if now < lifetime else []
+        assert module._recent_outcomes == expected
+        assert status["diagnostics"].get("recentOutcomes", []) == expected
+        assert claim.read_bytes() == original_claim and module._legacy_claims_pending
+        if now >= lifetime:
+            assert module._published_legacy_claims == {(receipt["channel"], "req-1"): (outcome, 0.0)}
+    assert deletions == [0.0, 45.0, float(lifetime), 1860.0, 3600.0, 3720.0]
+
+    # Once deletion recovers, the expired claim is retired without a new
+    # publication or an attempt to classify it against changed model evidence.
+    def no_reclassification(*args):
+        pytest.fail("A published claim must not be classified again.")
+    monkeypatch.setattr(module, "_legacy_claim_outcome", no_reclassification)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    module._settle_claims(snapshot)
+    assert not claim.exists() and not module._legacy_claims_pending
+    assert not module._recent_outcomes and module._request_trace == trace
+    assert not module._published_legacy_claims
+
+
 def test_no_legacy_journal_does_nothing(monkeypatch, tmp_path):
     module, ipc, _snapshot = _fixture(monkeypatch, tmp_path)
     module._start_without_coordination()

@@ -395,6 +395,128 @@ def test_transient_claim_failure_is_retried_without_changing_the_file(monkeypatc
         m.stop(None)
 
 
+@pytest.mark.parametrize('failed_resolution', ['root', 'parent'])
+def test_transient_path_resolution_never_retires_a_valid_request(monkeypatch, tmp_path, failed_resolution):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_resolve_' + failed_resolution)
+    m = f.module
+    try:
+        writes, _ = _submit(monkeypatch, f, ipc, bundles)
+        request = ipc / '.fusion-handoffs/req-1.json'
+        original = request.read_bytes()
+        resolve = Path.resolve
+        # The default fixture has one bundle root; distinguish the two calls
+        # by using a different spelling for the configured root.
+        root = bundles / '..' / bundles.name
+        monkeypatch.setattr(m.wglink_workspace, 'bundle_folder', lambda: root)
+        target = root if failed_resolution == 'root' else bundles
+        with monkeypatch.context() as blocked:
+            def temporarily_unavailable(path, *args, **kwargs):
+                if path == target:
+                    raise OSError('temporarily unavailable')
+                return resolve(path, *args, **kwargs)
+            blocked.setattr(Path, 'resolve', temporarily_unavailable)
+            _poll(m)
+            _deliver_every_event(f.app)
+        assert not writes and not m._recent_outcomes
+        assert m._wg_request_memo is None
+        assert request.read_bytes() == original
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert len(writes) == 1 and not request.exists()
+        assert m._recent_outcomes[-1]['outcome'] == 'applied'
+    finally:
+        m.stop(None)
+
+
+@pytest.mark.parametrize('signature', ['sha256:measured', ''])
+def test_coordinated_handoff_publishes_measured_post_mutation_status(monkeypatch, tmp_path, signature):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_tick_measured', real_geometry=True)
+    m = f.module
+    try:
+        document_links = m._document_links
+        _submit(monkeypatch, f, ipc, bundles)
+        def insert(app, path, options):
+            options['precondition']()
+            app.activeProduct, _ = _linked_document(m, instance_id='wgi-new')
+            monkeypatch.setattr(m, '_document_links', document_links)
+        monkeypatch.setattr(m.wglink_core, 'insert', insert)
+        monkeypatch.setattr(m.wglink_send, 'return_state', lambda *_: {'hash': signature})
+        monkeypatch.setattr(m, '_coordinating', lambda: True)
+        m._geometry_refresh_pending = None  # Isolate this command from startup's document-seen refresh.
+        with m.wglink_activity.because(m.wglink_activity.CAUSE_TICK):
+            m._on_watch_tick()
+        report = json.loads((ipc / '.fusion-status.json').read_text())
+        assert report['diagnostics']['recentOutcomes'][-1]['outcome'] == 'applied'
+        [link] = report['document']['links']
+        assert (link['documentSignatureHash'] or '') == signature
+        assert link['localBodyState'] != 'unknown'
+        assert report['diagnostics']['lastTickMs']['geometry_refresh_pending'] is False
+        assert m._geometry_refresh_pending is None
+        assert m.wglink_activity.LOG.counts()['geometry_measurement'] == {'command:wg-send': 1}
+        # Idle ticks must not repeat the command's measurement.
+        with m.wglink_activity.because(m.wglink_activity.CAUSE_TICK):
+            m._on_watch_tick()
+        assert m.wglink_activity.LOG.counts()['geometry_measurement'] == {'command:wg-send': 1}
+    finally:
+        m.stop(None)
+
+
+def test_recent_outcomes_have_a_bounded_lifetime_without_losing_delayed_receipts(monkeypatch, tmp_path):
+    f, ipc, _, _ = _running(monkeypatch, tmp_path, 'WGLink_outcome_lifetime')
+    m = f.module
+    now = m.time.monotonic()
+    monkeypatch.setattr(m.time, 'monotonic', lambda: now)
+    try:
+        m._note_outcome('handoff', 'old', 'refused', message='Open the model and send again.')
+        receipt = {'channel': 'handoff', 'requestId': 'old', 'outcome': 'refused',
+                   'message': 'Open the model and send again.'}
+        assert m._recent_outcomes == [receipt]
+        now += 45
+        m._note_outcome('handoff', 'old', 'refused', message='Open the model and send again.')
+        m._publish_fusion_status()
+        report = json.loads((ipc / '.fusion-status.json').read_text())
+        assert report['diagnostics']['recentOutcomes'] == [receipt]
+        now += 30 * 60 - 45
+        m._publish_fusion_status()
+        assert not m._recent_outcomes, 'An identical receipt must not extend its lifetime.'
+        m._note_outcome('handoff', 'new', 'claimed')
+        now += 1
+        m._note_outcome('handoff', 'new', 'applied', exportId='wge_1')
+        m._publish_fusion_status()
+        report = json.loads((ipc / '.fusion-status.json').read_text())
+        assert [item['requestId'] for item in report['diagnostics']['recentOutcomes']] == ['new']
+        assert m._recent_outcomes[-1]['outcome'] == 'applied'
+        for index in range(20):
+            m._note_outcome('handoff', str(index), 'applied')
+        assert [item['requestId'] for item in m._recent_outcomes] == [str(i) for i in range(4, 20)]
+        now += 30 * 60
+        m._publish_fusion_status()
+        assert not m._recent_outcomes
+        assert 'recentOutcomes' not in json.loads((ipc / '.fusion-status.json').read_text())['diagnostics']
+        m._note_outcome('handoff', 'before-stop', 'applied')
+        m.stop(None)
+        m.run(None)
+        assert m._recent_outcomes == []
+    finally:
+        m.stop(None)
+
+
+def test_outcome_retention_never_reads_the_request_expiry_clock(monkeypatch, tmp_path):
+    f, ipc, _, _ = _running(monkeypatch, tmp_path, 'WGLink_outcome_clock')
+    m = f.module
+    try:
+        def request_clock():
+            pytest.fail('Receipt retention must not read the request expiry clock.')
+        monkeypatch.setattr(m, '_utc_now', request_clock)
+        m._note_outcome('handoff', 'req-1', 'discarded')
+        m._publish_fusion_status()
+        report = json.loads((ipc / '.fusion-status.json').read_text())
+        assert report['diagnostics']['recentOutcomes'] == [
+            {'channel': 'handoff', 'requestId': 'req-1', 'outcome': 'discarded'}]
+    finally:
+        m.stop(None)
+
+
 def test_a_request_arriving_during_invalid_file_read_is_not_memoized(monkeypatch, tmp_path):
     f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_memo_race')
     m = f.module
@@ -616,7 +738,7 @@ def test_idle_gate_accepts_any_component(monkeypatch, tmp_path, component):
     ('TSplineEnvironment', 'SolidTab', True, False),
     ('FusionSolidEnvironment', 'BasefeatureSolidTab', True, False),
     ('FusionSolidEnvironment', 'BASEFEATURESolidTab', True, False),
-    ('FusionSolidEnvironment', 'SurfaceTab', True, True),
+    ('FusionSolidEnvironment', 'SurfaceTab', True, False),
     ('FusionSolidEnvironment', 'BasefeatureSolidTab', False, True),
 ])
 def test_idle_gate_checks_workspace_and_active_tabs(monkeypatch, tmp_path, workspace_id, tab_id, active, idle):
@@ -630,6 +752,34 @@ def test_idle_gate_checks_workspace_and_active_tabs(monkeypatch, tmp_path, works
         assert f.module._handoff_idle() is idle
     finally:
         f.module.stop(None)
+
+
+@pytest.mark.parametrize('carrier', ['followup', 'tick'])
+@pytest.mark.parametrize('tab', ['SurfaceTab', 'BasefeatureSurfaceTab', 'TSplineTab', 'UnknownTab'])
+def test_unproven_design_edit_tabs_leave_handoff_unclaimed(monkeypatch, tmp_path, carrier, tab):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_edit_tab_' + carrier + tab)
+    m = f.module
+    try:
+        writes, _ = _submit(monkeypatch, f, ipc, bundles)
+        # Fusion can report a Component even while editing a Base Feature.
+        f.design.activeEditObject = f.design.rootComponent
+        f.ui.activeWorkspace.toolbarTabs = [types.SimpleNamespace(id=tab, isActive=True)]
+        request = ipc / '.fusion-handoffs/req-1.json'
+        before = request.read_bytes()
+        def deliver():
+            if carrier == 'tick':
+                m._on_watch_tick()
+            else:
+                _poll(m)
+                _deliver_every_event(f.app)
+        deliver()
+        assert not writes and request.read_bytes() == before
+        assert m._handoff_attempted_id is None
+        f.ui.activeWorkspace.toolbarTabs = [types.SimpleNamespace(id='SolidTab', isActive=True)]
+        deliver()
+        assert len(writes) == 1 and not request.exists()
+    finally:
+        m.stop(None)
 
 
 @pytest.mark.parametrize('unreadable', ['workspace', 'tabs', 'tab-active', 'tab-id'])

@@ -210,9 +210,20 @@ _claims_swept = False
 _wg_outdated_noticed = False
 # Outcomes the per-request trace would overwrite within one tick -- a request
 # dropped as superseded, a leftover claim settled -- kept for the heartbeat's
-# ``diagnostics.recentOutcomes``, newest last.
+# ``diagnostics.recentOutcomes``, newest last. Registration-local: newest 16
+# receipts for up to 30 minutes (the interrupted-request recovery window).
+# No idle timer or extra publisher: prune at explicit work/status publication.
+# Stop/start clears them; WG's operation ledger owns durable settled history.
 _recent_outcomes: list[dict[str, str]] = []
+# Receipt retention uses elapsed time privately. It must neither consume the
+# request-expiry clock nor add bookkeeping fields to the published receipts.
+_recent_outcome_times: dict[tuple[str, str], float] = {}
+# Successfully published legacy claims whose journal deletion is still owed.
+# Keep their outcome and original age independently of the bounded receipt ring:
+# expiry or eviction must never turn cleanup work into a new terminal receipt.
+_published_legacy_claims: dict[tuple[str, str], tuple[str, float]] = {}
 _RECENT_OUTCOMES_LIMIT = 16
+_RECENT_OUTCOMES_LIFETIME_SECONDS = 30 * 60
 # Interrupted file claims wait until their exact target document is active.
 # They are settled read-only and never replayed.
 _deferred_file_claims: list[object] = []
@@ -270,11 +281,35 @@ _backend_admission = wglink_launcher.BackendAdmission()
 _backend_progress = None
 
 
-def _note_outcome(channel: str, request_id: str, outcome: str, **details: str) -> None:
+def _note_outcome(
+    channel: str, request_id: str, outcome: str, *,
+    _recorded_at: float | None = None, **details: str,
+) -> None:
+    now = time.monotonic()
+    _expire_recent_outcomes(now)
+    recorded_at = now if _recorded_at is None else _recorded_at
+    if recorded_at <= now - _RECENT_OUTCOMES_LIFETIME_SECONDS:
+        return
+    receipt = {"channel": channel, "requestId": request_id, "outcome": outcome, **details}
+    if receipt in _recent_outcomes:
+        return  # Re-publishing identical evidence must not extend its lifetime.
     _recent_outcomes[:] = [item for item in _recent_outcomes
                            if (item["channel"], item["requestId"]) != (channel, request_id)]
-    _recent_outcomes.append({"channel": channel, "requestId": request_id, "outcome": outcome, **details})
-    del _recent_outcomes[:-_RECENT_OUTCOMES_LIMIT]
+    _recent_outcomes.append(receipt)
+    _recent_outcome_times[channel, request_id] = recorded_at
+    if len(_recent_outcomes) > _RECENT_OUTCOMES_LIMIT:
+        evicted = _recent_outcomes.pop(0)
+        del _recent_outcome_times[evicted["channel"], evicted["requestId"]]
+
+
+def _expire_recent_outcomes(now: float | None = None) -> None:
+    cutoff = (time.monotonic() if now is None else now) - _RECENT_OUTCOMES_LIFETIME_SECONDS
+    _recent_outcomes[:] = [item for item in _recent_outcomes
+                           if _recent_outcome_times[item["channel"], item["requestId"]] > cutoff]
+    retained = {(item["channel"], item["requestId"]) for item in _recent_outcomes}
+    for key in list(_recent_outcome_times):
+        if key not in retained:
+            del _recent_outcome_times[key]
 
 
 def _modal(text: str | BaseException, title: str) -> None:
@@ -4224,6 +4259,7 @@ def _publish_fusion_status(snapshot: dict[str, object] | None = None) -> bool:
     folder = wglink_workspace.ipc_folder(create=True)
     if folder is None:
         return False
+    _expire_recent_outcomes()
     try:
         current = snapshot if snapshot is not None else _fusion_snapshot()
     except Exception:  # noqa: BLE001 - status must never interrupt a claimed command
@@ -5085,8 +5121,8 @@ def _settle_legacy_claims(snapshot: dict[str, object]) -> None:
 
     Each bounded batch fits WG's recent-outcome window. A claim is removed
     only after the atomic, fsynced status publication succeeds. A held claim
-    whose exact outcome is already in that file is only removed, not reported
-    again. Unknown mutations need recovery; an interrupted return is failed.
+    whose outcome was published is only removed, even after its receipt expires.
+    Unknown mutations need recovery; an interrupted return is failed.
     """
 
     global _legacy_claims_pending
@@ -5118,20 +5154,29 @@ def _settle_legacy_claims(snapshot: dict[str, object]) -> None:
                 and item.get("outcome") in wglink_legacy_queue.CLAIM_OUTCOMES
                 and not any(existing["channel"] == item["channel"]
                             and existing["requestId"] == item["requestId"] for existing in _recent_outcomes)):
+            held = _published_legacy_claims.get((item["channel"], item["requestId"]))
             _note_outcome(item["channel"], item["requestId"], item["outcome"],
+                          _recorded_at=held[1] if held is not None else None,
                           **{key: value for key, value in item.items()
-                             if key not in {"channel", "requestId", "outcome"}})
+                             if key not in {"channel", "requestId", "outcome", "recordedAt"}})
     ready = []
+    cleanup = []
     refusal = None
     for entry in entries:
         channel = "returnRequest" if entry["kind"] == "request_return" else "handoff"
+        published_claim = _published_legacy_claims.get((channel, entry["operationId"]))
         earlier = next((item for item in reversed(published)
                         if isinstance(item, dict) and item.get("channel") == channel
                         and item.get("requestId") == entry["operationId"]
                         and item.get("outcome") in wglink_legacy_queue.CLAIM_OUTCOMES), None)
         # Once published, a held journal is cleanup work. A later undo or
         # document switch must not change its already reported completion.
-        outcome = earlier["outcome"] if earlier is not None else _legacy_claim_outcome(entry, snapshot)
+        if published_claim is not None:
+            outcome = published_claim[0]
+        elif earlier is not None:
+            outcome = earlier["outcome"]
+        else:
+            outcome = _legacy_claim_outcome(entry, snapshot)
         if outcome == "reconciled":
             request = entry["request"]
             destination = request.get("destination")
@@ -5145,6 +5190,9 @@ def _settle_legacy_claims(snapshot: dict[str, object]) -> None:
                 # acceptable evidence to WG. Keep the journal until it is.
                 continue
         if outcome is None:
+            continue
+        if published_claim is not None:
+            cleanup.append(entry)
             continue
         # WG reads mutation refusals from the single lastRequest slot. Keep
         # further refusals journaled for a later pass rather than overwriting
@@ -5161,8 +5209,18 @@ def _settle_legacy_claims(snapshot: dict[str, object]) -> None:
             _begin_request("handoff", refusal, DELIVERY)["outcome"] = "refused"
         if not _publish_fusion_status(snapshot):
             return
-    for entry in ready:
-        journal.delete(entry["operationId"])
+        for entry in ready:
+            channel = "returnRequest" if entry["kind"] == "request_return" else "handoff"
+            key = (channel, entry["operationId"])
+            receipt = next((item for item in _recent_outcomes
+                            if (item["channel"], item["requestId"]) == key), None)
+            if receipt is not None:
+                _published_legacy_claims[key] = (receipt["outcome"], _recent_outcome_times[key])
+                cleanup.append(entry)
+    for entry in cleanup:
+        if journal.delete(entry["operationId"]):
+            channel = "returnRequest" if entry["kind"] == "request_return" else "handoff"
+            _published_legacy_claims.pop((channel, entry["operationId"]), None)
     _legacy_claims_pending = bool(journal.scan(1))
 
 
@@ -5191,8 +5249,9 @@ def _claims_outstanding() -> bool:
 def _handoff_idle() -> bool:
     """Allow WG work only after startup with SelectCommand active.
 
-    A Design also requires a Component edit container, the Solid workspace,
-    and no active toolbar tab whose id contains "basefeature" (case-insensitive).
+    A Design also requires a Component edit container and the ordinary Solid
+    tab in the Solid workspace. SurfaceTab is also used inside Base Feature
+    edits with a Component edit object, so it cannot prove an idle Design.
     Unknown state defers. Non-Design products have no edit gate; a
     new-document handoff can create a Design there.
     """
@@ -5208,8 +5267,8 @@ def _handoff_idle() -> bool:
         workspace = app.userInterface.activeWorkspace
         if workspace.id != WG_HANDOFF_WORKSPACE_ID:
             return False
-        return not any(tab.isActive and "basefeature" in tab.id.lower()
-                       for tab in workspace.toolbarTabs)
+        active_tabs = [tab.id for tab in workspace.toolbarTabs if tab.isActive]
+        return bool(active_tabs) and all(tab == "SolidTab" for tab in active_tabs)
     except Exception:  # noqa: BLE001 - an unreadable edit state cannot authorize a mutation
         return False
 
@@ -5226,19 +5285,28 @@ def _on_watch_tick() -> None:
     # which is why periodic activity alone inspects no geometry.
     _service_geometry_refresh()
     snapshot = _fusion_snapshot()
+    command_published = False
     try:
         _settle_claims(snapshot)
         _notice_outdated_wg()
         # Only a channel that did work claims the tick. A suppressed refusal
         # must not starve the other file channel.
-        if _handoff_idle() and _apply_pending_handoff(snapshot) == HANDLED:
-            snapshot = None
-            return
+        if _handoff_idle():
+            with wglink_activity.because(wglink_activity.command_cause("wg-send")):
+                if _apply_pending_handoff(snapshot) == HANDLED:
+                    # The tick carries an explicit WG command. Pay for its
+                    # measured post-mutation display through the same owner
+                    # as command-mode delivery, including receipt fallback.
+                    command_published = True
+                    _request_geometry_refresh("command", _active_document_id())
+                    _after_command()
+                    return
         if _apply_pending_return_request(snapshot) == HANDLED:
             snapshot = None
             return
     finally:
-        _publish_fusion_status(snapshot)
+        if not command_published:
+            _publish_fusion_status(snapshot)
 
 
 class WatchEventHandler(adsk.core.CustomEventHandler):
@@ -5528,6 +5596,8 @@ def _start_watch(app: object) -> bool:
     _legacy_claims_pending = True
     _wg_outdated_noticed = False
     _recent_outcomes.clear()
+    _recent_outcome_times.clear()
+    _published_legacy_claims.clear()
     _deferred_file_claims.clear()
     _followups.clear()
     _followups_once.clear()
@@ -5666,6 +5736,8 @@ def _stop_watch(app: object) -> None:
     _claims_swept = False
     _wg_outdated_noticed = False
     _recent_outcomes.clear()
+    _recent_outcome_times.clear()
+    _published_legacy_claims.clear()
 
 
 def _icon_folder(operation: str) -> str:

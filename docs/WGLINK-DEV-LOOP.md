@@ -27,6 +27,13 @@ after restarting Waveguide Generator. With automatic coordination off, status is
 at startup and after commands; there is no periodic tick. `--watch` re-syncs
 on every save.
 
+For a WG development data folder, install from that WG once with
+`WG2_DATA_DIR` set to its data folder before syncing. The installer persists
+the route in `wglink_runtime.json`, which a sync preserves. After upgrading an
+older install, do this once to add its `dataDir` field. Fusion can then start
+before the development launcher after a reboot and still publish into the
+correct IPC folder; it no longer depends on the launcher's `launchctl` state.
+
 ## Do not register the repository as a second add-in
 
 Fusion's registry, not `WGLink.manifest`, decides what loads. Adding the
