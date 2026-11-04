@@ -131,6 +131,54 @@ def test_default_owner_picks_up_claims_and_reports_through_registered_path(monke
         m.stop(None)
 
 
+@pytest.mark.parametrize('document_id', ['', 'fusion:other-document'])
+def test_ineligible_handoff_does_no_command_aftermath_and_resumes_in_destination(
+    monkeypatch, tmp_path, document_id,
+):
+    f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_foreign_document')
+    m = f.module
+    active = {'id': document_id}
+    snapshots, publications, writes = [], [], []
+    snapshot, publish = m._fusion_snapshot, m._publish_fusion_status
+    def inspect():
+        snapshots.append(active['id'])
+        return snapshot()
+    def publish_status(*args, **kwargs):
+        publications.append(active['id'])
+        return publish(*args, **kwargs)
+    try:
+        _per_request_handoff(ipc, bundles, instance_id=None,
+                             destination={'kind': 'document', 'value': 'fusion:doc-a'})
+        path = ipc / '.fusion-handoffs/req-1.json'
+        payload = json.loads(path.read_text())
+        path.write_text(json.dumps({**payload, 'expectedDocumentId': 'fusion:doc-a'}))
+        original = path.read_bytes()
+        monkeypatch.setattr(m, '_active_document_id', lambda: active['id'])
+        monkeypatch.setattr(m, '_fusion_snapshot', inspect)
+        monkeypatch.setattr(m, '_publish_fusion_status', publish_status)
+        monkeypatch.setattr(m, '_document_links', lambda *_: [])
+        def insert(_app, _path, options):
+            options['precondition']()
+            writes.append(active['id'])
+        monkeypatch.setattr(m.wglink_core, 'insert', insert)
+        for _ in range(3):
+            _poll(m)
+            _deliver_every_event(f.app)
+        assert snapshots == publications == writes == []
+        assert path.read_bytes() == original
+        assert m._recent_outcomes == []
+        # The file did not change: becoming active alone must reconsider it.
+        active['id'] = 'fusion:doc-a'
+        _poll(m)
+        _deliver_every_event(f.app)
+        assert writes == ['fusion:doc-a']
+        assert snapshots and publications
+        assert not path.exists()
+        assert m._recent_outcomes[-1]['outcome'] == 'applied'
+    finally:
+        m.stop(None)
+
+
 @pytest.mark.parametrize('block', ['startup', 'command', 'busy', 'owner'])
 def test_deferred_requests_remain_unclaimed_and_resume(monkeypatch, tmp_path, block):
     f, ipc, bundles, _ = _running(monkeypatch, tmp_path, 'WGLink_wg_defer_' + block)

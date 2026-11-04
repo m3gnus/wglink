@@ -204,9 +204,13 @@ def test_completed_live_claim_leaves_no_deferred_entry_or_false_outcome(monkeypa
     m._settle_file_claims(h.leftover_claims(ipc), _snapshot())
     assert len(m._deferred_file_claims) == 1
     assert h.acknowledge_handoff(left)
-    monkeypatch.setattr(m.wglink_protocol, "claim_owner_terminated", lambda _: True)
+    # The owner is this still-running process, even after it retires the file.
+    assert not m.wglink_protocol.claim_owner_terminated(left.marker_path.name)
+    m._claims_swept = True
+    m._legacy_claims_pending = False
     m._settle_file_claims(m._deferred_file_claims, _snapshot())
     assert m._deferred_file_claims == []
+    assert not m._claims_outstanding()
     assert m._recent_outcomes == []
 
 

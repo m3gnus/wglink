@@ -4920,16 +4920,13 @@ def _settle_file_claims(
     deferred: list[object] = []
     evidence = _link_evidence(snapshot)
     for claim in claims:
-        if not wglink_protocol.claim_owner_terminated(claim.path.name):
-            deferred.append(claim)
-            continue
         try:
             refreshed = wglink_handoff.refresh_leftover_claim(claim)
         except FileNotFoundError:
             # The owner may have completed and retired it after our initial
             # inventory. Forget the cached entry without inventing an outcome.
             continue
-        if refreshed is None:
+        if refreshed is None or not wglink_protocol.claim_owner_terminated(claim.path.name):
             deferred.append(claim)
             continue
         claim = refreshed
@@ -5282,6 +5279,8 @@ def _service_wg_handoff() -> str:
         return IDLE
     with wglink_activity.because(wglink_activity.command_cause("wg-send")):
         _command_busy = True
+        result = None
+        outcomes_before = list(_recent_outcomes)
         try:
             result = _apply_pending_handoff(None)
             if result not in (IDLE, SUPPRESSED):
@@ -5295,7 +5294,11 @@ def _service_wg_handoff() -> str:
             return result
         finally:
             try:
-                _after_command()
+                # An ineligible destination is reconsidered on the next poll,
+                # but owes no link inspection or status publication. Refusals
+                # and supersession can record outcomes even when selection is idle.
+                if result not in (IDLE, SUPPRESSED) or _recent_outcomes != outcomes_before:
+                    _after_command()
             finally:
                 _release_command_busy()
 

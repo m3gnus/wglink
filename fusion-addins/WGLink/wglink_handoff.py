@@ -443,7 +443,11 @@ def _claim_from_document(path: Path, channel: str, payload: Any) -> LeftoverClai
 
 
 def refresh_leftover_claim(claim: LeftoverClaim) -> LeftoverClaim | None:
-    """Re-read after owner termination; confirmed absence raises FileNotFoundError."""
+    """Refresh inventory; confirmed absence raises FileNotFoundError.
+
+    Reading is safe while the owner is live, but settlement still requires
+    proof of termination before using any returned evidence.
+    """
     try:
         payload = _read_json(claim.path, raise_io_errors=True)
     except FileNotFoundError:
