@@ -464,7 +464,7 @@ def test_coordinated_handoff_publishes_measured_post_mutation_status(monkeypatch
 def test_recent_outcomes_have_a_bounded_lifetime_without_losing_delayed_receipts(monkeypatch, tmp_path):
     f, ipc, _, _ = _running(monkeypatch, tmp_path, 'WGLink_outcome_lifetime')
     m = f.module
-    now = m.time.monotonic()
+    now = 0.0  # Keep the exact TTL boundary representable; do not inherit a rounded host clock.
     monkeypatch.setattr(m.time, 'monotonic', lambda: now)
     try:
         m._note_outcome('handoff', 'old', 'refused', message='Open the model and send again.')
